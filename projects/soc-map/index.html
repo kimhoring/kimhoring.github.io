@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="ko" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOC-MAP — 김호성 프로젝트</title>
+<meta name="description" content="공사 현장을 실제 GPS 위치로 등록하고, KOSHA 기준 장비 위험 반경을 실제 거리(m)로 계산해 작업자와 장비 운전원의 휴대폰에 서로 경보를 보내는 현장 안전 관제 시스템.">
+<meta name="theme-color" content="#f6efe4">
+<meta property="og:type" content="website">
+<meta property="og:title" content="SOC-MAP — 공사 현장 위험 관제">
+<meta property="og:description" content="KOSHA 기준 장비 위험 반경 × 휴대폰 GPS 상호 경보 × 안전 경로 탐색">
+<meta property="og:image" content="../../assets/img/manager-monitor.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@600;700;900&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="../../assets/css/style.css">
+<script>document.documentElement.classList.remove('no-js');</script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<!-- ═══ 내비게이션 ═══ -->
+<header class="nav" id="nav">
+  <div class="wrap">
+    <a class="brand" href="../../" aria-label="김호성 홈으로"><span class="mono" aria-hidden="true">김</span>김호성</a>
+    <span class="crumb" aria-hidden="true">/</span>
+    <a class="crumb-cur" href="#top">SOC-MAP <small>v13</small></a>
+    <nav class="nav-links" id="navLinks" aria-label="주요 메뉴">
+      <a href="#problem">배경</a>
+      <a href="#features">기능</a>
+      <a href="#try">체험</a>
+      <a href="#screens">화면</a>
+      <a href="#how">작동 원리</a>
+      <a href="#arch">구조</a>
+      <a href="#start">시작하기</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn sm" data-cfg="repo" href="#" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <a class="btn sm primary" href="demo/">라이브 데모</a>
+    </div>
+    <button class="nav-toggle" id="navToggle" aria-label="메뉴 열기" aria-expanded="false" aria-controls="navLinks">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+<!-- ═══ 히어로 ═══ -->
+<section class="hero" id="top">
+  <div class="wrap">
+    <div class="hero-copy">
+      <nav class="breadcrumb" aria-label="현재 위치"><a href="../../">김호성</a><span>›</span><a href="../../#projects">프로젝트</a><span>›</span><b>SOC-MAP</b></nav>
+      <span class="pill"><span class="dot"></span>캡스톤 디자인 · KOSHA 기술지침 기반 현장 안전 관제</span>
+      <h1>공사 현장의 위험 반경을<br><span class="hl">실제 거리</span>로 보고, 서로 알린다</h1>
+      <p class="lead">SOC-MAP은 공사 현장을 <b>실제 GPS 위치</b>에 등록하고, 굴착기·크레인 같은 장비의 위험 반경을 <b>미터 단위</b>로 계산합니다. 작업자와 장비 운전원의 휴대폰이 서로의 위치를 1초마다 공유해, 위험 구역에 <b>다가가면 본인에게, 들어가면 관리자에게</b> 경보가 갑니다.</p>
+      <div class="hero-actions">
+        <a class="btn primary" href="demo/">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3l14 9-14 9V3z"/></svg>
+          브라우저에서 바로 체험
+        </a>
+        <a class="btn" href="#try">위험 반경 시뮬레이터</a>
+        <a class="btn" data-cfg="repo" href="#" target="_blank" rel="noopener">소스 코드 보기</a>
+      </div>
+      <p class="hero-note">라이브 데모는 서버 없이 동작하는 관리자 화면입니다 · 「🧪 샘플 현장」을 눌러 시작하세요</p>
+      <dl class="meta-row">
+        <div><dt>만든 사람</dt><dd>김호성 · 전남대학교 건축공학과</dd></div>
+        <div><dt>유형</dt><dd>캡스톤 디자인</dd></div>
+        <div><dt>분야</dt><dd>건설 안전 · 위치 기반 관제</dd></div>
+        <div><dt>기술</dt><dd>JavaScript · Python FastAPI · YOLOv8</dd></div>
+      </dl>
+    </div>
+
+    <div class="showcase reveal">
+      <div class="browser">
+        <div class="browser-bar"><i></i><i></i><i></i><span>localhost:8000/map — 현장 관제</span></div>
+        <img src="../../assets/img/manager-monitor.jpg" width="1440" height="900" alt="관리자 화면: 위성 지도 위에 장비 위험 반경과 작업자 위치, 왼쪽에 인원 목록과 경보 기록이 표시된다">
+      </div>
+      <div class="float-alert" aria-hidden="true">
+        <span class="ic">🚨</span>
+        <span><b>위험 구역 진입 — 김안전</b><span>굴착기(운행 중) · Red · 관리자에게 전송됨</span></span>
+      </div>
+      <div class="phone"><img src="../../assets/img/field-warning.jpg" width="390" height="844" alt="현장 앱: '위험 구역 접근 — 위험 구역까지 약 6m, 남서쪽으로 가지 마세요' 경고 배너"></div>
+    </div>
+
+    <div class="stats reveal" aria-label="주요 수치">
+      <div class="stat"><b>≤0.1<small>mm</small></b><span>2.8 km 범위 평면 거리와 Vincenty 타원체 거리 차이</span></div>
+      <div class="stat"><b>1<small>Hz</small></b><span>현장 인원·장비 위치 상호 공유 주기</span></div>
+      <div class="stat"><b>4.5→2.5<small>m</small></b><span>칼만 필터로 줄인 GPS 무작위 오차 (시험)</span></div>
+      <div class="stat"><b>5<small>종</small></b><span>KOSHA 기준 장비 위험 모델 (굴착기·크레인 등)</span></div>
+      <div class="stat"><b>25<small>건</small></b><span>법정 경계값·좌표·A* 자동 테스트 통과</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 문제 정의 ═══ -->
+<section class="section" id="problem">
+  <div class="wrap">
+    <div class="problem">
+      <div class="reveal">
+        <span class="eyebrow">배경</span>
+        <h2>장비 사고는 "보이지 않는 반경"에서 일어납니다</h2>
+        <p class="sub">고용노동부 집계로 2019~2021년 건설 장비 사망자는 굴착기 63명, 이동식 크레인 33명입니다. 후진하는 굴착기의 사각지대, 회전하는 크레인 붐 아래처럼 위험 범위는 땅 위에 그려져 있지 않습니다.</p>
+        <div class="problem-list">
+          <div class="problem-item"><span class="n">1</span><span><b>위험 범위가 눈에 보이지 않는다</b><span>작업반경·후방 사각지대·붐 회전 반경은 장비 제원과 방향에 따라 달라지고, 장비가 움직이면 같이 움직입니다.</span></span></div>
+          <div class="problem-item"><span class="n">2</span><span><b>도면과 실제 위치가 따로 논다</b><span>배치도의 px 거리와 현장의 m 거리가 맞지 않으면 "8 m 이내 접근 금지" 같은 기준을 적용할 수 없습니다.</span></span></div>
+          <div class="problem-item"><span class="n">3</span><span><b>경보가 한 방향뿐이다</b><span>작업자는 장비가 오는지 모르고, 운전원은 사각지대에 누가 있는지 모릅니다. 관리자는 사고 뒤에야 압니다.</span></span></div>
+        </div>
+      </div>
+      <div class="compare reveal">
+        <div class="compare-card before">
+          <h4>✕ 기존 방식</h4>
+          <ul>
+            <li>종이 배치도에 위험 구역을 손으로 표시</li>
+            <li>신호수·안전 펜스에 의존, 장비 이동 시 갱신 안 됨</li>
+            <li>근접 경보 장치는 장비 한 대 단위, 현장 전체 현황 없음</li>
+          </ul>
+        </div>
+        <div class="compare-card after">
+          <h4>✓ SOC-MAP</h4>
+          <ul>
+            <li>현장을 위경도에 등록하고 모든 거리를 실제 m로 계산</li>
+            <li>운전원 휴대폰 = 장비 위치 → 위험 반경이 실시간으로 이동</li>
+            <li>작업자 ↔ 운전원 ↔ 관리자 3방향 경보와 기록</li>
+            <li>위험 구역을 피하는 안전 경로를 자동 탐색</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 기능 ═══ -->
+<section class="section" id="features">
+  <div class="wrap">
+    <div class="head-center reveal">
+      <span class="eyebrow">핵심 기능</span>
+      <h2>배치도 한 장에서 현장 관제까지</h2>
+      <p class="sub">관리자 PC의 웹 화면과 현장 인원의 휴대폰 웹 앱, 둘이 하나의 서버 프로젝트로 연결됩니다. 설치할 앱은 없습니다.</p>
+    </div>
+    <div class="features">
+      <article class="feature wide reveal">
+        <div>
+          <div class="ic">⚠️</div>
+          <h3>KOSHA 기준 위험도 엔진</h3>
+          <p>장비별 작업반경, 후방 사각지대, 붐·지브 회전 반경, 아웃트리거를 Red / Orange 구역으로 모델링하고 0~100 위험도로 합산합니다. 풍속·연약지반·고압선 이격거리 같은 현장 조건이 넘으면 장비 영향 반경 전체가 전면 통제됩니다.</p>
+          <div class="meta"><span class="tag">안전보건규칙 제37조 · 제322조</span><span class="tag">KOSHA D-C-4-2025</span><span class="tag">겹치면 최댓값</span></div>
+        </div>
+        <img src="../../assets/img/manager-heatmap.jpg" width="1440" height="900" alt="위험도 히트맵: 장비 주변이 붉게 칠해진 현장 지도" loading="lazy">
+      </article>
+      <article class="feature reveal">
+        <div class="ic">📍</div>
+        <h3>실제 GPS 좌표의 공사 프로젝트</h3>
+        <p>주소 검색이나 좌표로 현장 원점을 정하면 WGS84 국소 접평면(ENU) 좌표계가 생깁니다. 위성 지도와 도면, 장비가 같은 미터 좌표 위에 놓입니다.</p>
+        <div class="meta"><span class="tag">ECEF 변환</span><span class="tag">Vincenty 검증</span></div>
+      </article>
+      <article class="feature reveal">
+        <div class="ic">📡</div>
+        <h3>휴대폰 위치 상호 공유</h3>
+        <p>QR이나 6자리 참여 코드로 합류합니다. 운전원 휴대폰의 위치·방향이 곧 장비의 위치·방향이 되어, 장비가 움직이면 위험 반경도 함께 움직입니다.</p>
+        <div class="meta"><span class="tag">WebSocket 1 Hz</span><span class="tag">작업자 · 운전원</span></div>
+      </article>
+      <article class="feature reveal">
+        <div class="ic">🚨</div>
+        <h3>3방향 단계별 경보</h3>
+        <p>작업자에게는 접근 시 진동·방위 안내, 진입 시 사이렌. 운전원에게는 반경 안 작업자 수. 관리자에게는 진입·SOS·신호 끊김을 소리와 기록으로 알립니다.</p>
+        <div class="meta"><span class="tag">SOS 길게 누르기</span><span class="tag">웹훅 연동</span></div>
+      </article>
+      <article class="feature reveal">
+        <div class="ic">🧭</div>
+        <h3>위험 회피 안전 경로</h3>
+        <p>건물·울타리를 장애물로, 위험도를 비용으로 둔 A* 탐색. 최단 경로와 나란히 그려 거리 증가율과 위험 노출 감소율을 보여줍니다.</p>
+        <div class="meta"><span class="tag">비용 = 거리 × (1 + w·R)</span></div>
+      </article>
+      <article class="feature reveal">
+        <div class="ic">🏢</div>
+        <h3>AI 도면 건물 인식</h3>
+        <p>YOLOv8 세그멘테이션으로 배치도에서 건물 외곽을 찾습니다. 타일 분할·반전 추론으로 큰 도면의 작은 건물도 잡고, 수정한 결과는 학습 데이터로 저장됩니다.</p>
+        <div class="meta"><span class="tag">YOLOv8n-seg</span><span class="tag">평가 · 재학습 스크립트</span></div>
+      </article>
+      <article class="feature reveal">
+        <div class="ic">📐</div>
+        <h3>도면 ↔ 실제 위치 정합</h3>
+        <p>도면 위 기준점과 실제 위치(휴대폰 60초 평균 측량, 좌표, 위성 지도)를 짝지으면 1점은 이동, 2점은 회전·축척, 3점 이상은 최소제곱 아핀 변환으로 맞춥니다.</p>
+        <div class="meta"><span class="tag">점별 오차 · RMS</span></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 체험 ═══ -->
+<section class="section" id="try">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="eyebrow">직접 해보기</span>
+      <h2>작업자를 끌어 위험 반경에 다가가 보세요</h2>
+      <p class="sub">굴착기(작업반경 8 m · 후방 사각지대 5 m/120°), 이동식 크레인(붐 14 m), 개구부(위험물 등급 3)가 있는 60 m × 36 m 현장입니다. 현장 앱과 같은 순서로 진입 → 접근 경고 → 주의 → 안전을 판정합니다.</p>
+    </div>
+    <div class="demo reveal">
+      <div class="demo-stage" id="demoStage">
+        <canvas id="demoCanvas" aria-label="위험 반경 시뮬레이터. 작업자 아이콘을 끌어서 옮길 수 있습니다." role="img"></canvas>
+        <span class="demo-hint" id="demoHint">👷 작업자를 끌어서 옮겨 보세요</span>
+      </div>
+      <div class="demo-side">
+        <div class="level-card" id="levelCard" data-lv="safe" aria-live="polite">
+          <div class="lv"><i></i><span id="lvName">안전</span></div>
+          <p id="lvMsg">주변에 위험 구역이 없습니다.</p>
+        </div>
+        <div class="readouts">
+          <div class="readout"><b id="roDist">–</b><span>위험 구역까지</span></div>
+          <div class="readout"><b id="roRisk">0</b><span>현재 위치 위험도 R</span></div>
+        </div>
+        <div class="control">
+          <label for="sigma">GPS 오차 σ <output id="sigmaOut">3 m</output></label>
+          <input type="range" id="sigma" min="0" max="10" step="0.5" value="3">
+          <small>접근 경고 거리 = 8 m + 오차(최대 8 m). 측위가 나쁠수록 더 일찍 경고합니다.</small>
+        </div>
+        <div class="demo-btns">
+          <button class="btn sm" id="driveBtn" aria-pressed="false">🚜 굴착기 운행</button>
+          <button class="btn sm" id="resetBtn">↺ 처음으로</button>
+        </div>
+      </div>
+    </div>
+    <p class="demo-foot">간이 시뮬레이션입니다. 실제 앱은 장비 5종, 환경 구역, 칼만 필터, 경보 확정(2회 연속) 규칙을 함께 씁니다.</p>
+  </div>
+</section>
+
+<!-- ═══ 화면 ═══ -->
+<section class="section" id="screens">
+  <div class="wrap">
+    <div class="head-center reveal">
+      <span class="eyebrow">화면</span>
+      <h2>관리자 화면과 현장 앱</h2>
+      <p class="sub">아래 화면은 모두 실제 앱에서 가상 현장(160 m × 100 m)과 가상 인원으로 촬영했습니다.</p>
+      <div class="tabs" role="tablist" aria-label="화면 종류">
+        <button role="tab" id="tab-mgr" aria-selected="true" aria-controls="panel-mgr">🖥️ 관리자 화면</button>
+        <button role="tab" id="tab-field" aria-selected="false" aria-controls="panel-field" tabindex="-1">📱 현장 앱</button>
+      </div>
+    </div>
+
+    <div class="shots">
+      <div class="shot-panel" id="panel-mgr" role="tabpanel" aria-labelledby="tab-mgr">
+        <div class="shot-main">
+          <div class="browser">
+            <div class="browser-bar"><i></i><i></i><i></i><span id="shotUrl">localhost:8000/map — 현장 배치</span></div>
+            <img id="shotImg" src="../../assets/img/manager-layout.jpg" width="1440" height="900" alt="현장 배치 화면" data-zoom>
+          </div>
+          <div class="shot-list" id="shotList">
+            <button aria-current="true" data-src="../../assets/img/manager-layout.jpg" data-url="현장 배치"><b>🗺️ 배치</b><span>건물·도로·보행 구역·울타리를 그리고 KOSHA 장비와 위험물을 놓습니다.</span></button>
+            <button data-src="../../assets/img/manager-route.jpg" data-url="안전 경로"><b>🧭 경로</b><span>안전 경로와 최단 경로를 비교하고 최대·평균 위험도를 봅니다.</span></button>
+            <button data-src="../../assets/img/manager-monitor.jpg" data-url="현장 관제"><b>👷 관제</b><span>인원·장비 위치, 접근 경고·위험 진입 수, 경보 기록, 전체 알림.</span></button>
+            <button data-src="../../assets/img/manager-3d.jpg" data-url="3D 뷰어"><b>🧊 3D</b><span>건물 층수와 장비 모형, 지하층을 3D로 확인합니다.</span></button>
+            <button data-src="../../assets/img/manager-plan.jpg" data-url="도면"><b>📐 도면</b><span>배치도 업로드 → AI 건물 인식 → 실제 위치 정합 순서로 진행합니다.</span></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="shot-panel" id="panel-field" role="tabpanel" aria-labelledby="tab-field" hidden>
+        <div class="phones">
+          <figure><div class="phone"><img src="../../assets/img/field-join.jpg" width="390" height="844" alt="현장 앱 합류 화면: 6자리 참여 코드 입력" loading="lazy" data-zoom></div><figcaption><b>합류</b>QR · 참여 코드 3단계</figcaption></figure>
+          <figure><div class="phone"><img src="../../assets/img/field-warning.jpg" width="390" height="844" alt="위험 구역 접근 경고 화면" loading="lazy" data-zoom></div><figcaption><b>접근 경고</b>거리와 피할 방위 안내</figcaption></figure>
+          <figure><div class="phone"><img src="../../assets/img/field-danger.jpg" width="390" height="844" alt="위험 구역 진입 화면: 붉은 배너와 사이렌" loading="lazy" data-zoom></div><figcaption><b>진입</b>사이렌 · 관리자 즉시 전송</figcaption></figure>
+          <figure><div class="phone"><img src="../../assets/img/field-near.jpg" width="390" height="844" alt="주변 탭: 장비별 위험 반경까지 거리와 작업 인원 목록" loading="lazy" data-zoom></div><figcaption><b>주변</b>장비별 반경까지 거리</figcaption></figure>
+          <figure><div class="phone"><img src="../../assets/img/field-alerts.jpg" width="390" height="844" alt="알림 탭: 경보와 관리자 메시지 기록" loading="lazy" data-zoom></div><figcaption><b>알림</b>경보 · 메시지 기록</figcaption></figure>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 작동 원리 ═══ -->
+<section class="section" id="how">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="eyebrow">작동 원리</span>
+      <h2>현장 등록부터 경보까지 네 단계</h2>
+    </div>
+    <div class="flow">
+      <div class="flow-step reveal"><h4>현장 등록</h4><p>관리자가 현장 이름과 위치(주소·좌표·현재 위치)를 정하면 서버 프로젝트, 6자리 참여 코드, 관리자 키가 발급됩니다.</p><div class="who">관리자 PC</div></div>
+      <div class="flow-step reveal"><h4>배치 · 정합</h4><p>배치도를 올리고 AI로 건물을 읽은 뒤, 기준점으로 실제 위치에 맞춥니다. 장비와 위험물, 동선을 m 단위로 배치합니다.</p><div class="who">관리자 PC</div></div>
+      <div class="flow-step reveal"><h4>현장 합류</h4><p>현장 인원이 QR을 찍어 이름과 역할을 고릅니다. 운전원은 운전할 장비를 고르고, 휴대폰을 운전석에 고정합니다.</p><div class="who">작업자 · 운전원 휴대폰</div></div>
+      <div class="flow-step reveal"><h4>상호 경보</h4><p>서버가 1초마다 모든 위치를 나눠 줍니다. 각 휴대폰이 위험도를 계산해 접근·진입을 알리고, 진입은 관리자에게 확정 보고됩니다.</p><div class="who">모두</div></div>
+    </div>
+
+    <div class="cols-2">
+      <div class="panel reveal">
+        <h3>⚖️ 위험도 공식 <span class="tag">장비 1대 · 0~100</span></h3>
+        <p>우선순위가 높은 구역부터 판정하고, 여러 위험원이 겹치면 최댓값을 씁니다.</p>
+        <div class="formula"><span class="c"># 0. 전면 통제 — 풍속 초과 · 침수 · 고압선 이격 미확보</span>
+R = 100            <span class="c">(장비 영향 반경 전체)</span>
+<span class="c"># 1. Red Zone — 작업반경 · 붐/지브 아래</span>
+R = 100
+<span class="c"># 2. Orange Zone — 후방 사각지대 · 아웃트리거</span>
+R = clamp((<span class="k">E_orange</span> + <span class="k">S_penalty</span>) × <span class="k">W_freq</span> − <span class="k">H_mitigation</span>)
+<span class="c"># 3. 영향 반경 안 기타</span>
+R = clamp(<span class="k">S_penalty</span> × <span class="k">W_freq</span> − <span class="k">H_mitigation</span>)</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>항목</th><th>기준</th><th>근거</th></tr></thead>
+            <tbody>
+              <tr><td>타워크레인 운전 중지</td><td>순간풍속 15 m/s 초과 (설치·해체 10 m/s)</td><td>안전보건규칙 제37조②</td></tr>
+              <tr><td>고압선 접근</td><td>도달거리 + 이격 3 m (50 kV 초과 시 10 kV당 +10 cm)</td><td>안전보건규칙 제322조</td></tr>
+              <tr><td>굴착기 후방영상장치</td><td>미설치 시 "법정 의무" 경고</td><td>제221조의2</td></tr>
+              <tr><td>W_freq</td><td>굴착기 1.3 · 이동식크레인 1.1 · 펌프카 0.9 · 항타기 0.8 · 타워크레인 0.7</td><td>사망 통계 기반 설계값</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel reveal">
+        <h3>🔔 경보 단계</h3>
+        <p>작업자 본인에게는 즉시, 관리자에게는 2회 연속 진입 시 확정해 오경보를 줄입니다. 해제는 3회 연속일 때만 합니다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>단계</th><th>조건</th><th>휴대폰</th><th>관리자</th></tr></thead>
+            <tbody>
+              <tr><td><span class="lvdot" style="background:var(--yellow)"></span>주의</td><td>위험도 30~70</td><td>짧은 진동</td><td>목록 표시</td></tr>
+              <tr><td><span class="lvdot" style="background:var(--accent)"></span>접근 경고</td><td>위험 구역까지 8 m + 오차</td><td>진동 · 경고음 · 방위 안내</td><td>경고</td></tr>
+              <tr><td><span class="lvdot" style="background:var(--red)"></span>진입</td><td>위험 구역(R ≥ 70) 안</td><td>사이렌 · 화면 깜박임</td><td>긴급 (소리 · 붉은 테두리)</td></tr>
+              <tr><td><span class="lvdot" style="background:#8e4a6e"></span>SOS</td><td>버튼 1.2초 누름</td><td>—</td><td>긴급</td></tr>
+              <tr><td><span class="lvdot" style="background:var(--dim)"></span>신호 끊김</td><td>30초 이상 보고 없음</td><td>—</td><td>경고 (진입 중이면 긴급)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 style="margin-top:26px">🎯 위치 정확도 처리</h3>
+        <ul class="checks">
+          <li><span><b>칼만 필터</b> — 등속 모델로 GPS 흔들림을 줄이고 보행 속도(1.4 m/s)를 따라갑니다.</span></li>
+          <li><span><b>이상치 제거</b> — 예측에서 약 4σ 벗어난 측위는 버리되, 같은 자리에 반복되면 실제 이동으로 봅니다.</span></li>
+          <li><span><b>오차 반영 경고</b> — 측위 오차만큼 경고 거리를 넓히고, ±60 m보다 나쁜 측위는 판단에서 뺍니다.</span></li>
+          <li><span><b>측량</b> — 60초 가중 평균으로 도면 정합용 기준점을 잽니다.</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 구조 ═══ -->
+<section class="section" id="arch">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="eyebrow">시스템 구조</span>
+      <h2>PC 한 대가 현장 서버가 됩니다</h2>
+      <p class="sub">FastAPI 서버 하나가 정적 화면, REST API, 프로젝트별 WebSocket 중계, AI 추론을 함께 맡습니다. 휴대폰 GPS를 위해 HTTP(8000)와 HTTPS(8443)를 동시에 엽니다.</p>
+    </div>
+    <div class="arch reveal">
+      <div class="arch-scroll">
+        <svg viewBox="0 0 1000 430" role="img" aria-labelledby="archTitle">
+          <title id="archTitle">구조도: 관리자 PC와 현장 휴대폰이 FastAPI 서버의 REST API와 WebSocket 허브로 연결되고, 서버는 프로젝트 저장소와 YOLO 모델을 사용한다</title>
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#9b8573"/></marker>
+            <marker id="ahO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#c4552d"/></marker>
+          </defs>
+          <!-- 클라이언트 -->
+          <g>
+            <rect x="10" y="30" width="250" height="160" rx="14" fill="#fffaf2" stroke="#b7862b" stroke-opacity=".55"/>
+            <text x="30" y="62" fill="#2b1f16" font-size="17" font-weight="700">🖥️ 관리자 화면</text>
+            <text x="30" y="84" fill="#7a6656" font-size="13">SOC_MAP.html · /map</text>
+            <text x="30" y="116" fill="#4d3d31" font-size="13.5">배치 · 경로 · 관제 · 도면 · 현장</text>
+            <text x="30" y="140" fill="#4d3d31" font-size="13.5">Canvas 2D · Three.js 3D</text>
+            <text x="30" y="164" fill="#4d3d31" font-size="13.5">위험도 엔진 · A* (브라우저)</text>
+          </g>
+          <g>
+            <rect x="10" y="240" width="250" height="160" rx="14" fill="#fffaf2" stroke="#c4552d" stroke-opacity=".6"/>
+            <text x="30" y="272" fill="#2b1f16" font-size="17" font-weight="700">📱 현장 앱 (휴대폰)</text>
+            <text x="30" y="294" fill="#7a6656" font-size="13">/field · QR /j/참여코드</text>
+            <text x="30" y="326" fill="#4d3d31" font-size="13.5">👷 작업자 · 🚜 장비 운전원</text>
+            <text x="30" y="350" fill="#4d3d31" font-size="13.5">GPS · 칼만 필터 · 나침반</text>
+            <text x="30" y="374" fill="#4d3d31" font-size="13.5">경보음 · 진동 · SOS</text>
+          </g>
+          <!-- 서버 -->
+          <g>
+            <rect x="360" y="14" width="300" height="402" rx="16" fill="#f3e7d6" stroke="#8a735f" stroke-opacity=".35"/>
+            <text x="382" y="46" fill="#2b1f16" font-size="17" font-weight="700">⚙️ FastAPI 서버</text>
+            <text x="382" y="68" fill="#7a6656" font-size="13">uvicorn · HTTP 8000 + HTTPS 8443</text>
+            <rect x="380" y="86" width="260" height="62" rx="10" fill="#fffaf2" stroke="#b7862b" stroke-opacity=".4"/>
+            <text x="396" y="112" fill="#2b1f16" font-size="14" font-weight="600">REST API</text>
+            <text x="396" y="133" fill="#7a6656" font-size="12.5">프로젝트 · 배치 · 측량점 · 이벤트</text>
+            <rect x="380" y="160" width="260" height="78" rx="10" fill="#fffaf2" stroke="#c4552d" stroke-opacity=".55"/>
+            <text x="396" y="186" fill="#2b1f16" font-size="14" font-weight="600">WebSocket 허브 (프로젝트별)</text>
+            <text x="396" y="207" fill="#7a6656" font-size="12.5">/ws/p/{pid}/client · /manager</text>
+            <text x="396" y="226" fill="#7a6656" font-size="12.5">위치 1 Hz 방송 · 경보 확정 · 감시</text>
+            <rect x="380" y="250" width="260" height="62" rx="10" fill="#fffaf2" stroke="#5f8a3e" stroke-opacity=".45"/>
+            <text x="396" y="276" fill="#2b1f16" font-size="14" font-weight="600">AI 건물 인식</text>
+            <text x="396" y="297" fill="#7a6656" font-size="12.5">YOLOv8-seg · 타일 · TTA · 투표 병합</text>
+            <rect x="380" y="324" width="260" height="76" rx="10" fill="#fffaf2" stroke="#8a735f" stroke-opacity=".3"/>
+            <text x="396" y="350" fill="#2b1f16" font-size="14" font-weight="600">공용 좌표 계산 (geo.py)</text>
+            <text x="396" y="371" fill="#7a6656" font-size="12.5">브라우저 geo.js와 나노미터까지 일치</text>
+            <text x="396" y="389" fill="#7a6656" font-size="12.5">자체 서명 인증서 (certs.py)</text>
+          </g>
+          <!-- 저장소 · 외부 -->
+          <g>
+            <rect x="750" y="40" width="240" height="96" rx="14" fill="#fffaf2" stroke="#8a735f" stroke-opacity=".3"/>
+            <text x="770" y="72" fill="#2b1f16" font-size="15" font-weight="700">🗂️ projects/</text>
+            <text x="770" y="96" fill="#7a6656" font-size="12.5">배치 · 도면 · 측량점 · 경보 기록</text>
+            <text x="770" y="116" fill="#7a6656" font-size="12.5">관리자 키는 sha256 해시만 저장</text>
+            <rect x="750" y="166" width="240" height="96" rx="14" fill="#fffaf2" stroke="#5f8a3e" stroke-opacity=".45"/>
+            <text x="770" y="198" fill="#2b1f16" font-size="15" font-weight="700">🧠 models/best.pt</text>
+            <text x="770" y="222" fill="#7a6656" font-size="12.5">dataset/ → evaluate.py · train.py</text>
+            <text x="770" y="242" fill="#7a6656" font-size="12.5">재학습 후 무중단 교체</text>
+            <rect x="750" y="292" width="240" height="108" rx="14" fill="#fffaf2" stroke="#8a735f" stroke-opacity=".3" stroke-dasharray="5 5"/>
+            <text x="770" y="324" fill="#2b1f16" font-size="15" font-weight="700">🌐 외부 서비스</text>
+            <text x="770" y="348" fill="#7a6656" font-size="12.5">Esri 위성 · OSM 지도 타일</text>
+            <text x="770" y="368" fill="#7a6656" font-size="12.5">Nominatim 주소 검색</text>
+            <text x="770" y="388" fill="#7a6656" font-size="12.5">웹훅 (진입 · SOS 알림, 선택)</text>
+          </g>
+          <!-- 연결선 -->
+          <path d="M260 92 H376" stroke="#a8927f" stroke-width="2" fill="none" marker-end="url(#ah)" marker-start="url(#ah)"/>
+          <path d="M260 150 C318 150 318 196 376 196" stroke="#c4552d" stroke-width="2" fill="none" marker-end="url(#ahO)" marker-start="url(#ahO)"/>
+          <path d="M260 300 C318 300 318 214 376 214" stroke="#c4552d" stroke-width="2" fill="none" marker-end="url(#ahO)" marker-start="url(#ahO)"/>
+          <text x="270" y="84" fill="#7a6656" font-size="12">HTTP</text>
+          <text x="268" y="142" fill="#a2441f" font-size="12">관제 WS</text>
+          <text x="268" y="318" fill="#a2441f" font-size="12">위치 · 경보 WS</text>
+          <path d="M640 117 H746" stroke="#a8927f" stroke-width="2" fill="none" marker-end="url(#ah)"/>
+          <path d="M640 281 C700 281 700 214 746 214" stroke="#a8927f" stroke-width="2" fill="none" marker-end="url(#ah)"/>
+          <path d="M640 226 C700 226 700 346 746 346" stroke="#a8927f" stroke-width="2" fill="none" stroke-dasharray="4 4" marker-end="url(#ah)"/>
+        </svg>
+      </div>
+      <div class="stack">
+        <div class="stack-group"><h4>프런트엔드</h4><div class="tags"><span class="tag">Vanilla JS</span><span class="tag">Canvas 2D</span><span class="tag">Three.js r128</span><span class="tag">qrcodejs</span></div></div>
+        <div class="stack-group"><h4>백엔드</h4><div class="tags"><span class="tag">Python 3.10</span><span class="tag">FastAPI</span><span class="tag">uvicorn</span><span class="tag">WebSocket</span><span class="tag">cryptography</span></div></div>
+        <div class="stack-group"><h4>AI</h4><div class="tags"><span class="tag">Ultralytics YOLOv8-seg</span><span class="tag">OpenCV</span><span class="tag">ONNX</span></div></div>
+        <div class="stack-group"><h4>지리 · 알고리즘</h4><div class="tags"><span class="tag">WGS84 ENU</span><span class="tag">Vincenty</span><span class="tag">칼만 필터</span><span class="tag">A* (이진 힙)</span><span class="tag">아핀 최소제곱</span></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 시작하기 ═══ -->
+<section class="section" id="start">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="eyebrow">시작하기</span>
+      <h2>세 가지 실행 방법</h2>
+      <p class="sub">Windows 기준입니다. Python 3.10 이상이 필요하며, 실행 스크립트가 첫 실행 때 가상환경과 패키지를 설치합니다.</p>
+    </div>
+    <div class="start">
+      <div class="panel reveal">
+        <h3>① 서버 없이 둘러보기</h3>
+        <p>관리자 화면만 브라우저로 엽니다. 배치·경로·3D·측정을 쓸 수 있고, 휴대폰 연동과 AI 인식은 꺼집니다.</p>
+        <div class="code"><pre><span class="c"># 이 홈페이지의 라이브 데모</span>
+demo/index.html
+<span class="c"># 또는 프로젝트 폴더에서</span>
+SOC_MAP.html 더블 클릭</pre><button class="copy" type="button">복사</button></div>
+      </div>
+      <div class="panel reveal">
+        <h3>② 이 PC에서 전체 기능</h3>
+        <p>AI 건물 인식과 서버 프로젝트를 씁니다. 실행하면 관리자 화면이 열립니다.</p>
+        <div class="code"><pre>SOC_MAP_실행.bat
+<span class="c"># 직접 실행</span>
+cd backend
+pip install -r requirements.txt
+python main.py</pre><button class="copy" type="button">복사</button></div>
+      </div>
+      <div class="panel reveal">
+        <h3>③ 현장 운영 (휴대폰 연동)</h3>
+        <p>같은 와이파이의 휴대폰이 HTTPS로 접속합니다. 방화벽 창에서 <b>개인 네트워크 허용</b>을 누르세요.</p>
+        <div class="code"><pre>현장모니터링_실행.bat
+<span class="c"># 직접 실행</span>
+python main.py --host 0.0.0.0 --https</pre><button class="copy" type="button">복사</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 한계 · 로드맵 ═══ -->
+<section class="section" id="roadmap">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="eyebrow">한계와 다음 단계</span>
+      <h2>정직하게 적어 둔 한계</h2>
+      <p class="sub">스마트폰 웹 앱으로 할 수 있는 만큼 했고, 실제 운영에 필요한 부분은 다음 단계로 남겼습니다.</p>
+    </div>
+    <div class="roadmap">
+      <div class="road done reveal"><span class="tag">현재</span><h4>스마트폰 GPS 3~10 m 오차</h4><p>칼만 필터와 오차 반영 경고로 보완합니다. 휴대폰 GPS는 HTTPS에서만 동작하고, 화면이 꺼지면 위치 추적이 멈출 수 있어 "신호 끊김"으로 알립니다.</p></div>
+      <div class="road next reveal"><span class="tag">다음</span><h4>RTK GNSS · 네이티브 앱</h4><p>블루투스 RTK 수신기로 cm급 위치를 받고, Android 포그라운드 서비스로 백그라운드 추적을 지원합니다. 좌표계와 필터 구조는 그대로 씁니다.</p></div>
+      <div class="road later reveal"><span class="tag">이후</span><h4>실제 현장 데이터로 검증</h4><p>다른 현장 도면으로 AI 인식을 평가·재학습하고, 설계값으로 둔 가중치(W_freq, 사각지대 각도)를 현장 자료로 보정합니다.</p></div>
+    </div>
+
+    <div class="cta reveal">
+      <h2>지금 브라우저에서 열어 보세요</h2>
+      <p>「🧪 샘플 현장」을 열면 장비 4대와 건물 4동이 있는 가상 현장이 나타납니다. 장비를 끌어 보고, 안전 경로를 찾아 보세요.</p>
+      <div class="hero-actions">
+        <a class="btn primary" href="demo/">라이브 데모 열기</a>
+        <a class="btn" data-cfg="repo" href="#" target="_blank" rel="noopener">GitHub 저장소</a>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <div>
+      <a class="brand" href="../../"><span class="mono" aria-hidden="true">김</span>김호성</a>
+      <p style="margin-top:14px">SOC-MAP — 공사 현장 위험 관제 · 전남대학교 건축공학과 캡스톤 디자인</p>
+      <p class="disclaimer" style="margin-top:16px">연구·교육용 시제품입니다. 법정 안전 관리(신호수, 방호 장치, 작업계획서)를 대신하지 않습니다. 장비 제원과 가중치 중 일부는 설계 기본값이므로 실제 장비 사양으로 바꿔 쓰세요.</p>
+    </div>
+    <div class="links">
+      <a href="../../">← 김호성 홈</a>
+      <a href="#features">기능</a>
+      <a href="#screens">화면</a>
+      <a href="#start">시작하기</a>
+      <a href="demo/">라이브 데모</a>
+      <a data-cfg="repo" href="#" target="_blank" rel="noopener">GitHub</a>
+      <a href="../../LICENSE">MIT License</a>
+    </div>
+  </div>
+</footer>
+
+<dialog class="lightbox" id="lightbox" aria-label="확대 보기">
+  <button type="button" id="lbClose" aria-label="닫기">×</button>
+  <img id="lbImg" alt="">
+  <p id="lbCap"></p>
+</dialog>
+
+<script src="../../assets/js/config.js"></script>
+<script src="../../assets/js/main.js"></script>
+<script src="../../assets/js/risk-demo.js"></script>
+</body>
+</html>
