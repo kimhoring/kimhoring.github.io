@@ -111,14 +111,20 @@ window.GAME_DATA = {
       reward: '영어 말하기 자신감 +10',
     },
     {
-      id: 'homepage', status: 'progress', category: '프로젝트', title: '개인 홈페이지 「김호성의 마을」',
-      desc: '지금 보고 있는 이 홈페이지예요. 마을 사람, 낮 · 밤 풍경, 퀘스트 창처럼 재미있는 것을 하나씩 더하고 있어요.',
-      link: { label: '소스 보기 (GitHub)', href: 'https://github.com/kimhoring/kimhoring.github.io' },
+      id: 'safety-practical', status: 'progress', category: '자격증', title: '산업안전기사 실기시험 준비',
+      date: '2026-10-25', dateLabel: '시험일',
+      desc: '필기에 합격한 **산업안전기사**의 실기시험을 준비하고 있어요. 시험일은 **10월 25일**이에요.',
+      steps: [{ text: '필기시험 합격', done: true }, { text: '실기시험 (10월 25일)', done: false }],
     },
     {
-      id: 'soc-map', status: 'progress', category: '캡스톤 디자인', title: 'SOC-MAP 공사 현장 위험 관제 시스템',
-      desc: '장비 위험 반경과 휴대폰 GPS 경보를 묶은 현장 안전 관제 시스템. 캡스톤 디자인 프로젝트를 **마무리**하고 있어요.',
-      link: { label: '프로젝트 보기', href: 'projects/soc-map/' },
+      id: 'kcma-contest', status: 'progress', category: '대회', title: '한국건설관리협회 경진대회',
+      date: '2026-11-06', dateLabel: '대회일',
+      desc: '**한국건설관리협회 경진대회**에 나가요. 대회일은 **11월 6일**이에요.',
+    },
+    {
+      id: 'computer-practical', status: 'progress', category: '자격증', title: '컴퓨터활용능력 1급 실기시험 준비',
+      desc: '필기에 합격한 **컴퓨터활용능력 1급**의 실기시험을 준비하고 있어요.',
+      steps: [{ text: '필기시험 합격', done: true }, { text: '실기시험', done: false }],
     },
     // ── 완료 ──
     { id: 'cert-architect', status: 'done', category: '자격증', title: '건축기사 취득', desc: '**건축기사** 자격을 땄어요.' },
