@@ -644,6 +644,15 @@
 
   // ═══════════════════════════ 시작 ═══════════════════════════
   $('#mapName').textContent = DATA.mapName;
+  // 레벨 = 만 나이, 생일에는 축하 알림
+  if (DATA.birth) {
+    const [by, bm, bd] = DATA.birth.split('-').map(Number), now = new Date();
+    const m = now.getMonth() + 1, d = now.getDate();
+    const lv = now.getFullYear() - by - (m < bm || (m === bm && d < bd) ? 1 : 0);
+    $('#lv').textContent = `Lv.${lv}`;
+    $('#lv').title = `만 ${lv}세`;
+    if (m === bm && d === bd) setTimeout(() => toast(`🎂 오늘은 김호성의 생일! 레벨 업! Lv.${lv}`), 800);
+  }
   applyTime(false);
   buildNpcs();
   layout();
