@@ -7,7 +7,16 @@
  *             { label, href }          → 페이지 이동 (http 로 시작하면 새 탭)
  *             { label, action: 'close' } → 대화 끝내기
  *             { label, action: 'talk:아이디' } → 다른 NPC 와 대화
+ *             { label, action: 'quest' }   → 퀘스트 창 열기
  *  우체부(post)의 연락 선택지는 config.js 의 github · email 값으로 자동 생성됩니다.
+ *
+ *  quests: 퀘스트 창(미니맵 아래 📜 · 단축키 Q)에 나오는 지금 하고 있는 일 · 해낸 일
+ *  - status   : 'progress'(진행 중) 또는 'done'(완료)
+ *  - date     : 'YYYY-MM-DD' (있으면 D-day 를 자동 계산), dateLabel: 날짜 이름 (예: '시험일')
+ *  - desc     : 설명. **굵게** 를 쓸 수 있습니다.
+ *  - steps    : (선택) [{ text, done }] 체크리스트
+ *  - reward   : (선택) 보상 한 줄
+ *  - link     : (선택) { label, href }
  * ═══════════════════════════════════════════════════════════════ */
 window.GAME_DATA = {
   mapName: '김호성의 마을',
@@ -28,7 +37,7 @@ window.GAME_DATA = {
       ],
     },
     {
-      id: 'me', kind: 'npc', sprite: 'me', name: '김호성', title: '마을 주인', x: 0.22, host: true,
+      id: 'me', kind: 'npc', sprite: 'me', name: '김호성', title: '마을 주인', x: 0.2, host: true,
       chatter: ['어서 오세요! 저를 눌러 보세요', '전남대 건축공학과 21학번이에요', '공사 현장 안전에 관심이 많아요'],
       pages: [
         '안녕하세요! 저는 **김호성**이에요. 제 홈페이지에 와 주셔서 반가워요.',
@@ -38,11 +47,25 @@ window.GAME_DATA = {
       choices: [
         { label: '자기소개 페이지 보기', href: 'about/' },
         { label: '이력 게시판 보기', action: 'talk:board' },
+        { label: '요즘 하고 있는 일 (퀘스트) 보기', action: 'quest' },
         { label: '마을 둘러보기', action: 'close' },
       ],
     },
     {
-      id: 'safety', kind: 'npc', sprite: 'safety', name: '현장 안전요원', title: 'SOC-MAP 현장', x: 0.46,
+      id: 'hobby', kind: 'npc', sprite: 'hobby', name: '취미 친구', title: '큐브 · 주식', x: 0.335,
+      chatter: ['큐브 최고 기록 48초! 🧩', '주식은... 실현손익은 플러스! 📈', '축구 말고 다른 취미도 있어요'],
+      pages: [
+        '안녕하세요! 저는 김호성의 **취미 친구**예요. 축구 말고 다른 취미를 알려 드릴게요.',
+        '김호성은 **큐브**를 맞출 줄 알아요. 최고 기록은 **48초**, 보통 1분 안쪽(**sub-60**)으로 맞춘대요. 🧩',
+        '**주식 투자**도 해요. 지금 평가손익은 마이너스지만... **실현손익은 아직 플러스**예요! 📈',
+      ],
+      choices: [
+        { label: '취미 · 활동 페이지 보기', href: 'activities/' },
+        { label: '재밌네요!', action: 'close' },
+      ],
+    },
+    {
+      id: 'safety', kind: 'npc', sprite: 'safety', name: '현장 안전요원', title: 'SOC-MAP 현장', x: 0.47,
       chatter: ['여기는 SOC-MAP 현장이에요!', '장비 위험 반경을 m 단위로 계산해요', '위험 구역에 다가가면 휴대폰 경보!', 'AI가 도면에서 건물을 찾아요'],
       pages: [
         '어서 오세요! 여기는 김호성의 캡스톤 디자인 프로젝트, **SOC-MAP** 현장이에요.',
@@ -58,13 +81,11 @@ window.GAME_DATA = {
       ],
     },
     {
-      id: 'soccer', kind: 'npc', sprite: 'soccer', name: '청맥 부원', title: '축구동아리 청맥', x: 0.69,
-      chatter: ['축구 좋아하세요? ⚽', '김호성의 취미는 축구예요', '2025년 청맥 회장이 김호성!', '큐브 최고 기록이 48초래요 🧩'],
+      id: 'soccer', kind: 'npc', sprite: 'soccer', name: '청맥 부원', title: '축구동아리 청맥', x: 0.685,
+      chatter: ['축구 좋아하세요? ⚽', '김호성의 취미는 축구예요', '2025년 청맥 회장이 김호성!'],
       pages: [
         '축구 좋아하세요? 여기는 축구동아리 **청맥**의 운동장이에요!',
         '김호성은 **축구**가 취미예요. **2025년**에는 우리 청맥의 **회장**을 맡았어요.',
-        '축구 말고도 **큐브**를 맞출 줄 알아요. 최고 기록은 **48초**, 보통 1분 안쪽으로 맞춘대요.',
-        '**주식 투자**도 하는데, 지금 평가손익은 마이너스지만 **실현손익은 아직 플러스**래요!',
       ],
       choices: [
         { label: '취미 · 활동 페이지 보기', href: 'activities/' },
@@ -72,12 +93,44 @@ window.GAME_DATA = {
       ],
     },
     {
-      id: 'post', kind: 'npc', sprite: 'post', name: '우체부', title: '연락', x: 0.89, contact: true,
+      id: 'post', kind: 'npc', sprite: 'post', name: '우체부', title: '연락', x: 0.895, contact: true,
       chatter: ['연락하고 싶으신가요? ✉️', '김호성에게 편지를 전해 드려요', '저를 누르면 연락 방법을 알려 드려요'],
       pages: [
         '편지를 보내고 싶으신가요? 김호성에게 연락하는 방법을 알려 드릴게요.',
       ],
       choices: [],
     },
+  ],
+
+  quests: [
+    // ── 진행 중 ──
+    {
+      id: 'toeic-speaking', status: 'progress', category: '시험', title: '토익 스피킹 시험',
+      date: '2026-10-11', dateLabel: '시험일',
+      desc: '영어 말하기 시험 **토익 스피킹**을 봐요. 시험일은 **10월 11일**이에요.',
+      reward: '영어 말하기 자신감 +10',
+    },
+    {
+      id: 'safety-practical', status: 'progress', category: '자격증', title: '산업안전기사 실기시험 준비',
+      date: '2026-10-25', dateLabel: '시험일',
+      desc: '필기에 합격한 **산업안전기사**의 실기시험을 준비하고 있어요. 시험일은 **10월 25일**이에요.',
+      steps: [{ text: '필기시험 합격', done: true }, { text: '실기시험 (10월 25일)', done: false }],
+    },
+    {
+      id: 'kcma-contest', status: 'progress', category: '대회', title: '한국건설관리협회 경진대회',
+      date: '2026-11-06', dateLabel: '대회일',
+      desc: '**한국건설관리협회 경진대회**에 나가요. 대회일은 **11월 6일**이에요.',
+    },
+    {
+      id: 'computer-practical', status: 'progress', category: '자격증', title: '컴퓨터활용능력 1급 실기시험 준비',
+      desc: '필기에 합격한 **컴퓨터활용능력 1급**의 실기시험을 준비하고 있어요.',
+      steps: [{ text: '필기시험 합격', done: true }, { text: '실기시험', done: false }],
+    },
+    // ── 완료 ──
+    { id: 'cert-architect', status: 'done', category: '자격증', title: '건축기사 취득', desc: '**건축기사** 자격을 땄어요.' },
+    { id: 'cert-history', status: 'done', category: '자격증', title: '한국사능력검정시험 1급', desc: '**한국사능력검정시험 1급**을 땄어요.' },
+    { id: 'cert-safety', status: 'done', category: '자격증', title: '산업안전기사 필기 합격', desc: '**산업안전기사** 필기시험에 합격했어요.' },
+    { id: 'cert-computer', status: 'done', category: '자격증', title: '컴퓨터활용능력 1급 필기 합격', desc: '**컴퓨터활용능력 1급** 필기시험에 합격했어요.' },
+    { id: 'club-captain', status: 'done', category: '동아리 · 2025', title: '축구동아리 「청맥」 회장', desc: '2025년 축구동아리 **청맥**의 회장을 맡았어요.', link: { label: '취미 · 활동 보기', href: 'activities/' } },
   ],
 };

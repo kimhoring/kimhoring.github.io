@@ -36,6 +36,13 @@
     '..oqqqqQqqqqqo..',
     '.oQQQQQQQQQQQQo.',
   ];
+  const BEANIE = [
+    '......oooo......',
+    '....oonnnnoo....',
+    '..oonnnnnnnnoo..',
+    '.onnnnnnnnnnnno.',
+    '.oNNNNNNNNNNNNo.',
+  ];
   const FACE = [   // 눈: 2칸 + 반짝이(w), 볼: r
     '.ohhsssssssshho.',
     '.ohssssssssssho.',
@@ -115,6 +122,7 @@
     safety: { top: HELMET, body: BODY_VEST, legs: LEGS, pal: { y: '#f2c230', Y: '#d29a1e', h: '#2a1d16', c: '#ef7d2d', C: '#cf6420', v: '#fbf3df', p: '#5b6070', P: '#474b59' } },
     soccer: { top: HAIR, body: BODY_JERSEY, legs: LEGS_SOCKS, pal: { h: '#1f1a17', c: '#3f7d4e', C: '#2f6440', p: '#f2efe8', P: '#d6d0c4', k: '#3f7d4e' } },
     post: { top: CAP, body: BODY_STRAP, legs: LEGS, pal: { q: '#3b4e73', Q: '#2c3b58', h: '#5a3a26', c: '#3b4e73', C: '#2c3b58', z: '#c49a5c', Z: '#9a6c35', p: '#2c3b58', P: '#1f2a40' } },
+    hobby: { top: BEANIE, body: BODY, legs: LEGS, pal: { n: '#8a6ad6', N: '#6a4fb3', h: '#4a3426', c: '#3aa7a0', C: '#2b8580', p: '#4a4f63', P: '#3a3e4f' } },
     player: { top: HAIR, body: BODY, legs: LEGS, pal: { h: '#8a5a3a', c: '#e9d6b9', C: '#cdb592', p: '#556b8d', P: '#43577a' } },
   };
 
@@ -149,6 +157,7 @@
   const player = { el: $('#player'), img: $('#player img'), x: 0, target: null, talkTo: null, walking: false, frame: 0, frameT: 0 };
   const npcs = DATA.npcs.map(n => ({ ...n }));
   const byId = Object.fromEntries(npcs.map(n => [n.id, n]));
+  const npcsByX = [...npcs].sort((a, b) => a.x - b.x);
   let worldW = 0, camX = 0, scale = 4;
   const keys = { left: false, right: false };
 
@@ -179,7 +188,7 @@
     const vw = stage.clientWidth;
     scale = vw < 640 ? 3 : 4;
     const prevFrac = worldW ? player.x / worldW : null;
-    worldW = Math.max(vw, vw < 640 ? 1300 : 1500);
+    worldW = Math.max(vw, vw < 640 ? 1450 : 1700);
     world.style.width = worldW + 'px';
     npcs.forEach(n => {
       n.px = Math.round(n.x * worldW);
@@ -267,15 +276,19 @@
       let bd = Infinity;
       npcs.forEach(n => { if (n.bubble) { const d = Math.abs(n.px - center); if (d < bd) { bd = d; focus = n; } } });
     }
-    npcs.forEach(n => {
+    // 왼쪽부터 보면서, 앞 말풍선과 겹치는 말풍선은 잠시 숨김
+    let lastRight = -Infinity;
+    npcsByX.forEach(n => {
       if (!n.bubble) return;
       const x = n.px - camX;
-      const mute = x < -20 || x > vw + 20 || (narrow && n !== focus);
+      let mute = x < -20 || x > vw + 20 || (narrow && n !== focus);
+      if (!mute && n.bubble.classList.contains('on')) {
+        const w = n.bubbleW || 0, left = x - w / 2, lim = Math.max(0, w / 2 - 18);
+        const shift = Math.max(-lim, Math.min(lim, Math.min(vw - 8 - w, Math.max(8, left)) - left));
+        if (left + shift < lastRight + 8) mute = true;
+        else { lastRight = left + shift + w; n.bubble.style.setProperty('--shift', shift.toFixed(0) + 'px'); }
+      }
       n.bubble.classList.toggle('mute', mute);
-      if (mute || !n.bubble.classList.contains('on')) return;
-      const w = n.bubbleW || 0, left = x - w / 2, lim = Math.max(0, w / 2 - 18);
-      const shift = Math.max(-lim, Math.min(lim, Math.min(vw - 8 - w, Math.max(8, left)) - left));
-      n.bubble.style.setProperty('--shift', shift.toFixed(0) + 'px');
     });
     // 미니맵
     if (mm.player) mm.player.style.left = (player.x / worldW * 100).toFixed(2) + '%';
@@ -335,6 +348,7 @@
   function openDialog(id) {
     const n = byId[id];
     if (!n) return;
+    closeQuests();
     returnFocus = document.activeElement;
     dialog.open = true; dialog.npc = n; dialog.page = 0;
     keys.left = keys.right = false;
@@ -412,6 +426,7 @@
     if (b) {
       const act = b.dataset.act;
       if (act.startsWith('talk:')) { const id = act.slice(5); closeDialog(false); walkAndTalk(id); }
+      else if (act === 'quest') { closeDialog(false); openQuests(); }
       else closeDialog();
       return;
     }
@@ -539,6 +554,90 @@
     toast(timeMode === 'auto' ? `🕐 지금 시각에 맞춰요 (${t.name})` : `${t.icon} ${t.name}이 되었어요`);
   });
   setInterval(() => { if (timeMode === 'auto') applyTime(true); }, 60 * 1000);
+
+  // ═══════════════════════════ 퀘스트 (진행 중인 일 · 해낸 일) ═══════════════════════════
+  // 내용은 game-data.js 의 quests 에서 고칩니다.
+  const QUESTS = DATA.quests || [];
+  const qOpenBtn = $('#qOpen'), qWin = $('#qWin'), qList = $('#qwList'), qDetail = $('#qwDetail'), qhList = $('#qhList');
+  const quest = { tab: 'progress', sel: null };
+  let qReturn = null;
+  const WEEK = '일월화수목금토';
+  function parseDate(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
+  function dday(s) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const n = Math.round((parseDate(s) - today) / 864e5);
+    return n > 0 ? `D-${n}` : n === 0 ? 'D-DAY' : `D+${-n}`;
+  }
+  function fmtDate(s) { const d = parseDate(s); return `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEK[d.getDay()]})`; }
+  const questsOf = tab => QUESTS.filter(q => (q.status === 'done') === (tab === 'done'));
+  function questItem(q, cls) {
+    const tail = q.status === 'done' ? '<span class="q-ok">완료</span>' : q.date ? `<span class="q-d">${dday(q.date)}</span>` : '';
+    return `<li><button type="button" class="${cls}" data-q="${esc(q.id)}"><span class="q-cat">${esc(q.category || '')}</span><span class="q-t">${esc(q.title)}</span>${tail}</button></li>`;
+  }
+  function questDetail(q) {
+    const done = q.status === 'done';
+    return `<div class="qd-badges"><span class="qd-status${done ? ' done' : ''}">${done ? '✔ 완료한 퀘스트' : '▶ 진행 중인 퀘스트'}</span>${q.category ? `<span class="qd-cat">${esc(q.category)}</span>` : ''}</div>
+      <h3>${esc(q.title)}</h3>
+      ${q.date ? `<p class="qd-date">📅 ${esc(q.dateLabel || '날짜')} <b>${fmtDate(q.date)}</b>${done ? '' : `<span class="q-d">${dday(q.date)}</span>`}</p>` : ''}
+      <p class="qd-desc">${htmlUpTo(parse(q.desc || ''), Infinity)}</p>
+      ${q.steps ? `<ul class="qd-steps">${q.steps.map(s => `<li class="${s.done ? 'ok' : ''}">${esc(s.text)}</li>`).join('')}</ul>` : ''}
+      ${q.reward ? `<p class="qd-reward"><span>보상</span>${esc(q.reward)}</p>` : ''}
+      ${q.link ? `<a class="qd-link" href="${esc(q.link.href)}"${/^https?:/.test(q.link.href) ? ' target="_blank" rel="noopener"' : ''}>${esc(q.link.label)} →</a>` : ''}`;
+  }
+  function renderHelper() {
+    const list = questsOf('progress');
+    $('#qCount').textContent = list.length;
+    qhList.innerHTML = list.map(q => questItem(q, 'qh-item')).join('');
+  }
+  function renderQuestWin() {
+    const list = questsOf(quest.tab);
+    qWin.querySelectorAll('[data-tab]').forEach(b => {
+      const on = b.dataset.tab === quest.tab;
+      b.classList.toggle('on', on); b.setAttribute('aria-selected', on);
+      b.querySelector('i').textContent = questsOf(b.dataset.tab).length;
+    });
+    if (!list.some(q => q.id === quest.sel)) quest.sel = list.length ? list[0].id : null;
+    qList.innerHTML = list.length ? list.map(q => questItem(q, 'qw-item' + (q.id === quest.sel ? ' on' : ''))).join('') : '<li class="qw-empty">아직 없어요</li>';
+    const q = QUESTS.find(x => x.id === quest.sel);
+    qDetail.innerHTML = q ? questDetail(q) : '';
+  }
+  function openQuests(id) {
+    const q = id && QUESTS.find(x => x.id === id);
+    if (q) { quest.tab = q.status === 'done' ? 'done' : 'progress'; quest.sel = q.id; }
+    if (qWin.hidden) qReturn = document.activeElement;
+    renderQuestWin();
+    qWin.hidden = false;
+    requestAnimationFrame(() => qWin.classList.add('show'));
+    qOpenBtn.setAttribute('aria-expanded', 'true');
+    const cur = qList.querySelector('.on');
+    if (cur) cur.focus({ preventScroll: true });
+  }
+  function closeQuests() {
+    if (qWin.hidden) return;
+    qWin.classList.remove('show');
+    qWin.hidden = true;
+    qOpenBtn.setAttribute('aria-expanded', 'false');
+    if (qReturn && qReturn.focus && document.body.contains(qReturn)) qReturn.focus({ preventScroll: true });
+  }
+  qOpenBtn.addEventListener('click', () => (qWin.hidden ? openQuests() : closeQuests()));
+  qhList.addEventListener('click', e => { const b = e.target.closest('[data-q]'); if (b) openQuests(b.dataset.q); });
+  qList.addEventListener('click', e => {
+    const b = e.target.closest('[data-q]');
+    if (!b) return;
+    quest.sel = b.dataset.q;
+    renderQuestWin();
+    qList.querySelector('.on').focus({ preventScroll: true });
+  });
+  qWin.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { quest.tab = b.dataset.tab; quest.sel = null; renderQuestWin(); }));
+  $('#qwClose').addEventListener('click', closeQuests);
+  window.addEventListener('keydown', e => {
+    if (e.target.closest && e.target.closest('input, textarea')) return;
+    if (dialog.open) return;
+    if (e.key === 'Escape' && !qWin.hidden) { e.preventDefault(); closeQuests(); }
+    else if (e.key === 'q' || e.key === 'Q' || e.key === 'ㅂ') { e.preventDefault(); qWin.hidden ? openQuests() : closeQuests(); }
+  });
+  renderHelper();
+  setInterval(renderHelper, 10 * 60 * 1000);   // 자정이 지나면 D-day 갱신
 
   // 빠른 메뉴: data-talk 버튼
   document.querySelectorAll('[data-talk]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); walkAndTalk(b.dataset.talk); }));
