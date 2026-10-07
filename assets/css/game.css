@@ -213,15 +213,37 @@ img, svg { display: block; }
 /* ── 스킬: 검술 ── */
 .player .fx { position: absolute; inset: 0; transform: scaleX(var(--face, 1)); pointer-events: none; }
 .player .sword { position: absolute; left: calc(50% + 10px); bottom: 26px; width: 20px; height: auto; transform-origin: 50% 100%; opacity: 0; }
-.player .slash {
-  position: absolute; left: calc(50% - 34px); bottom: -14px; width: 140px; height: 130px; border-radius: 50%;
-  border: 10px solid transparent; border-right-color: #fff; border-top-color: rgba(190, 230, 255, .85);
-  filter: drop-shadow(0 0 6px rgba(120, 200, 255, .9)); opacity: 0;
+.player.slashing .sword { animation: swing3 .62s ease-in-out; }
+@keyframes swing3 {
+  0% { opacity: 1; transform: rotate(-120deg); } 20% { transform: rotate(80deg); } 38% { transform: rotate(-90deg); }
+  56% { transform: rotate(85deg); } 74% { transform: rotate(-135deg); } 92% { opacity: 1; transform: rotate(105deg); } 100% { opacity: 0; transform: rotate(110deg); }
 }
-.player.slashing .sword { animation: swing .32s cubic-bezier(.2, .8, .3, 1); }
-.player.slashing .slash { animation: slash .32s ease-out; }
-@keyframes swing { 0% { opacity: 1; transform: rotate(-120deg); } 70% { opacity: 1; transform: rotate(80deg); } 100% { opacity: 0; transform: rotate(90deg); } }
-@keyframes slash { 0% { opacity: 0; transform: rotate(-70deg) scale(.6); } 30% { opacity: 1; } 100% { opacity: 0; transform: rotate(30deg) scale(1.05); } }
+/* 화염 베기 이펙트: 베기 궤적 3개 → 불꽃 폭발 · 불꽃 혀 · 불티 */
+.player .fire { position: absolute; left: calc(50% - 125px); bottom: -88px; width: 340px; height: 295px; overflow: visible; pointer-events: none; }
+.fire * { transform-box: view-box; transform-origin: 0 0; }   /* viewBox 의 (0,0) = 이펙트 중심 */
+.fire .arc, .fire .core, .fire .flash, .fire .wisp, .fire .ember { opacity: 0; }
+.player.slashing .a1 { animation: arc1 .3s ease-out; }
+.player.slashing .a2 { animation: arc2 .3s ease-out .13s backwards; }
+.player.slashing .a3 { animation: arc3 .42s ease-out .27s backwards; }
+.player.slashing .flash { animation: fireflash .24s ease-out .3s backwards; }
+.player.slashing .core { animation: firecore .46s ease-out .28s backwards; }
+.player.slashing .wisp { animation: wisp .46s ease-out .3s backwards; }
+.player.slashing .ember { animation: ember var(--t, .5s) ease-out .3s backwards; }
+@keyframes arc1 { 0% { opacity: 0; transform: rotate(-65deg) scale(.6); } 25% { opacity: 1; } 100% { opacity: 0; transform: rotate(0deg) scale(.92); } }
+@keyframes arc2 { 0% { opacity: 0; transform: scaleY(-1) rotate(-65deg) scale(.6); } 25% { opacity: 1; } 100% { opacity: 0; transform: scaleY(-1) rotate(0deg) scale(.85); } }
+@keyframes arc3 { 0% { opacity: 0; transform: rotate(-70deg) scale(.8, .7); } 20% { opacity: 1; } 100% { opacity: 0; transform: rotate(-12deg) scale(1.35, .95); } }
+@keyframes fireflash { 0% { opacity: 0; transform: scale(.3); } 30% { opacity: .95; } 100% { opacity: 0; transform: scale(1.6); } }
+@keyframes firecore { 0% { opacity: 0; transform: scale(.2); } 25% { opacity: 1; } 100% { opacity: 0; transform: scale(1.25) rotate(40deg); } }
+@keyframes wisp { 0% { opacity: 1; transform: rotate(var(--a)) translateY(-8px) scale(.2); } 100% { opacity: 0; transform: rotate(var(--a)) translateY(-46px) scale(1); } }
+@keyframes ember { 0% { opacity: 1; transform: translate(0, 0); } 100% { opacity: 0; transform: translate(var(--dx), var(--dy)); } }
+.world.shake { animation: shake .26s linear; }
+@keyframes shake { 0%, 100% { translate: 0 0; } 20% { translate: -5px 2px; } 40% { translate: 5px -2px; } 60% { translate: -3px 1px; } 80% { translate: 3px 0; } }
+.hitspark {
+  position: absolute; bottom: calc(var(--ground) + 26px); width: 96px; height: 96px; margin-left: -48px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, #fffbe6 0 12%, #ffd84a 26%, rgba(255, 122, 26, .75) 46%, rgba(255, 60, 0, 0) 70%);
+  animation: hitspark .3s ease-out forwards;
+}
+@keyframes hitspark { 0% { transform: scale(.2); opacity: 1; } 100% { transform: scale(1.4); opacity: 0; } }
 
 .dummy {
   position: absolute; bottom: var(--ground); z-index: 3; transform: translateX(-50%); padding: 0; margin: 0; border: 0; background: none; cursor: pointer;
@@ -232,16 +254,16 @@ img, svg { display: block; }
 .dummy:focus-visible { outline: none; }
 .dummy .tag { color: #ffe1a8; }
 .dummy.hit img { animation: dummyhit .4s ease-out; }
-@keyframes dummyhit { 0% { filter: brightness(2.2); } 25% { transform: rotate(-9deg) translateX(4px); } 55% { transform: rotate(6deg); filter: none; } 100% { transform: none; } }
+@keyframes dummyhit { 0% { filter: brightness(2.2) drop-shadow(0 0 8px #ff8a00); } 25% { transform: rotate(-9deg) translateX(4px); } 55% { transform: rotate(6deg); filter: none; } 100% { transform: none; } }
 
 @media (prefers-reduced-motion: reduce) {   /* 움직임 줄이기: 휘두르는 대신 잠깐 멈춘 그림으로 */
   .player.slashing .sword { opacity: 1; transform: rotate(60deg); }
-  .player.slashing .slash { opacity: 1; }
+  .player.slashing .fire .arc, .player.slashing .fire .core { opacity: 1; }
 }
 
 .fx-layer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
 .dmg {
-  position: absolute; bottom: calc(var(--ground) + 84px + var(--stack, 0) * 38px); transform: translateX(-50%); white-space: nowrap;
+  position: absolute; bottom: calc(var(--ground) + 66px + var(--stack, 0) * 34px); transform: translateX(-50%); white-space: nowrap;
   font: 24px/1 'Galmuri11', sans-serif; color: #ffb02e; letter-spacing: -1px;
   text-shadow: 2px 0 #3a1d00, -2px 0 #3a1d00, 0 2px #3a1d00, 0 -2px #3a1d00, 2px 2px #3a1d00, -2px -2px #3a1d00, 2px -2px #3a1d00, -2px 2px #3a1d00;
   animation: dmg .95s ease-out forwards;
@@ -259,7 +281,7 @@ img, svg { display: block; }
 .skill .ic { font-size: 26px; line-height: 1; }
 .skill kbd { position: absolute; left: 3px; top: 2px; font: 10px/1 var(--pixel); color: var(--gold); }
 .skill .cd { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: rgba(0, 0, 0, .55); }
-.skill.cool .cd { animation: cooldown .35s linear; }
+.skill.cool .cd { animation: cooldown .7s linear; }
 @keyframes cooldown { from { height: 100%; } to { height: 0; } }
 .skill:hover { transform: translateY(-2px); }
 .skill:active { transform: translateY(1px); }
@@ -428,6 +450,7 @@ img, svg { display: block; }
   .skills { right: 10px; bottom: calc(var(--bar) + 10px); }
   .skill { width: 58px; height: 58px; }
   .skill kbd { display: none; }
+  .player .fire { scale: .78; }
   .dummy .tag-long { display: none; }
   .toast { top: 168px; }
   .qh-head { padding: 6px 9px; font-size: 12px; }

@@ -365,11 +365,48 @@
   });
   window.addEventListener('blur', () => { keys.left = keys.right = false; });
 
-  // ═══════════════════════════ 스킬: 검술 ═══════════════════════════
-  // Z 키 · ⚔️ 버튼으로 검을 휘두름. 연습용 허수아비를 맞히면 데미지 숫자가 뜸
+  // ═══════════════════════════ 스킬: 화염검 (검술) ═══════════════════════════
+  // Z 키 · 🔥 버튼으로 3연속 화염 베기. 연습용 허수아비를 맞히면 데미지 숫자가 뜸
   const dummy = { el: $('#dummy'), img: $('#dummy img'), px: 0 };
   const fxLayer = $('#fxLayer'), skillBtn = $('#skillSlash');
-  const COOL = 350;   // ms
+  const COOL = 700;   // ms
+  const HITS = [80, 210, 360];   // 3연타가 맞는 시각 (ms)
+
+  // 불꽃 이펙트 SVG: 베기 궤적 3개 + 불꽃 폭발 + 불꽃 혀 + 불티
+  function fireSVG() {
+    const rnd = (a, b) => a + Math.random() * (b - a);
+    let spikes = '';
+    for (let i = 0; i < 44; i++) {
+      const ang = i / 44 * Math.PI * 2, r = i % 2 ? rnd(22, 34) : rnd(48, 82);
+      spikes += `${i ? 'L' : 'M'}${(Math.cos(ang) * r).toFixed(1)} ${(Math.sin(ang) * r * 0.8).toFixed(1)} `;
+    }
+    const wisps = Array.from({ length: 10 }, (_, i) => {
+      const a = i * 36 + rnd(-12, 12), L = rnd(40, 70), m = (L * 0.6).toFixed(0);
+      return `<path class="wisp" style="--a:${a.toFixed(0)}deg" d="M0 0 C9 -12 7 -${m} 0 -${L.toFixed(0)} C-7 -${m} -9 -12 0 0 Z" fill="url(#fxWisp)"/>`;
+    }).join('');
+    const embers = Array.from({ length: 18 }, () => {
+      const a = rnd(0, Math.PI * 2), d = rnd(70, 150);
+      return `<circle class="ember" r="${rnd(1.5, 3.6).toFixed(1)}" style="--dx:${(Math.cos(a) * d).toFixed(0)}px;--dy:${(Math.sin(a) * d * 0.7).toFixed(0)}px;--t:${rnd(0.35, 0.6).toFixed(2)}s" fill="${Math.random() < 0.5 ? '#ffe680' : '#ff8a1f'}"/>`;
+    }).join('');
+    const ARC = 'M-110 -70 C-20 -120 110 -60 120 60 C80 -20 -10 -70 -110 -70 Z';
+    const EDGE = 'M-110 -70 C-20 -120 110 -60 120 60';
+    const arc = cls => `<g class="arc ${cls}"><path d="${ARC}" fill="url(#fxArc)" filter="url(#fxFire)"/><path d="${EDGE}" fill="none" stroke="#fffbe6" stroke-width="3" stroke-linecap="round" filter="url(#fxGlow)"/></g>`;
+    return `<svg class="fire" viewBox="-150 -130 300 260" aria-hidden="true">
+      <defs>
+        <linearGradient id="fxArc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c41a00" stop-opacity="0"/><stop offset=".3" stop-color="#ff5a14"/><stop offset=".6" stop-color="#ffb21f"/><stop offset=".85" stop-color="#ffe95c"/><stop offset="1" stop-color="#fffbe6"/></linearGradient>
+        <radialGradient id="fxCore"><stop offset="0" stop-color="#fffbe6"/><stop offset=".3" stop-color="#ffd84a"/><stop offset=".65" stop-color="#ff7a1a"/><stop offset="1" stop-color="#e02800" stop-opacity="0"/></radialGradient>
+        <linearGradient id="fxWisp" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ffe680"/><stop offset=".5" stop-color="#ff8a1f"/><stop offset="1" stop-color="#d42a00" stop-opacity="0"/></linearGradient>
+        <filter id="fxFire" x="-30%" y="-30%" width="160%" height="160%"><feTurbulence type="fractalNoise" baseFrequency="0.04 0.09" numOctaves="2" seed="3"/><feDisplacementMap in="SourceGraphic" scale="16" xChannelSelector="R" yChannelSelector="G" result="d"/><feGaussianBlur in="d" stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="d"/></feMerge></filter>
+        <filter id="fxGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <circle class="flash" r="60" fill="url(#fxCore)"/>
+      <path class="core" d="${spikes}Z" fill="url(#fxCore)" filter="url(#fxFire)"/>
+      <g class="wisps">${wisps}</g>
+      ${arc('a1')}${arc('a2')}${arc('a3')}
+      <g class="embers">${embers}</g>
+    </svg>`;
+  }
+  $('#player .fx').insertAdjacentHTML('beforeend', fireSVG());
   let lastSlash = 0, slashCount = 0, stack = 0, stackT = null;
   const restart = (el, cls) => { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); };
   function slash() {
@@ -379,16 +416,22 @@
     restart(player.el, 'slashing');
     restart(skillBtn, 'cool');
     clearTimeout(player.slashT);
-    player.slashT = setTimeout(() => player.el.classList.remove('slashing'), 400);
+    player.slashT = setTimeout(() => player.el.classList.remove('slashing'), 820);
+    setTimeout(() => restart(world, 'shake'), 330);
     const d = dummy.px - player.x, face = player.face < 0 ? -1 : 1;
-    const hit = Math.abs(d) < 30 || (Math.abs(d) <= 130 && Math.sign(d) === face);
-    if (hit) setTimeout(hitDummy, 110);
-    else if (++slashCount === 1) toast('⚔️ 검술! 연습용 허수아비 앞에서 써 보세요');
+    const hit = Math.abs(d) < 30 || (Math.abs(d) <= 150 && Math.sign(d) === face);
+    if (hit) HITS.forEach((t, i) => setTimeout(() => hitDummy(i === HITS.length - 1), t));
+    else if (++slashCount === 1) toast('🔥 화염검! 연습용 허수아비 앞에서 써 보세요');
   }
-  function hitDummy() {
+  function hitDummy(finisher) {
     restart(dummy.el, 'hit');
+    const spark = document.createElement('span');
+    spark.className = 'hitspark';
+    spark.style.left = dummy.px + 'px';
+    fxLayer.appendChild(spark);
+    setTimeout(() => spark.remove(), 320);
     const crit = Math.random() < 0.2;
-    const dmg = Math.round((1000 + Math.random() * 2000) * (crit ? 1.8 : 1));
+    const dmg = Math.round((1000 + Math.random() * 2000) * (crit ? 1.8 : 1) * (finisher ? 1.5 : 1));
     const el = document.createElement('span');
     el.className = 'dmg' + (crit ? ' crit' : '');
     el.textContent = dmg.toLocaleString('ko-KR');
