@@ -22,6 +22,9 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # CSS · JS 주소의 ?v=dev 를 커밋 번호로 바꿔, 배포할 때마다 브라우저가 새 파일을 받게 함
+      - name: Stamp asset versions
+        run: find . -name '*.html' -not -path './.git/*' -exec sed -i "s/?v=dev\"/?v=${GITHUB_SHA::7}\"/g" {} +
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
