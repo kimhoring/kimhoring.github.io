@@ -8,9 +8,14 @@
 
 | 주소 | 내용 |
 |---|---|
-| `/` | **개인 소개** — 프로필, 소개, 대표 프로젝트, 프로젝트에서 다룬 분야, 학력, 연락 |
-| `/projects/soc-map/` | **SOC-MAP 상세** — 배경, 핵심 기능, 위험 반경 시뮬레이터, 화면(관리자 5종 · 현장 앱 5종), 작동 원리, 시스템 구조, 실행 방법, 한계 |
-| `/projects/soc-map/demo/` | **라이브 데모** — 서버 없이 동작하는 SOC-MAP 관리자 화면 (「🧪 샘플 현장」으로 시작) |
+| `/` | **홈 — 김호성의 마을** — 횡스크롤 게임 화면. 마을 사람(김호성 · 이력 게시판 · 현장 안전요원 · 청맥 부원 · 우체부)을 누르면 방문자 캐릭터가 걸어가 대화창으로 소개합니다. 대사는 `assets/js/game-data.js` 에서 고칩니다 |
+| `/about/` | **소개** — 프로필, 자기소개, 관심 분야, 공부하며 다룬 것들, 학력과 활동 이력 |
+| `/projects/` | **프로젝트** — 만든 프로젝트 목록 (현재 SOC-MAP) |
+| `/projects/soc-map/` | **SOC-MAP 상세** — 배경, 핵심 기능, 위험 반경 시뮬레이터, 화면, 작동 원리, 시스템 구조, 실행 방법, 한계 |
+| `/projects/soc-map/demo/` | **라이브 데모** — 서버 없이 동작하는 SOC-MAP 관리자 화면 |
+| `/activities/` | **취미 · 활동** — 축구, 축구동아리 청맥 회장(2025) |
+
+모든 페이지는 같은 상단 메뉴와 하단 정보를 씁니다. 메뉴를 바꿀 때는 네 페이지(`index.html`, `about/`, `projects/`, `activities/`)를 함께 고치세요.
 
 ### SOC-MAP 한 줄 소개
 공사 현장을 실제 GPS 위치에 등록하고, KOSHA 기준 장비 위험 반경을 실제 거리(m)로 계산합니다. 작업자와 장비 운전원의 휴대폰이 서로 위치를 공유해 위험 구역 접근·진입을 서로 경보합니다.
@@ -18,16 +23,23 @@
 ## 폴더 구조
 
 ```
-index.html                     개인 홈
+index.html                     홈 (김호성의 마을 — 게임 화면)
+제작로그.md                    홈페이지 제작 기록 · 남은 일
+about/index.html               소개
+activities/index.html          취미 · 활동
 404.html
 assets/
-  css/style.css                디자인 (다크 테마, 반응형) — 두 페이지 공용
+  css/style.css                하위 페이지 디자인
+  css/game.css                 홈 게임 화면 디자인
   js/config.js                 ★ GitHub 프로필 · 저장소 · 이메일 주소 설정
-  js/main.js                   내비 · 등장 효과 · 화면 탭 · 확대 보기 · 코드 복사
+  js/game-data.js              ★ 마을 대사 · NPC 배치 (여기만 고치면 대사가 바뀜)
+  js/game.js                   게임 화면 (픽셀 캐릭터 · 이동 · 대화창 · 미니맵 · EXP)
+  js/main.js                   하위 페이지 내비 · 등장 효과 · 화면 탭 · 확대 보기 · 코드 복사
   js/risk-demo.js              위험 반경 시뮬레이터 (SOC-MAP 페이지)
   img/                         스크린샷 · 아이콘
-projects/soc-map/
-  index.html                   SOC-MAP 상세 페이지
+projects/
+  index.html                   프로젝트 목록
+  soc-map/index.html           SOC-MAP 상세 페이지
   demo/                        라이브 데모 (SOC-MAP 관리자 화면 사본)
 scripts/
   sync-demo.ps1                앱 폴더에서 demo/ 를 다시 복사
@@ -69,11 +81,12 @@ python -m http.server 8080
 
 ## 내용 고치기
 
-- 개인 소개 문구는 `index.html`, 프로젝트 설명은 `projects/soc-map/index.html` 에 있습니다.
-- 프로젝트를 더 추가하려면 `projects/새이름/index.html` 을 만들고, `index.html` 의 「프로젝트」 섹션에 카드를 하나 더 넣으세요.
+- 마을 대사는 `assets/js/game-data.js`, 자기소개·이력은 `about/index.html`, 취미·활동은 `activities/index.html`, 프로젝트 설명은 `projects/soc-map/index.html` 에 있습니다.
+- 프로젝트를 더 추가하려면 `projects/새이름/index.html` 을 만들고, `projects/index.html` 에 카드를 하나 더 넣으세요.
+- 활동을 더 추가하려면 `activities/index.html` 의 「동아리 활동」 목록과 `about/index.html` 의 이력에 줄을 추가하세요.
 - **라이브 데모 갱신** (앱을 고친 뒤, PowerShell):
   ```powershell
-  ./scripts/sync-demo.ps1 -Source "..\SOC-MAP v12"
+  ./scripts/sync-demo.ps1    # 기본값: AI\클로드\캡스톤\캡스톤 마무리\02_SOC-MAP_캡스톤\SOC-MAP (-Source 로 직접 지정 가능)
   ```
 - **스크린샷 다시 찍기** (앱 서버를 켠 상태, Chrome 필요). 촬영용 서버 프로젝트가 하나 생기니 끝나면 앱의 `backend/projects/` 에서 지우세요.
   ```bash
@@ -86,6 +99,7 @@ python -m http.server 8080
 | 자원 | 용도 | 라이선스 |
 |---|---|---|
 | [Pretendard](https://github.com/orioncactus/pretendard) | 글꼴 (jsDelivr CDN) | SIL OFL 1.1 |
+| [Galmuri](https://github.com/quiple/galmuri) | 게임 화면 픽셀 글꼴 (jsDelivr CDN) | SIL OFL 1.1 |
 | Esri World Imagery | 스크린샷 · 데모의 위성 지도 | Esri 이용 약관 (화면에 출처 표시) |
 | OpenStreetMap | 데모의 일반 지도 | ODbL |
 | Three.js, qrcodejs | 데모의 3D · QR (CDN) | MIT |

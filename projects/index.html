@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ko" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>프로젝트 — 김호성</title>
+<meta name="description" content="김호성이 만든 프로젝트: 캡스톤 디자인 SOC-MAP(공사 현장 위험 관제 시스템).">
+<meta name="author" content="김호성">
+<meta name="theme-color" content="#ffffff">
+<meta property="og:type" content="profile">
+<meta property="og:title" content="프로젝트 — 김호성">
+<meta property="og:description" content="김호성이 만든 프로젝트: 캡스톤 디자인 SOC-MAP(공사 현장 위험 관제 시스템).">
+<meta property="og:image" content="../assets/img/manager-layout.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../assets/img/avatar.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>document.documentElement.classList.remove('no-js');</script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="nav" id="nav">
+  <div class="wrap">
+    <a class="brand" href="../" aria-label="김호성 홈"><span class="mono" aria-hidden="true">김</span>김호성</a>
+    <nav class="nav-links" id="navLinks" aria-label="사이트 메뉴">
+      <a href="../">홈</a>
+      <a href="../about/">소개</a>
+      <a href="../projects/" aria-current="page">프로젝트</a>
+      <a href="../activities/">취미 · 활동</a>
+      <a href="#contact">연락</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn sm" data-cfg="github" href="#" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <a class="btn sm primary" href="#contact">연락하기</a>
+    </div>
+    <button class="nav-toggle" id="navToggle" aria-label="메뉴 열기" aria-expanded="false" aria-controls="navLinks">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+<section class="page-hero">
+  <div class="wrap">
+    <span class="eyebrow">프로젝트</span>
+    <h1>만든 것들</h1>
+    <p class="sub">공부한 내용을 실제로 동작하는 결과물로 만들어 본 프로젝트입니다.</p>
+  </div>
+</section>
+
+<section class="section-tight">
+  <div class="wrap">
+    <article class="project-card reveal">
+      <a class="project-media" href="soc-map/" aria-label="SOC-MAP 상세 페이지">
+        <div class="pm-stage">
+          <div class="browser">
+            <div class="browser-bar"><i></i><i></i><i></i></div>
+            <img src="../assets/img/manager-monitor.jpg" width="1440" height="900" alt="SOC-MAP 관리자 관제 화면: 위성 지도 위의 장비 위험 반경과 작업자 위치">
+          </div>
+          <div class="phone"><img src="../assets/img/field-warning.jpg" width="390" height="844" alt="SOC-MAP 현장 앱의 위험 구역 접근 경고 화면"></div>
+        </div>
+      </a>
+      <div class="project-body">
+        <div class="kicker"><span class="tag">캡스톤 디자인</span><span class="tag">건설 안전</span><span class="tag">웹 · 모바일</span></div>
+        <h3>SOC-MAP</h3>
+        <p class="tagline">GPS 기반 공사 현장 위험 관제 시스템</p>
+        <p>공사 현장을 실제 GPS 위치에 등록하고 KOSHA 기준 장비 위험 반경을 m 단위로 계산합니다. 작업자와 장비 운전원의 휴대폰이 서로의 위치를 1초마다 공유해, 위험 구역에 다가가면 본인에게, 들어가면 관리자에게 경보를 보냅니다.</p>
+        <ul class="checks">
+          <li><span><b>장비 위험도 엔진</b> — 굴착기·크레인 등 5종, 풍속·고압선 이격 등 법정 기준 반영</span></li>
+          <li><span><b>실제 거리 계산</b> — WGS84 국소 좌표계, 2.8 km에서 오차 0.1 mm 이하</span></li>
+          <li><span><b>3방향 경보</b> — 작업자 ↔ 장비 운전원 ↔ 관리자, SOS와 경보 기록</span></li>
+          <li><span><b>AI 도면 인식 · 안전 경로</b> — YOLOv8 건물 인식, 위험 회피 A* 경로</span></li>
+        </ul>
+        <div class="tags"><span class="tag">JavaScript</span><span class="tag">Canvas · Three.js</span><span class="tag">Python FastAPI</span><span class="tag">WebSocket</span><span class="tag">YOLOv8</span></div>
+        <div class="hero-actions">
+          <a class="btn primary" href="soc-map/">자세히 보기 <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn" href="soc-map/demo/">라이브 데모</a>
+          <a class="btn" data-cfg="repo" href="#" target="_blank" rel="noopener">소스 코드</a>
+        </div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="head-center reveal"><span class="eyebrow">이어서 보기</span><h2 class="h-sm">다른 페이지도 둘러보세요</h2></div>
+    <div class="next-nav">
+      <a class="next-card n-about reveal" href="../about/"><span class="k">소개</span><b>어떤 사람인지</b><span>학력, 관심 분야, 다룬 것들과 이력</span><i aria-hidden="true">→</i></a>
+      <a class="next-card n-activities reveal" href="../activities/"><span class="k">취미 · 활동</span><b>축구와 동아리</b><span>취미 축구 · 청맥 회장(2025)</span><i aria-hidden="true">→</i></a>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 연락 ═══ -->
+<section id="contact">
+  <div class="wrap">
+    <div class="contact reveal">
+      <h2>함께 이야기해요</h2>
+      <p>궁금한 점이나 하고 싶은 이야기가 있다면 편하게 연락 주세요.</p>
+      <div class="hero-actions" id="contactLinks" data-cfg-group>
+        <a class="btn primary" data-cfg="email" href="#">이메일 보내기</a>
+        <a class="btn" data-cfg="github" href="#" target="_blank" rel="noopener">GitHub</a>
+      </div>
+      <p class="fallback" data-cfg-fallback="contactLinks" hidden>연락처는 곧 추가됩니다.</p>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="footer">
+  <div class="wrap fwrap">
+    <div class="footer-cols">
+      <div class="about-f">
+        <a class="brand" href="../"><span class="mono" aria-hidden="true">김</span>김호성</a>
+        <p>전남대학교 건축공학과 21학번. 공사 현장의 안전에 관심이 많고, 축구를 좋아합니다.</p>
+      </div>
+      <div>
+        <h5>사이트</h5>
+        <ul><li><a href="../">홈</a></li><li><a href="../about/">소개</a></li><li><a href="../projects/">프로젝트</a></li><li><a href="../activities/">취미 · 활동</a></li></ul>
+      </div>
+      <div>
+        <h5>프로젝트</h5>
+        <ul><li><a href="../projects/soc-map/">SOC-MAP</a></li><li><a href="../projects/soc-map/demo/">SOC-MAP 라이브 데모</a></li><li><a data-cfg="repo" href="#" target="_blank" rel="noopener">소스 코드</a></li></ul>
+      </div>
+      <div>
+        <h5>연결</h5>
+        <ul><li><a href="#contact">연락하기</a></li><li><a data-cfg="github" href="#" target="_blank" rel="noopener">GitHub</a></li><li><a data-cfg="email" href="#">이메일</a></li></ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 김호성 · 전남대학교 건축공학과</span>
+      <a href="../LICENSE">MIT License</a>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/js/config.js"></script>
+<script src="../assets/js/main.js"></script>
+</body>
+</html>

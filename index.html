@@ -1,219 +1,160 @@
 <!doctype html>
-<html lang="ko" class="no-js">
+<html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>김호성 — 전남대학교 건축공학과</title>
-<meta name="description" content="전남대학교 건축공학과 21학번 김호성. 공사 현장의 안전 문제를 위치 데이터와 소프트웨어로 풀어 온 프로젝트를 소개합니다.">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>김호성의 마을 — 김호성 홈페이지</title>
+<meta name="description" content="전남대학교 건축공학과 21학번 김호성의 홈페이지. 마을 사람들을 눌러 김호성의 소개, 프로젝트, 취미 이야기를 들어 보세요.">
 <meta name="author" content="김호성">
-<meta name="theme-color" content="#f6efe4">
+<meta name="theme-color" content="#9fd0ee">
 <meta property="og:type" content="profile">
-<meta property="og:title" content="김호성 — 전남대학교 건축공학과">
-<meta property="og:description" content="건축공학 × 소프트웨어 · 대표 프로젝트 SOC-MAP (공사 현장 위험 관제)">
-<meta property="og:image" content="assets/img/manager-monitor.jpg">
+<meta property="og:title" content="김호성의 마을">
+<meta property="og:description" content="마을 사람들을 눌러 김호성의 소개, 프로젝트, 취미 이야기를 들어 보세요.">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="assets/img/avatar.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@600;700;900&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/galmuri@2.40.3/dist/galmuri.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
-<link rel="stylesheet" href="assets/css/style.css">
-<script>document.documentElement.classList.remove('no-js');</script>
+<link rel="stylesheet" href="assets/css/game.css">
 </head>
 <body>
-<a class="skip" href="#main">본문으로 건너뛰기</a>
+<a class="skip" href="#quickMenu">메뉴로 건너뛰기</a>
 
-<header class="nav" id="nav">
-  <div class="wrap">
-    <a class="brand" href="#top" aria-label="김호성 홈"><span class="mono" aria-hidden="true">김</span>김호성</a>
-    <nav class="nav-links" id="navLinks" aria-label="주요 메뉴">
-      <a href="#about">소개</a>
-      <a href="#projects">프로젝트</a>
-      <a href="#skills">다룬 분야</a>
-      <a href="#education">학력</a>
-      <a href="#contact">연락</a>
-    </nav>
-    <div class="nav-cta">
-      <a class="btn sm" data-cfg="github" href="#" target="_blank" rel="noopener">
-        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-        GitHub
-      </a>
-      <a class="btn sm primary" href="projects/soc-map/">대표 프로젝트</a>
-    </div>
-    <button class="nav-toggle" id="navToggle" aria-label="메뉴 열기" aria-expanded="false" aria-controls="navLinks">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-    </button>
+<main class="stage" id="stage" aria-label="김호성의 마을. 사람을 눌러 대화하세요.">
+  <!-- 하늘 · 먼 배경 -->
+  <div class="sky" aria-hidden="true">
+    <div class="sun"></div>
+    <div class="cloud c1"></div><div class="cloud c2"></div><div class="cloud c3"></div><div class="cloud c4"></div>
   </div>
-</header>
+  <div class="layer far" id="far" aria-hidden="true"></div>
+  <div class="layer mid" id="mid" aria-hidden="true"></div>
 
-<main id="main">
-<!-- ═══ 히어로 ═══ -->
-<section class="hero home-hero" id="top">
-  <div class="wrap grid">
-    <div>
-      <span class="pill"><span class="dot"></span>건축공학 × 소프트웨어</span>
-      <h1>김호성</h1>
-      <p class="affil">전남대학교 건축공학과 <span>21학번</span></p>
-      <p class="lead">건축공학을 공부하며 <b>공사 현장의 안전</b>에 관심을 두고, 도면과 현장 기준을 <b>위치 데이터와 소프트웨어</b>로 연결하는 작업을 하고 있습니다. 캡스톤 디자인으로 장비 위험 반경을 실제 거리로 계산해 작업자와 운전원에게 서로 경보하는 <b>SOC-MAP</b>을 만들었습니다.</p>
-      <div class="hero-actions">
-        <a class="btn primary" href="#projects">프로젝트 보기</a>
-        <a class="btn" href="#contact">연락하기</a>
+  <!-- 월드 (카메라와 함께 이동) -->
+  <div class="world" id="world">
+    <!-- 소품 -->
+    <div class="props" aria-hidden="true">
+      <svg class="prop tree" data-at="0.02" viewBox="0 0 120 170"><rect x="52" y="100" width="16" height="70" fill="#7a5235"/><rect x="52" y="100" width="6" height="70" fill="#8e6343"/><circle cx="60" cy="70" r="46" fill="#6fa34c"/><circle cx="38" cy="86" r="30" fill="#5f9142"/><circle cx="84" cy="88" r="28" fill="#5f9142"/><circle cx="50" cy="52" r="22" fill="#86b95f"/></svg>
+      <svg class="prop tree small" data-at="0.31" viewBox="0 0 120 170"><rect x="52" y="100" width="16" height="70" fill="#7a5235"/><circle cx="60" cy="70" r="46" fill="#6fa34c"/><circle cx="38" cy="86" r="30" fill="#5f9142"/><circle cx="84" cy="88" r="28" fill="#5f9142"/><circle cx="50" cy="52" r="22" fill="#86b95f"/></svg>
+
+      <!-- 공사 현장: 타워크레인 · 짓는 중인 건물 · 라바콘 -->
+      <svg class="prop building" data-at="0.535" viewBox="0 0 220 230">
+        <rect x="0" y="150" width="220" height="80" fill="#e4d9cb"/>
+        <g fill="#9fb7c9"><rect x="16" y="168" width="30" height="22"/><rect x="66" y="168" width="30" height="22"/><rect x="124" y="168" width="30" height="22"/><rect x="174" y="168" width="30" height="22"/><rect x="16" y="200" width="30" height="22"/><rect x="174" y="200" width="30" height="22"/></g>
+        <rect x="96" y="198" width="28" height="32" fill="#7a5235"/>
+        <g fill="#b9b0a5"><rect x="0" y="142" width="220" height="10"/><rect x="0" y="90" width="220" height="10"/><rect x="0" y="40" width="160" height="10"/></g>
+        <g fill="#cfc6bb"><rect x="6" y="40" width="12" height="104"/><rect x="72" y="40" width="12" height="104"/><rect x="140" y="40" width="12" height="104"/><rect x="200" y="90" width="12" height="56"/></g>
+        <g stroke="#e0782f" stroke-width="3" fill="none"><path d="M164 152 V20 M214 152 V60 M164 120 H214 M164 90 H214 M164 60 H214 M164 120 L214 90 M164 90 L214 60"/></g>
+      </svg>
+      <svg class="prop crane" data-at="0.40" viewBox="0 0 280 360">
+        <g stroke="#b5761f" stroke-width="3" fill="#e9b04a">
+          <rect x="170" y="74" width="22" height="286"/>
+          <rect x="8" y="56" width="262" height="16"/>
+          <rect x="196" y="72" width="26" height="20" fill="#f6d488"/>
+          <rect x="230" y="72" width="36" height="18" fill="#948a7e" stroke="#6f665c"/>
+        </g>
+        <g stroke="#b5761f" stroke-width="2.5" fill="none">
+          <path d="M170 90 L192 112 L170 134 L192 156 L170 178 L192 200 L170 222 L192 244 L170 266 L192 288 L170 310 L192 332 L170 354"/>
+          <path d="M8 72 L24 56 L40 72 L56 56 L72 72 L88 56 L104 72 L120 56 L136 72 L152 56 L168 72 L184 56 L200 72 L216 56 L232 72 L248 56 L264 72"/>
+          <path d="M172 56 L181 18 L190 56 M181 18 L12 56 M181 18 L268 56"/>
+        </g>
+        <g stroke="#4a3b30" stroke-width="2" fill="none"><path d="M70 72 V196"/><path d="M70 208 L34 222 M70 208 L106 222"/></g>
+        <rect x="62" y="196" width="16" height="12" fill="#5b6070"/>
+        <rect x="26" y="220" width="88" height="10" fill="#a49a8e"/>
+      </svg>
+      <svg class="prop cones" data-at="0.475" viewBox="0 0 90 40"><g><path d="M10 38 L20 6 L30 38Z" fill="#ef7d2d"/><rect x="15" y="20" width="10" height="5" fill="#fff"/><rect x="4" y="36" width="32" height="4" fill="#cf6420"/></g><g transform="translate(48 0)"><path d="M10 38 L20 6 L30 38Z" fill="#ef7d2d"/><rect x="15" y="20" width="10" height="5" fill="#fff"/><rect x="4" y="36" width="32" height="4" fill="#cf6420"/></g></svg>
+
+      <!-- 운동장: 골대 · 공 -->
+      <svg class="prop goal" data-at="0.765" viewBox="0 0 210 120">
+        <defs><pattern id="net" width="12" height="12" patternUnits="userSpaceOnUse"><path d="M0 0 L12 12 M12 0 L0 12" stroke="#ffffff" stroke-opacity=".55" stroke-width="1"/></pattern></defs>
+        <path d="M20 10 H190 L206 30 V118 H4 V30 Z" fill="url(#net)"/>
+        <path d="M8 118 V12 H202 V118" fill="none" stroke="#ffffff" stroke-width="7"/>
+        <path d="M8 12 L4 30 V118 M202 12 L206 30 V118" fill="none" stroke="#e8e2d8" stroke-width="3"/>
+        <path d="M70 16 V24 M140 16 V24" stroke="#e8e2d8" stroke-width="2"/>
+        <rect x="58" y="22" width="94" height="24" rx="4" fill="#3f7d4e" stroke="#2a1d16" stroke-width="2"/>
+        <text x="105" y="39" text-anchor="middle" font-size="13" font-family="Galmuri11, sans-serif" fill="#ffffff">청맥</text>
+      </svg>
+      <img class="prop ball" id="ball" data-at="0.715" alt="">
+
+      <!-- 우체국 -->
+      <svg class="prop house" data-at="0.955" viewBox="0 0 170 150">
+        <path d="M6 70 L85 10 L164 70Z" fill="#c0532a"/><path d="M6 70 L85 10 L164 70" fill="none" stroke="#9e4220" stroke-width="6"/>
+        <rect x="20" y="68" width="130" height="82" fill="#f6ead7"/>
+        <rect x="70" y="98" width="30" height="52" fill="#7a5235"/>
+        <rect x="32" y="86" width="26" height="24" fill="#9fc6dd" stroke="#7a5235" stroke-width="3"/>
+        <rect x="112" y="86" width="26" height="24" fill="#9fc6dd" stroke="#7a5235" stroke-width="3"/>
+        <rect x="58" y="48" width="54" height="16" rx="3" fill="#fff8ec"/><text x="85" y="61" text-anchor="middle" font-size="12" font-family="Galmuri11, sans-serif" fill="#3b2e25">우체국</text>
+      </svg>
+      <div class="prop mailbox" data-at="0.845"><span class="box"><i></i></span><span class="post"></span></div>
+      <!-- 작은 꽃 -->
+      <svg class="prop flower" data-at="0.05" viewBox="0 0 7 9" shape-rendering="crispEdges"><rect x="3" y="5" width="1" height="4" fill="#5e8a3e"/><rect x="1" y="6" width="2" height="1" fill="#79ad52"/><rect x="2" y="0" width="3" height="1" fill="#ff9fb4"/><rect x="1" y="1" width="5" height="3" fill="#ff9fb4"/><rect x="2" y="4" width="3" height="1" fill="#ff9fb4"/><rect x="3" y="2" width="1" height="1" fill="#ffd23f"/></svg>
+      <svg class="prop flower" data-at="0.15" viewBox="0 0 7 9" shape-rendering="crispEdges"><rect x="3" y="5" width="1" height="4" fill="#5e8a3e"/><rect x="1" y="6" width="2" height="1" fill="#79ad52"/><rect x="2" y="0" width="3" height="1" fill="#ffffff"/><rect x="1" y="1" width="5" height="3" fill="#ffffff"/><rect x="2" y="4" width="3" height="1" fill="#ffffff"/><rect x="3" y="2" width="1" height="1" fill="#ffd23f"/></svg>
+      <svg class="prop flower" data-at="0.28" viewBox="0 0 7 9" shape-rendering="crispEdges"><rect x="3" y="5" width="1" height="4" fill="#5e8a3e"/><rect x="1" y="6" width="2" height="1" fill="#79ad52"/><rect x="2" y="0" width="3" height="1" fill="#ffd23f"/><rect x="1" y="1" width="5" height="3" fill="#ffd23f"/><rect x="2" y="4" width="3" height="1" fill="#ffd23f"/><rect x="3" y="2" width="1" height="1" fill="#ffd23f"/></svg>
+      <svg class="prop flower" data-at="0.6" viewBox="0 0 7 9" shape-rendering="crispEdges"><rect x="3" y="5" width="1" height="4" fill="#5e8a3e"/><rect x="1" y="6" width="2" height="1" fill="#79ad52"/><rect x="2" y="0" width="3" height="1" fill="#ff9fb4"/><rect x="1" y="1" width="5" height="3" fill="#ff9fb4"/><rect x="2" y="4" width="3" height="1" fill="#ff9fb4"/><rect x="3" y="2" width="1" height="1" fill="#ffd23f"/></svg>
+      <svg class="prop flower" data-at="0.66" viewBox="0 0 7 9" shape-rendering="crispEdges"><rect x="3" y="5" width="1" height="4" fill="#5e8a3e"/><rect x="1" y="6" width="2" height="1" fill="#79ad52"/><rect x="2" y="0" width="3" height="1" fill="#ffffff"/><rect x="1" y="1" width="5" height="3" fill="#ffffff"/><rect x="2" y="4" width="3" height="1" fill="#ffffff"/><rect x="3" y="2" width="1" height="1" fill="#ffd23f"/></svg>
+      <svg class="prop flower" data-at="0.82" viewBox="0 0 7 9" shape-rendering="crispEdges"><rect x="3" y="5" width="1" height="4" fill="#5e8a3e"/><rect x="1" y="6" width="2" height="1" fill="#79ad52"/><rect x="2" y="0" width="3" height="1" fill="#ffd23f"/><rect x="1" y="1" width="5" height="3" fill="#ffd23f"/><rect x="2" y="4" width="3" height="1" fill="#ffd23f"/><rect x="3" y="2" width="1" height="1" fill="#ffd23f"/></svg>
+      <svg class="prop flower" data-at="0.93" viewBox="0 0 7 9" shape-rendering="crispEdges"><rect x="3" y="5" width="1" height="4" fill="#5e8a3e"/><rect x="1" y="6" width="2" height="1" fill="#79ad52"/><rect x="2" y="0" width="3" height="1" fill="#ff9fb4"/><rect x="1" y="1" width="5" height="3" fill="#ff9fb4"/><rect x="2" y="4" width="3" height="1" fill="#ff9fb4"/><rect x="3" y="2" width="1" height="1" fill="#ffd23f"/></svg>
+    </div>
+
+    <!-- 사람들 -->
+    <div class="npcs" id="npcs"></div>
+
+    <!-- 방문자 -->
+    <div class="player" id="player" aria-hidden="true"><span class="you">나</span><img alt=""><span class="shadow"></span></div>
+
+    <div class="ground" aria-hidden="true"></div>
+  </div>
+
+  <!-- ═══ HUD ═══ -->
+  <div class="hud minimap" role="navigation" aria-label="미니맵">
+    <div class="mm-head"><span class="mm-icon" aria-hidden="true">🗺️</span><b id="mapName">김호성의 마을</b></div>
+    <div class="mm-track" id="mmTrack"></div>
+  </div>
+
+  <nav class="hud quick" id="quickMenu" aria-label="바로 가기">
+    <a href="about/"><span aria-hidden="true">👤</span>소개</a>
+    <a href="projects/"><span aria-hidden="true">🏗️</span>프로젝트</a>
+    <a href="activities/"><span aria-hidden="true">⚽</span>취미 · 활동</a>
+    <a href="#" data-talk="post"><span aria-hidden="true">✉️</span>연락</a>
+  </nav>
+
+  <div class="hud statusbar">
+    <div class="who"><span class="lv">Lv.21</span><span class="nm"><b>김호성</b><small>전남대학교 건축공학과</small></span></div>
+    <div class="exp" aria-live="polite"><span class="exp-label">EXP</span><span class="exp-bar"><span class="exp-fill" id="expFill"></span></span><span class="exp-text" id="expText">대화 0 / 5</span></div>
+    <div class="keys"><kbd>←</kbd><kbd>→</kbd> 이동 <kbd>Space</kbd> 대화 · 사람을 눌러 보세요</div>
+  </div>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <!-- ═══ 대화창 ═══ -->
+  <section class="dialog" id="dialog" role="dialog" aria-modal="false" aria-labelledby="dName" hidden>
+    <button type="button" class="d-close" id="dClose" aria-label="대화 닫기">✕</button>
+    <div class="d-left">
+      <div class="d-portrait" id="dPortrait"></div>
+      <div class="d-plate"><b id="dName"></b><small id="dTitle"></small></div>
+    </div>
+    <div class="d-right">
+      <p class="d-text" id="dText" aria-live="polite"></p>
+      <ul class="d-choices" id="dChoices" hidden></ul>
+      <div class="d-actions">
+        <span class="d-page" id="dPage"></span>
+        <button type="button" class="d-btn" id="dPrev">◀ 이전</button>
+        <button type="button" class="d-btn primary" id="dNext">다음 ▶</button>
+        <button type="button" class="d-btn primary" id="dEnd" hidden>대화 끝내기</button>
       </div>
     </div>
+  </section>
 
-    <aside class="id-card reveal" aria-label="프로필 요약">
-      <div class="id-head">
-        <span class="mono" aria-hidden="true">김</span>
-        <span><b>김호성</b><span>Architectural Engineering</span></span>
-      </div>
-      <dl class="id-list">
-        <div><dt>학교</dt><dd>전남대학교</dd></div>
-        <div><dt>학과</dt><dd>건축공학과</dd></div>
-        <div><dt>학번</dt><dd>21학번 (2021년 입학)</dd></div>
-        <div><dt>관심</dt><dd>건설 안전 · 현장 위치 데이터</dd></div>
-      </dl>
-      <a class="id-feature" href="projects/soc-map/">
-        <img src="assets/img/manager-layout.jpg" width="1440" height="900" alt="">
-        <span><small>대표 프로젝트</small><b>SOC-MAP</b><span>공사 현장 위험 관제 시스템</span></span>
-        <i aria-hidden="true">→</i>
-      </a>
-    </aside>
-  </div>
-</section>
-
-<!-- ═══ 소개 ═══ -->
-<section class="section" id="about">
-  <div class="wrap">
-    <div class="about">
-      <div class="reveal">
-        <span class="eyebrow">소개</span>
-        <h2>현장의 기준을<br>현장의 거리로 옮깁니다</h2>
-        <p>건설 현장의 장비 사고는 작업반경, 후방 사각지대, 붐 회전 반경처럼 <b>땅 위에 그려져 있지 않은 범위</b>에서 일어납니다. 기술지침과 법규는 이 범위를 숫자로 정해 두었지만, 현장에서 그 숫자를 실시간으로 확인하기는 어렵습니다.</p>
-        <p>건축공학 전공에서 배운 도면·현장·안전 기준에 대한 이해를 바탕으로, 이 기준을 <b>실제 위치와 거리(m)</b>로 계산하고 현장 인원의 휴대폰으로 알리는 방법을 직접 구현해 보았습니다.</p>
-      </div>
-      <div class="focus reveal">
-        <div><span class="ic">🏗️</span><span><b>건설 안전</b><span>KOSHA 기술지침과 산업안전보건기준에 관한 규칙을 위험도 계산 규칙으로 옮기기</span></span></div>
-        <div><span class="ic">📐</span><span><b>도면과 실제 위치</b><span>배치도의 px 좌표를 현장의 GPS 좌표와 m 단위로 맞추기</span></span></div>
-        <div><span class="ic">📱</span><span><b>현장에서 쓰는 도구</b><span>설치 없이 휴대폰 브라우저로 쓰는 경보 앱과 관리자 관제 화면</span></span></div>
-      </div>
+  <noscript>
+    <div class="noscript">
+      <h1>김호성의 마을</h1>
+      <p>이 페이지는 자바스크립트로 동작합니다. 아래 페이지에서 내용을 볼 수 있어요.</p>
+      <p><a href="about/">소개</a> · <a href="projects/">프로젝트</a> · <a href="activities/">취미 · 활동</a></p>
     </div>
-  </div>
-</section>
-
-<!-- ═══ 프로젝트 ═══ -->
-<section class="section" id="projects">
-  <div class="wrap">
-    <div class="reveal">
-      <span class="eyebrow">프로젝트</span>
-      <h2>대표 프로젝트</h2>
-      <p class="sub">이름을 누르면 기능, 화면, 작동 원리, 실행 방법을 담은 상세 페이지로 이동합니다.</p>
-    </div>
-
-    <article class="project-card reveal">
-      <a class="project-media" href="projects/soc-map/" aria-label="SOC-MAP 상세 페이지">
-        <div class="pm-stage">
-          <div class="browser">
-            <div class="browser-bar"><i></i><i></i><i></i></div>
-            <img src="assets/img/manager-monitor.jpg" width="1440" height="900" alt="SOC-MAP 관리자 관제 화면: 위성 지도 위의 장비 위험 반경과 작업자 위치">
-          </div>
-          <div class="phone"><img src="assets/img/field-warning.jpg" width="390" height="844" alt="SOC-MAP 현장 앱의 위험 구역 접근 경고 화면" loading="lazy"></div>
-        </div>
-      </a>
-      <div class="project-body">
-        <div class="kicker"><span class="tag">캡스톤 디자인</span><span class="tag">건설 안전</span><span class="tag">웹 · 모바일</span></div>
-        <h3>SOC-MAP</h3>
-        <p class="tagline">GPS 기반 공사 현장 위험 관제 시스템</p>
-        <p>공사 현장을 실제 GPS 위치에 등록하고 KOSHA 기준 장비 위험 반경을 m 단위로 계산합니다. 작업자와 장비 운전원의 휴대폰이 서로의 위치를 1초마다 공유해, 위험 구역에 다가가면 본인에게, 들어가면 관리자에게 경보를 보냅니다.</p>
-        <ul class="checks">
-          <li><span><b>장비 위험도 엔진</b> — 굴착기·크레인 등 5종, 풍속·고압선 이격 등 법정 기준 반영</span></li>
-          <li><span><b>실제 거리 계산</b> — WGS84 국소 좌표계, 2.8 km에서 오차 0.1 mm 이하</span></li>
-          <li><span><b>3방향 경보</b> — 작업자 ↔ 장비 운전원 ↔ 관리자, SOS와 경보 기록</span></li>
-          <li><span><b>AI 도면 인식 · 안전 경로</b> — YOLOv8 건물 인식, 위험 회피 A* 경로</span></li>
-        </ul>
-        <div class="tags"><span class="tag">JavaScript</span><span class="tag">Canvas · Three.js</span><span class="tag">Python FastAPI</span><span class="tag">WebSocket</span><span class="tag">YOLOv8</span></div>
-        <div class="hero-actions">
-          <a class="btn primary" href="projects/soc-map/">자세히 보기</a>
-          <a class="btn" href="projects/soc-map/demo/">라이브 데모</a>
-          <a class="btn" data-cfg="repo" href="#" target="_blank" rel="noopener">소스 코드</a>
-        </div>
-      </div>
-    </article>
-  </div>
-</section>
-
-<!-- ═══ 다룬 분야 ═══ -->
-<section class="section" id="skills">
-  <div class="wrap">
-    <div class="reveal">
-      <span class="eyebrow">다룬 분야</span>
-      <h2>프로젝트에서 직접 다룬 것들</h2>
-      <p class="sub">각 항목 아래에 SOC-MAP의 어디에 썼는지 적었습니다.</p>
-    </div>
-    <div class="skills">
-      <div class="skill reveal"><span class="ic">⚠️</span><h4>건설 안전 기준 해석</h4><p>KOSHA 기술지침, 산업안전보건기준에 관한 규칙(제37조·제221조의2·제322조)의 수치를 계산 규칙으로 정리</p><div class="used"><b>SOC-MAP</b> · 장비별 Red/Orange 구역, 전면 통제 조건</div></div>
-      <div class="skill reveal"><span class="ic">🛰️</span><h4>공간 좌표 · GPS</h4><p>WGS84 → ECEF → 국소 접평면 변환, Vincenty 거리 검증, 칼만 필터로 GPS 흔들림 보정</p><div class="used"><b>SOC-MAP</b> · 현장 좌표계, 도면 정합, 위치 공유</div></div>
-      <div class="skill reveal"><span class="ic">🧠</span><h4>컴퓨터 비전</h4><p>YOLOv8 세그멘테이션으로 배치도의 건물 외곽 인식, 타일 분할·반전 추론, 평가·재학습 스크립트</p><div class="used"><b>SOC-MAP</b> · AI 도면 건물 인식</div></div>
-      <div class="skill reveal"><span class="ic">💻</span><h4>웹 · 실시간 시스템</h4><p>Canvas 2D·Three.js 화면, FastAPI 서버, 프로젝트별 WebSocket 중계, 위험 회피 A* 경로 탐색</p><div class="used"><b>SOC-MAP</b> · 관리자 화면, 현장 앱, 서버</div></div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══ 학력 ═══ -->
-<section class="section" id="education">
-  <div class="wrap">
-    <div class="reveal">
-      <span class="eyebrow">학력</span>
-      <h2>전남대학교 건축공학과</h2>
-    </div>
-    <ol class="timeline reveal">
-      <li>
-        <span class="when">2021</span>
-        <h4>전남대학교 건축공학과 입학</h4>
-        <p>21학번</p>
-      </li>
-      <li>
-        <span class="when">캡스톤 디자인</span>
-        <h4>SOC-MAP — 공사 현장 위험 관제 시스템</h4>
-        <p>KOSHA 기준 장비 위험 반경과 휴대폰 GPS 상호 경보를 결합한 현장 안전 관제 시스템. <a href="projects/soc-map/">상세 보기 →</a></p>
-      </li>
-    </ol>
-  </div>
-</section>
-
-<!-- ═══ 연락 ═══ -->
-<section id="contact">
-  <div class="wrap">
-    <div class="contact reveal">
-      <h2>연락</h2>
-      <p>프로젝트에 대한 질문이나 의견은 아래로 보내 주세요.</p>
-      <div class="hero-actions" id="contactLinks" data-cfg-group>
-        <a class="btn primary" data-cfg="email" href="#">이메일 보내기</a>
-        <a class="btn" data-cfg="github" href="#" target="_blank" rel="noopener">GitHub</a>
-      </div>
-      <p class="fallback" data-cfg-fallback="contactLinks" hidden>연락처는 곧 추가됩니다.</p>
-    </div>
-  </div>
-</section>
+  </noscript>
 </main>
 
-<footer class="footer">
-  <div class="wrap">
-    <div>
-      <a class="brand" href="#top"><span class="mono" aria-hidden="true">김</span>김호성</a>
-      <p style="margin-top:14px">전남대학교 건축공학과 · 21학번</p>
-      <p>© 2026 김호성</p>
-    </div>
-    <div class="links">
-      <a href="#about">소개</a>
-      <a href="#projects">프로젝트</a>
-      <a href="projects/soc-map/">SOC-MAP</a>
-      <a data-cfg="github" href="#" target="_blank" rel="noopener">GitHub</a>
-    </div>
-  </div>
-</footer>
-
 <script src="assets/js/config.js"></script>
-<script src="assets/js/main.js"></script>
+<script src="assets/js/game-data.js"></script>
+<script src="assets/js/game.js"></script>
 </body>
 </html>
