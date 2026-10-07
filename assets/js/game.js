@@ -116,6 +116,41 @@
     '.owwwwo.',
     '..oooo..',
   ];
+  const SWORD = [   // 검술 스킬의 검 (손잡이가 아래)
+    '..o..',
+    '.owo.',
+    '.owo.',
+    '.owo.',
+    '.owo.',
+    '.owo.',
+    '.owo.',
+    '.owo.',
+    '.owo.',
+    'oyyyo',
+    '.oho.',
+    '.oho.',
+    '..o..',
+  ];
+  const DUMMY = [   // 연습용 허수아비
+    '.....oooooo.....',
+    '....oyyyyyyo....',
+    '...oyyyyyyyyo...',
+    '...oyeyyyyeyo...',
+    '...oyyyyyyyyo...',
+    '...oyyymmyyyo...',
+    '....oyyyyyyo....',
+    '.....oooooo.....',
+    'oooooobbbboooooo',
+    'obbbbbbbbbbbbbbo',
+    'oooooobbbboooooo',
+    '.....obbbbo.....',
+    '.....obxxbo.....',
+    '.....obxxbo.....',
+    '.....obbbbo.....',
+    '.....obbbbo.....',
+    '....oobbbboo....',
+    '...oooooooooo...',
+  ];
   const BASE_PAL = { o: '#2a1d16', s: '#fbdcc0', S: '#eab490', e: '#2a1d16', r: '#ffa3a3', m: '#c24a3a', b: '#3b2e25', w: '#ffffff', k: '#2a1d16' };
   const SPRITES = {
     me: { top: HAIR, body: BODY, legs: LEGS, pal: { h: '#3b2a20', c: '#c0532a', C: '#9e4220', p: '#4a4f63', P: '#3a3e4f' } },
@@ -154,7 +189,7 @@
   // ═══════════════════════════ 월드 구성 ═══════════════════════════
   const stage = $('#stage'), world = $('#world');
   const far = $('#far'), mid = $('#mid');
-  const player = { el: $('#player'), img: $('#player img'), x: 0, target: null, talkTo: null, walking: false, frame: 0, frameT: 0 };
+  const player = { el: $('#player'), img: $('#player .body'), x: 0, target: null, talkTo: null, arrive: null, walking: false, frame: 0, frameT: 0 };
   const npcs = DATA.npcs.map(n => ({ ...n }));
   const byId = Object.fromEntries(npcs.map(n => [n.id, n]));
   const npcsByX = [...npcs].sort((a, b) => a.x - b.x);
@@ -200,6 +235,10 @@
     document.querySelectorAll('[data-at]').forEach(el => { el.style.left = Math.round(parseFloat(el.dataset.at) * worldW) + 'px'; });
     $('#ball').src = draw(BALL, { ...BASE_PAL, w: '#ffffff', k: '#2a1d16' }, scale);
     player.img.width = W * scale; player.img.height = SPRITE_H * scale;
+    $('#sword').src = draw(SWORD, { o: '#2a1d16', w: '#e8f1ff', y: '#f2c230', h: '#7a5235' }, scale);
+    dummy.px = Math.round(parseFloat(dummy.el.dataset.at) * worldW);
+    dummy.img.src = draw(DUMMY, { ...BASE_PAL, y: '#e9c46a', m: '#b8452a', b: '#9a6a40', x: '#d6452f' }, scale);
+    dummy.img.width = 16 * scale; dummy.img.height = DUMMY.length * scale;
     player.x = prevFrac == null ? byId.me.px + (vw < 640 ? 50 : 90) : prevFrac * worldW;
     setPlayerFrame(true);
     buildMinimap();
@@ -215,7 +254,7 @@
     if (dialog.open) closeDialog(false);
     const spot = Math.max(30, Math.min(worldW - 30, standSpot(n)));
     if (REDUCE || Math.abs(spot - player.x) < 6) { player.x = spot; player.target = null; openDialog(id); render(0); return; }
-    player.target = spot; player.talkTo = id;
+    player.target = spot; player.talkTo = id; player.arrive = null;
   }
   function followTo(n) { player.target = Math.max(30, Math.min(worldW - 30, standSpot(n))); player.talkTo = null; }
 
@@ -240,13 +279,14 @@
       if (keys.right) dir += 1;
     }
     let moving = false;
-    if (dir) { player.target = null; player.talkTo = null; player.x += dir * SPEED * dt; moving = true; player.face = dir; }
+    if (dir) { player.target = null; player.talkTo = null; player.arrive = null; player.x += dir * SPEED * dt; moving = true; player.face = dir; }
     else if (player.target != null) {
       const d = player.target - player.x, step = SPEED * dt;
       player.face = Math.sign(d) || player.face;
       if (Math.abs(d) <= step) {
         player.x = player.target; player.target = null;
         if (player.talkTo) { const id = player.talkTo; player.talkTo = null; openDialog(id); }
+        if (player.arrive) { const f = player.arrive; player.arrive = null; f(); }
       } else { player.x += Math.sign(d) * step; moving = true; }
     }
     player.x = Math.max(24, Math.min(worldW - 24, player.x));
@@ -303,7 +343,7 @@
   stage.addEventListener('click', e => {
     if (dialog.open || e.target.closest('.npc, .hud, .dialog, a, button')) return;
     const r = world.getBoundingClientRect();
-    player.target = Math.max(24, Math.min(worldW - 24, e.clientX - r.left)); player.talkTo = null;
+    player.target = Math.max(24, Math.min(worldW - 24, e.clientX - r.left)); player.talkTo = null; player.arrive = null;
   });
 
   // 키보드
@@ -313,6 +353,7 @@
     if (dialog.open) { dialogKey(e); return; }
     if (LEFT.includes(e.key)) { keys.left = true; e.preventDefault(); }
     else if (RIGHT.includes(e.key)) { keys.right = true; e.preventDefault(); }
+    else if ((e.key === 'z' || e.key === 'Z' || e.key === 'ㅋ') && !e.repeat) { e.preventDefault(); slash(); }
     else if ((e.key === ' ' || e.key === 'ArrowUp') && !e.target.closest('button, a')) {
       const n = nearest(100);
       if (n) { e.preventDefault(); walkAndTalk(n.id); }
@@ -323,6 +364,51 @@
     if (RIGHT.includes(e.key)) keys.right = false;
   });
   window.addEventListener('blur', () => { keys.left = keys.right = false; });
+
+  // ═══════════════════════════ 스킬: 검술 ═══════════════════════════
+  // Z 키 · ⚔️ 버튼으로 검을 휘두름. 연습용 허수아비를 맞히면 데미지 숫자가 뜸
+  const dummy = { el: $('#dummy'), img: $('#dummy img'), px: 0 };
+  const fxLayer = $('#fxLayer'), skillBtn = $('#skillSlash');
+  const COOL = 350;   // ms
+  let lastSlash = 0, slashCount = 0, stack = 0, stackT = null;
+  const restart = (el, cls) => { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); };
+  function slash() {
+    const now = performance.now();
+    if (dialog.open || now - lastSlash < COOL) return;
+    lastSlash = now;
+    restart(player.el, 'slashing');
+    restart(skillBtn, 'cool');
+    clearTimeout(player.slashT);
+    player.slashT = setTimeout(() => player.el.classList.remove('slashing'), 400);
+    const d = dummy.px - player.x, face = player.face < 0 ? -1 : 1;
+    const hit = Math.abs(d) < 30 || (Math.abs(d) <= 130 && Math.sign(d) === face);
+    if (hit) setTimeout(hitDummy, 110);
+    else if (++slashCount === 1) toast('⚔️ 검술! 연습용 허수아비 앞에서 써 보세요');
+  }
+  function hitDummy() {
+    restart(dummy.el, 'hit');
+    const crit = Math.random() < 0.2;
+    const dmg = Math.round((1000 + Math.random() * 2000) * (crit ? 1.8 : 1));
+    const el = document.createElement('span');
+    el.className = 'dmg' + (crit ? ' crit' : '');
+    el.textContent = dmg.toLocaleString('ko-KR');
+    el.style.left = dummy.px + 'px';
+    el.style.setProperty('--stack', stack);
+    stack = (stack + 1) % 4;
+    clearTimeout(stackT); stackT = setTimeout(() => { stack = 0; }, 900);
+    fxLayer.appendChild(el);
+    setTimeout(() => el.remove(), 1000);
+  }
+  skillBtn.addEventListener('click', e => { e.stopPropagation(); slash(); });
+  dummy.el.addEventListener('click', e => {
+    e.stopPropagation();
+    if (dialog.open) closeDialog(false);
+    const spot = Math.max(24, Math.min(worldW - 24, dummy.px + (player.x < dummy.px ? -60 : 60)));
+    const attack = () => { player.face = Math.sign(dummy.px - player.x) || player.face; render(0); slash(); };
+    player.talkTo = null;
+    if (REDUCE || Math.abs(spot - player.x) < 6) { player.x = spot; player.target = null; attack(); return; }
+    player.target = spot; player.arrive = attack;
+  });
 
   // ═══════════════════════════ 대화창 ═══════════════════════════
   const dialog = { open: false, npc: null, page: 0, typing: null, full: '' };

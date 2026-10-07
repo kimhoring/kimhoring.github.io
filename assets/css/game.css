@@ -76,7 +76,7 @@ img, svg { display: block; }
 .stage[data-time="dusk"] { --scene: brightness(.86) saturate(1.1) sepia(.28); --chr: brightness(.95) sepia(.1); }
 .stage[data-time="night"] { --scene: brightness(.5) saturate(.65); --chr: brightness(.8) saturate(.85); }
 .far, .mid, .ground, .props { filter: var(--scene); transition: filter 2.5s ease; }
-.npc .sprite, .npc .board-art, .player img { filter: var(--chr); transition: filter .6s ease; }
+.npc .sprite, .npc .board-art, .player img, .dummy img { filter: var(--chr); transition: filter .6s ease; }
 /* 밤의 반딧불이 */
 .fireflies { position: absolute; left: 0; right: 0; bottom: var(--ground); height: 170px; z-index: 5; pointer-events: none; opacity: 0; transition: opacity 2.5s ease; }
 .stage[data-time="night"] .fireflies { opacity: 1; }
@@ -203,11 +203,67 @@ img, svg { display: block; }
 
 /* 방문자 */
 .player { position: absolute; bottom: var(--ground); z-index: 4; transform: translateX(-50%); pointer-events: none; display: flex; flex-direction: column; align-items: center; }
-.player img { image-rendering: pixelated; transform: scaleX(var(--face, 1)); }
-.player.walking img { animation: walkbob .28s steps(2) infinite; }
+.player img { image-rendering: pixelated; }
+.player .body { transform: scaleX(var(--face, 1)); }
+.player.walking .body { animation: walkbob .28s steps(2) infinite; }
 @keyframes walkbob { 50% { translate: 0 -3px; } }
 .player .shadow { position: absolute; bottom: -4px; width: 50px; height: 10px; border-radius: 50%; background: rgba(42, 29, 22, .22); z-index: -1; }
 .player .you { position: absolute; top: calc(100% + 6px); padding: 2px 9px 3px; border-radius: 5px; background: #3f7d4e; color: #fff; font: 12px/1.4 var(--pixel); white-space: nowrap; }
+
+/* ── 스킬: 검술 ── */
+.player .fx { position: absolute; inset: 0; transform: scaleX(var(--face, 1)); pointer-events: none; }
+.player .sword { position: absolute; left: calc(50% + 10px); bottom: 26px; width: 20px; height: auto; transform-origin: 50% 100%; opacity: 0; }
+.player .slash {
+  position: absolute; left: calc(50% - 34px); bottom: -14px; width: 140px; height: 130px; border-radius: 50%;
+  border: 10px solid transparent; border-right-color: #fff; border-top-color: rgba(190, 230, 255, .85);
+  filter: drop-shadow(0 0 6px rgba(120, 200, 255, .9)); opacity: 0;
+}
+.player.slashing .sword { animation: swing .32s cubic-bezier(.2, .8, .3, 1); }
+.player.slashing .slash { animation: slash .32s ease-out; }
+@keyframes swing { 0% { opacity: 1; transform: rotate(-120deg); } 70% { opacity: 1; transform: rotate(80deg); } 100% { opacity: 0; transform: rotate(90deg); } }
+@keyframes slash { 0% { opacity: 0; transform: rotate(-70deg) scale(.6); } 30% { opacity: 1; } 100% { opacity: 0; transform: rotate(30deg) scale(1.05); } }
+
+.dummy {
+  position: absolute; bottom: var(--ground); z-index: 3; transform: translateX(-50%); padding: 0; margin: 0; border: 0; background: none; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center;
+}
+.dummy img { image-rendering: pixelated; transform-origin: 50% 100%; }
+.dummy:hover img, .dummy:focus-visible img { filter: drop-shadow(2px 0 0 #fff) drop-shadow(-2px 0 0 #fff) drop-shadow(0 -2px 0 #fff); }
+.dummy:focus-visible { outline: none; }
+.dummy .tag { color: #ffe1a8; }
+.dummy.hit img { animation: dummyhit .4s ease-out; }
+@keyframes dummyhit { 0% { filter: brightness(2.2); } 25% { transform: rotate(-9deg) translateX(4px); } 55% { transform: rotate(6deg); filter: none; } 100% { transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {   /* 움직임 줄이기: 휘두르는 대신 잠깐 멈춘 그림으로 */
+  .player.slashing .sword { opacity: 1; transform: rotate(60deg); }
+  .player.slashing .slash { opacity: 1; }
+}
+
+.fx-layer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+.dmg {
+  position: absolute; bottom: calc(var(--ground) + 84px + var(--stack, 0) * 38px); transform: translateX(-50%); white-space: nowrap;
+  font: 24px/1 'Galmuri11', sans-serif; color: #ffb02e; letter-spacing: -1px;
+  text-shadow: 2px 0 #3a1d00, -2px 0 #3a1d00, 0 2px #3a1d00, 0 -2px #3a1d00, 2px 2px #3a1d00, -2px -2px #3a1d00, 2px -2px #3a1d00, -2px 2px #3a1d00;
+  animation: dmg .95s ease-out forwards;
+}
+.dmg.crit { color: #ff5d5d; font-size: 30px; }
+.dmg.crit::before { content: 'CRITICAL'; display: block; margin-bottom: 2px; font-size: 11px; letter-spacing: 1px; color: #ffe08a; text-align: center; }
+@keyframes dmg { 0% { opacity: 0; translate: 0 10px; scale: .6; } 15% { opacity: 1; translate: 0 0; scale: 1.15; } 30% { scale: 1; } 70% { opacity: 1; } 100% { opacity: 0; translate: 0 -46px; } }
+
+.skills { right: 14px; bottom: calc(var(--bar) + 14px); display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.skill {
+  position: relative; width: 54px; height: 54px; border-radius: 12px; overflow: hidden; cursor: pointer;
+  background: var(--panel); border: 2px solid var(--gold); color: #fff; box-shadow: 0 4px 12px rgba(0, 0, 0, .25);
+  display: grid; place-items: center; padding: 0;
+}
+.skill .ic { font-size: 26px; line-height: 1; }
+.skill kbd { position: absolute; left: 3px; top: 2px; font: 10px/1 var(--pixel); color: var(--gold); }
+.skill .cd { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: rgba(0, 0, 0, .55); }
+.skill.cool .cd { animation: cooldown .35s linear; }
+@keyframes cooldown { from { height: 100%; } to { height: 0; } }
+.skill:hover { transform: translateY(-2px); }
+.skill:active { transform: translateY(1px); }
+.skill-name { padding: 0 6px; border-radius: 4px; background: rgba(30, 22, 17, .82); color: #fff; font-size: 11px; line-height: 1.6; }
 
 /* ── HUD ── */
 .hud { position: absolute; z-index: 10; font-family: var(--pixel); }
@@ -369,6 +425,10 @@ img, svg { display: block; }
   .mm-player { top: 6px; }
   .quick { right: 8px; top: 8px; flex-direction: column; gap: 4px; }
   .qhelper { left: 8px; top: 90px; width: 200px; }
+  .skills { right: 10px; bottom: calc(var(--bar) + 10px); }
+  .skill { width: 58px; height: 58px; }
+  .skill kbd { display: none; }
+  .dummy .tag-long { display: none; }
   .toast { top: 168px; }
   .qh-head { padding: 6px 9px; font-size: 12px; }
   .qh-list { display: none; }
