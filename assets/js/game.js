@@ -508,11 +508,44 @@
     updateQuest(false);
   }
 
+  // ═══════════════════════════ 시간대 (새벽 · 낮 · 노을 · 밤) ═══════════════════════════
+  // 기본은 방문자 컴퓨터의 시각을 따르고, 미니맵의 시간 버튼으로 직접 바꿀 수 있음
+  const TIMES = [
+    { id: 'dawn', icon: '🌅', name: '새벽', from: 5 },
+    { id: 'day', icon: '☀️', name: '낮', from: 7 },
+    { id: 'dusk', icon: '🌇', name: '노을', from: 17 },
+    { id: 'night', icon: '🌙', name: '밤', from: 19 },
+  ];
+  const timeBtn = $('#timeBtn');
+  let timeMode = 'auto';   // 'auto' 또는 TIMES 의 id
+  function clockTime() {
+    const h = new Date().getHours();
+    return [...TIMES].reverse().find(t => h >= t.from) || TIMES[3];   // 0~4시는 밤
+  }
+  function applyTime(announce) {
+    const t = timeMode === 'auto' ? clockTime() : TIMES.find(x => x.id === timeMode);
+    const changed = stage.dataset.time !== t.id;
+    stage.dataset.time = t.id;
+    timeBtn.innerHTML = `${t.icon} ${t.name}${timeMode === 'auto' ? '<small class="auto"> · 자동</small>' : ''}`;
+    timeBtn.title = timeMode === 'auto' ? '지금 시각에 맞춘 풍경이에요. 눌러서 시간대를 바꿔 보세요.' : '눌러서 시간대를 바꿔 보세요.';
+    timeBtn.setAttribute('aria-label', `시간대 ${t.name}${timeMode === 'auto' ? ', 지금 시각에 맞춤' : ''}. 눌러서 바꾸기`);
+    if (announce && changed) toast(`${t.icon} ${t.name}이 되었어요`);
+  }
+  timeBtn.addEventListener('click', () => {
+    const order = ['auto', ...TIMES.map(t => t.id)];
+    timeMode = order[(order.indexOf(timeMode) + 1) % order.length];
+    applyTime(false);
+    const t = TIMES.find(x => x.id === stage.dataset.time);
+    toast(timeMode === 'auto' ? `🕐 지금 시각에 맞춰요 (${t.name})` : `${t.icon} ${t.name}이 되었어요`);
+  });
+  setInterval(() => { if (timeMode === 'auto') applyTime(true); }, 60 * 1000);
+
   // 빠른 메뉴: data-talk 버튼
   document.querySelectorAll('[data-talk]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); walkAndTalk(b.dataset.talk); }));
 
   // ═══════════════════════════ 시작 ═══════════════════════════
   $('#mapName').textContent = DATA.mapName;
+  applyTime(false);
   buildNpcs();
   layout();
   startChatter();

@@ -23,7 +23,10 @@
 <main class="stage" id="stage" aria-label="김호성의 마을. 사람을 눌러 대화하세요.">
   <!-- 하늘 · 먼 배경 -->
   <div class="sky" aria-hidden="true">
+    <div class="sky-tone day"></div><div class="sky-tone dawn"></div><div class="sky-tone dusk"></div><div class="sky-tone night"></div>
+    <div class="stars"></div>
     <div class="sun"></div>
+    <div class="moon"></div>
     <div class="cloud c1"></div><div class="cloud c2"></div><div class="cloud c3"></div><div class="cloud c4"></div>
   </div>
   <div class="layer far" id="far" aria-hidden="true"></div>
@@ -103,10 +106,11 @@
 
     <div class="ground" aria-hidden="true"></div>
   </div>
+  <div class="fireflies" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
 
   <!-- ═══ HUD ═══ -->
   <div class="hud minimap" role="navigation" aria-label="미니맵">
-    <div class="mm-head"><span class="mm-icon" aria-hidden="true">🗺️</span><b id="mapName">김호성의 마을</b></div>
+    <div class="mm-head"><span class="mm-icon" aria-hidden="true">🗺️</span><b id="mapName">김호성의 마을</b><button type="button" class="mm-time" id="timeBtn">☀️ 낮</button></div>
     <div class="mm-track" id="mmTrack"></div>
   </div>
 

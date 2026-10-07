@@ -36,6 +36,61 @@ img, svg { display: block; }
 .c4 { top: 30%; left: 24%; transform: scale(.5); opacity: .7; animation-duration: 160s; animation-delay: -20s; }
 @keyframes drift { from { translate: -30vw 0; } to { translate: 130vw 0; } }
 
+/* ── 시간대: 새벽 · 낮 · 노을 · 밤 (#stage[data-time]) ── */
+.sky-tone { position: absolute; inset: 0; opacity: 0; transition: opacity 2.5s ease; }
+.sky-tone.day { opacity: 1; background: linear-gradient(180deg, #8cc8ec 0%, #b9def2 38%, #fde5cf 78%, #fbd7bb 100%); }
+.sky-tone.dawn { background: linear-gradient(180deg, #8d8fcf 0%, #e7a9c4 42%, #ffc1a8 72%, #ffe2b8 100%); }
+.sky-tone.dusk { background: linear-gradient(180deg, #5a4f96 0%, #d0688a 38%, #f5874f 68%, #ffb85e 100%); }
+.sky-tone.night { background: linear-gradient(180deg, #0c1433 0%, #1a2656 45%, #2f3b74 80%, #464c84 100%); }
+.stage[data-time="dawn"] .sky-tone.dawn, .stage[data-time="dusk"] .sky-tone.dusk, .stage[data-time="night"] .sky-tone.night { opacity: 1; }
+.sun { transition: top 2.5s ease, right 2.5s ease, opacity 2.5s ease, filter 2.5s ease; }
+.stage[data-time="dawn"] .sun { top: 40%; right: 72%; filter: hue-rotate(-15deg) saturate(1.3); }
+.stage[data-time="dusk"] .sun { top: 42%; right: 10%; filter: hue-rotate(-28deg) saturate(1.7); }
+.stage[data-time="night"] .sun { top: 70%; opacity: 0; }
+.moon {
+  position: absolute; right: 18%; top: 11%; width: 64px; height: 64px; border-radius: 50%;
+  box-shadow: inset -16px 6px 0 0 #fff3c4; filter: drop-shadow(0 0 14px rgba(255, 240, 180, .55));
+  opacity: 0; transform: translateY(40px); transition: opacity 2.5s ease, transform 2.5s ease;
+}
+.stage[data-time="night"] .moon { opacity: 1; transform: none; }
+.stars {
+  position: absolute; inset: 0 0 35% 0; opacity: 0; transition: opacity 2.5s ease;
+  background-image:
+    radial-gradient(circle at 8% 18%, #fff 0 1.4px, transparent 2px), radial-gradient(circle at 27% 62%, #fff 0 1px, transparent 1.6px),
+    radial-gradient(circle at 41% 12%, #fff6c8 0 1.8px, transparent 2.4px), radial-gradient(circle at 58% 44%, #fff 0 1.1px, transparent 1.7px),
+    radial-gradient(circle at 74% 24%, #fff 0 1.5px, transparent 2.1px), radial-gradient(circle at 90% 70%, #fff6c8 0 1.2px, transparent 1.8px),
+    radial-gradient(circle at 16% 86%, #fff 0 1px, transparent 1.6px), radial-gradient(circle at 66% 88%, #fff 0 1.3px, transparent 1.9px);
+  background-size: 280px 190px;
+  animation: twinkle 3.6s ease-in-out infinite alternate;
+}
+@keyframes twinkle { from { filter: brightness(.7); } to { filter: brightness(1.3); } }
+.stage[data-time="dawn"] .stars { opacity: .3; }
+.stage[data-time="night"] .stars { opacity: 1; }
+.cloud { transition: filter 2.5s ease; }
+.stage[data-time="dawn"] .cloud { filter: sepia(.4) hue-rotate(-35deg) saturate(1.6); }
+.stage[data-time="dusk"] .cloud { filter: sepia(.6) hue-rotate(-30deg) saturate(2.2) brightness(.95); }
+.stage[data-time="night"] .cloud { filter: brightness(.4) saturate(.6); }
+/* 풍경 · 사람 밝기 */
+.stage { --scene: none; --chr: none; }
+.stage[data-time="dawn"] { --scene: brightness(.93) saturate(.95) sepia(.12); --chr: brightness(.97); }
+.stage[data-time="dusk"] { --scene: brightness(.86) saturate(1.1) sepia(.28); --chr: brightness(.95) sepia(.1); }
+.stage[data-time="night"] { --scene: brightness(.5) saturate(.65); --chr: brightness(.8) saturate(.85); }
+.far, .mid, .ground, .props { filter: var(--scene); transition: filter 2.5s ease; }
+.npc .sprite, .npc .board-art, .player img { filter: var(--chr); transition: filter .6s ease; }
+/* 밤의 반딧불이 */
+.fireflies { position: absolute; left: 0; right: 0; bottom: var(--ground); height: 170px; z-index: 5; pointer-events: none; opacity: 0; transition: opacity 2.5s ease; }
+.stage[data-time="night"] .fireflies { opacity: 1; }
+.fireflies i { position: absolute; width: 5px; height: 5px; border-radius: 50%; background: #fff4a0; box-shadow: 0 0 8px 3px rgba(255, 240, 140, .6); animation: firefly 6s ease-in-out infinite; }
+.fireflies i:nth-child(1) { left: 7%; bottom: 40px; }
+.fireflies i:nth-child(2) { left: 19%; bottom: 110px; animation-delay: -1.5s; animation-duration: 7s; }
+.fireflies i:nth-child(3) { left: 33%; bottom: 70px; animation-delay: -3s; }
+.fireflies i:nth-child(4) { left: 46%; bottom: 140px; animation-delay: -4.2s; animation-duration: 8s; }
+.fireflies i:nth-child(5) { left: 58%; bottom: 50px; animation-delay: -2.2s; }
+.fireflies i:nth-child(6) { left: 71%; bottom: 120px; animation-delay: -5s; animation-duration: 7.5s; }
+.fireflies i:nth-child(7) { left: 83%; bottom: 80px; animation-delay: -.8s; }
+.fireflies i:nth-child(8) { left: 94%; bottom: 150px; animation-delay: -3.6s; animation-duration: 6.5s; }
+@keyframes firefly { 0%, 100% { transform: translate(0, 0); opacity: .15; } 50% { transform: translate(18px, -26px); opacity: 1; } }
+
 .layer { position: absolute; left: 0; right: 0; background-repeat: repeat-x; background-position: 0 100%; pointer-events: none; }
 .far {
   bottom: calc(var(--ground) + 30px); height: 260px;
@@ -157,6 +212,9 @@ img, svg { display: block; }
 .minimap { left: 14px; top: 14px; width: 250px; padding: 10px 12px 12px; border-radius: 10px; background: var(--panel); border: 1px solid var(--panel-line); color: #fff; box-shadow: 0 6px 18px rgba(0, 0, 0, .18); }
 .mm-head { display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .mm-head b { font-weight: 400; color: var(--gold); }
+.mm-time { margin-left: auto; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--panel-line); background: rgba(255, 255, 255, .1); color: #fff; font: 11px/1.5 var(--pixel); cursor: pointer; white-space: nowrap; }
+.mm-time:hover { background: var(--accent); }
+.mm-time small { font-size: inherit; color: #d8c8b8; }
 .mm-track { position: relative; height: 34px; margin-top: 8px; border-radius: 6px; background: linear-gradient(#9fd0ee 0 55%, #93c869 55% 64%, #b07a48 64%); border: 1px solid rgba(255, 255, 255, .25); overflow: hidden; }
 .mm-dot { position: absolute; top: 9px; width: 11px; height: 11px; margin-left: -5px; border: 2px solid var(--ink); border-radius: 50%; background: #ffd23f; padding: 0; cursor: pointer; }
 .mm-dot.obj { border-radius: 2px; background: #c58a52; }
@@ -240,8 +298,10 @@ img, svg { display: block; }
 @media (max-height: 720px) { .dialog { bottom: calc(var(--bar) + 18px); } }
 @media (max-width: 640px) {
   :root { --ground: 128px; --bar: 50px; }
-  .minimap { left: 8px; top: 8px; width: 170px; padding: 8px 9px 9px; }
-  .mm-head { font-size: 12px; }
+  .minimap { left: 8px; top: 8px; width: 200px; padding: 8px 9px 9px; }
+  .mm-head { font-size: 12px; white-space: nowrap; }
+  .mm-time { padding: 1px 6px; font-size: 10px; }
+  .mm-time .auto { display: none; }
   .mm-track { height: 28px; }
   .mm-dot { top: 7px; }
   .mm-player { top: 6px; }

@@ -4,7 +4,7 @@
  *   email  : 공개할 연락용 이메일       예) 'name@example.com'
  */
 window.SITE_CONFIG = {
-  github: '',
+  github: 'https://github.com/kimhoring',
   repo: '',
   email: '',
 };
