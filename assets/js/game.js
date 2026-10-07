@@ -189,7 +189,7 @@
   // ═══════════════════════════ 월드 구성 ═══════════════════════════
   const stage = $('#stage'), world = $('#world');
   const far = $('#far'), mid = $('#mid');
-  const player = { el: $('#player'), img: $('#player .body'), x: 0, target: null, talkTo: null, arrive: null, walking: false, frame: 0, frameT: 0 };
+  const player = { el: $('#player'), img: $('#player .body'), x: 0, y: 0, vy: 0, target: null, talkTo: null, arrive: null, walking: false, frame: 0, frameT: 0 };
   const npcs = DATA.npcs.map(n => ({ ...n }));
   const byId = Object.fromEntries(npcs.map(n => [n.id, n]));
   const npcsByX = [...npcs].sort((a, b) => a.x - b.x);
@@ -247,6 +247,21 @@
 
   // ═══════════════════════════ 이동 · 카메라 ═══════════════════════════
   const SPEED = 300;   // px/s
+  const JUMP_V = 620, GRAVITY = 1800;   // 점프 속도 · 중력 (px/s, px/s²) → 최고 약 107px
+  function jump() {
+    if (dialog.open || player.y > 0) return;
+    player.vy = JUMP_V; player.y = 0.01;
+    setPlayerFrame();
+  }
+  function land() {
+    player.y = 0; player.vy = 0;
+    setPlayerFrame();
+    const dust = document.createElement('span');
+    dust.className = 'dust';
+    dust.style.left = player.x.toFixed(0) + 'px';
+    $('#fxLayer').appendChild(dust);
+    setTimeout(() => dust.remove(), 400);
+  }
   function standSpot(n) { return n.px + (player.x < n.px ? -70 : 70); }
   function walkAndTalk(id) {
     const n = byId[id];
@@ -259,7 +274,7 @@
   function followTo(n) { player.target = Math.max(30, Math.min(worldW - 30, standSpot(n))); player.talkTo = null; }
 
   function setPlayerFrame(force) {
-    const walk = player.walking && player.frame % 2 === 1;
+    const walk = player.y > 0 || (player.walking && player.frame % 2 === 1);   // 공중에서는 다리 벌린 자세
     const src = sprite('player', scale, walk);
     if (force || player.img.src !== src) player.img.src = src;
   }
@@ -290,6 +305,11 @@
       } else { player.x += Math.sign(d) * step; moving = true; }
     }
     player.x = Math.max(24, Math.min(worldW - 24, player.x));
+    if (player.y > 0) {   // 점프 중: 중력
+      player.vy -= GRAVITY * dt;
+      player.y += player.vy * dt;
+      if (player.y <= 0) land();
+    }
     if (moving !== player.walking) { player.walking = moving; player.el.classList.toggle('walking', moving); }
     if (moving) {
       player.frameT += dt;
@@ -306,6 +326,7 @@
     mid.style.backgroundPositionX = `${(-camX * 0.45).toFixed(1)}px`;
     player.el.style.left = player.x.toFixed(1) + 'px';
     player.el.style.setProperty('--face', player.face < 0 ? -1 : 1);
+    player.el.style.setProperty('--jy', player.y.toFixed(1));
     // 가까운 NPC 표시
     const near = nearest(90);
     npcs.forEach(n => n.el.classList.toggle('near', n === near && !dialog.open));
@@ -354,7 +375,8 @@
     if (LEFT.includes(e.key)) { keys.left = true; e.preventDefault(); }
     else if (RIGHT.includes(e.key)) { keys.right = true; e.preventDefault(); }
     else if ((e.key === 'z' || e.key === 'Z' || e.key === 'ㅋ') && !e.repeat) { e.preventDefault(); slash(); }
-    else if ((e.key === ' ' || e.key === 'ArrowUp') && !e.target.closest('button, a')) {
+    else if (['ArrowUp', 'w', 'W', 'ㅈ', 'Alt'].includes(e.key)) { e.preventDefault(); if (!e.repeat) jump(); }
+    else if (e.key === ' ' && !e.target.closest('button, a')) {
       const n = nearest(100);
       if (n) { e.preventDefault(); walkAndTalk(n.id); }
     }
@@ -443,6 +465,7 @@
     setTimeout(() => el.remove(), 1000);
   }
   skillBtn.addEventListener('click', e => { e.stopPropagation(); slash(); });
+  $('#skillJump').addEventListener('click', e => { e.stopPropagation(); jump(); });
   dummy.el.addEventListener('click', e => {
     e.stopPropagation();
     if (dialog.open) closeDialog(false);
