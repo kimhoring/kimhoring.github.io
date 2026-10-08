@@ -116,21 +116,6 @@
     '.owwwwo.',
     '..oooo..',
   ];
-  const SWORD = [   // 검술 스킬의 검 (손잡이가 아래)
-    '..o..',
-    '.owo.',
-    '.owo.',
-    '.owo.',
-    '.owo.',
-    '.owo.',
-    '.owo.',
-    '.owo.',
-    '.owo.',
-    'oyyyo',
-    '.oho.',
-    '.oho.',
-    '..o..',
-  ];
   const DUMMY = [   // 연습용 허수아비
     '.....oooooo.....',
     '....oyyyyyyo....',
@@ -235,7 +220,7 @@
     document.querySelectorAll('[data-at]').forEach(el => { el.style.left = Math.round(parseFloat(el.dataset.at) * worldW) + 'px'; });
     $('#ball').src = draw(BALL, { ...BASE_PAL, w: '#ffffff', k: '#2a1d16' }, scale);
     player.img.width = W * scale; player.img.height = SPRITE_H * scale;
-    $('#sword').src = draw(SWORD, { o: '#2a1d16', w: '#e8f1ff', y: '#f2c230', h: '#7a5235' }, scale);
+    sizeAttack();
     dummy.px = Math.round(parseFloat(dummy.el.dataset.at) * worldW);
     dummy.img.src = draw(DUMMY, { ...BASE_PAL, y: '#e9c46a', m: '#b8452a', b: '#9a6a40', x: '#d6452f' }, scale);
     dummy.img.width = 16 * scale; dummy.img.height = DUMMY.length * scale;
@@ -392,7 +377,98 @@
   const dummy = { el: $('#dummy'), img: $('#dummy img'), px: 0 };
   const fxLayer = $('#fxLayer'), skillBtn = $('#skillSlash');
   const COOL = 700;   // ms
-  const HITS = [80, 210, 360];   // 3연타가 맞는 시각 (ms)
+  const HITS = [80, 190, 390];   // 3연타가 맞는 시각 (ms) — 아래 공격 프레임의 「베는」 순간과 맞춤
+
+  // ── 공격 동작: 팔 · 검 · 궤적 잔상을 프레임마다 픽셀로 다시 그림 (스프라이트 시트처럼 한 장씩 넘김) ──
+  // h: 손 위치(캐릭터 16×23 격자 기준), a: 검 각도(0 = 앞, + = 아래), smear: 이 프레임에 남는 궤적 [시작 각도, 끝 각도]
+  const ATK_W = 44, ATK_H = 38, OX = 10, OY = 8;   // 검이 삐져나올 여유를 둔 큰 격자
+  const ATK_FRAMES = [
+    { h: [16, 6], a: -100, ms: 40 },                              // 1타: 들어 올림
+    { h: [18, 9], a: -45, smear: [-100, -45], ms: 40 },
+    { h: [19, 13], a: 0, smear: [-60, 0], ms: 60 },               // 베기 ← HITS[0]
+    { h: [17, 16], a: 55, smear: [0, 55], ms: 50 },               // 내려 벰
+    { h: [19, 13], a: 5, smear: [55, 5], ms: 60 },                // 2타: 올려 베기 ← HITS[1]
+    { h: [18, 9], a: -50, smear: [5, -50], ms: 50 },
+    { h: [16, 6], a: -110, ms: 50 },                              // 3타: 크게 들어 올림
+    { h: [18, 9], a: -50, smear: [-110, -50], ms: 40 },
+    { h: [20, 13], a: 5, smear: [-70, 5], big: true, ms: 70 },    // 마무리 베기 ← HITS[2]
+    { h: [17, 17], a: 70, smear: [5, 70], big: true, ms: 70 },
+    { h: [17, 17], a: 70, ms: 90 },                               // 자세 유지
+  ];
+  function line(x0, y0, x1, y1, plot) {   // 브레젠험 직선
+    const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      plot(x0, y0);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+  function attackFrame(f, sc, walk) {
+    const pal = { ...BASE_PAL, ...SPRITES.player.pal };
+    const base = new Map(), top = new Map(), out = new Map(), smear = new Map();
+    const key = (x, y) => `${x},${y}`;
+    rowsOf(SPRITES.player, walk).forEach((row, y) => [...row].forEach((ch, x) => {
+      if ((y === 14 || y === 15) && (x === 13 || x === 14)) ch = x === 13 ? 'o' : '.';   // 앞쪽 팔은 지우고 새로 그림
+      if (ch !== '.' && pal[ch]) base.set(key(x + OX, y + OY), pal[ch]);
+    }));
+    const hx = f.h[0] + OX, hy = f.h[1] + OY, put = (x, y, c) => top.set(key(Math.round(x), Math.round(y)), c);
+    line(12 + OX, 13 + OY, hx, hy, (x, y) => put(x, y, pal.c));   // 팔
+    const r = f.a * Math.PI / 180, dx = Math.cos(r), dy = Math.sin(r), px = -dy, py = dx;
+    for (let t = 1; t <= 11; t++) put(hx + dx * t, hy + dy * t, t === 11 ? '#ffffff' : '#dfe9f7');   // 칼날
+    for (let t = 2; t <= 9; t++) { const k = key(Math.round(hx + dx * t + px), Math.round(hy + dy * t + py)); if (!top.has(k)) top.set(k, '#9fb3cc'); }
+    for (const s of [-2, -1, 1, 2]) put(hx + px * s, hy + py * s, '#f2c230');   // 코등이
+    for (const t of [-1, -2]) put(hx + dx * t, hy + dy * t, '#7a5235');        // 손잡이
+    put(hx, hy, pal.s);                                                            // 손
+    top.forEach((c, k) => {   // 테두리
+      const [x, y] = k.split(',').map(Number);
+      [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([ax, ay]) => { const kk = key(x + ax, y + ay); if (!top.has(kk) && !base.has(kk)) out.set(kk, '#2a1d16'); });
+    });
+    if (f.smear) {   // 궤적 잔상 (안쪽 노랑 → 흰색 → 바깥 주황)
+      const [a0, a1] = f.smear, stp = a1 > a0 ? 4 : -4, R = f.big ? [9, 10, 11, 12, 13, 14] : [9, 10, 11, 12];
+      for (let a = a0; stp > 0 ? a <= a1 : a >= a1; a += stp) {
+        const rr = a * Math.PI / 180;
+        R.forEach((rad, i) => {
+          const kk = key(Math.round(hx + Math.cos(rr) * rad), Math.round(hy + Math.sin(rr) * rad));
+          if (!base.has(kk) && !top.has(kk) && !out.has(kk)) smear.set(kk, i === R.length - 1 ? '#ff7a1a' : i >= R.length - 3 ? '#fffbe6' : '#ffd84a');
+        });
+      }
+    }
+    const cv = document.createElement('canvas');
+    cv.width = ATK_W * sc; cv.height = ATK_H * sc;
+    const g = cv.getContext('2d');
+    [smear, base, out, top].forEach(m => m.forEach((c, k) => { const [x, y] = k.split(',').map(Number); g.fillStyle = c; g.fillRect(x * sc, y * sc, sc, sc); }));
+    return cv.toDataURL();
+  }
+  const atkCache = {};
+  function attackFrames(sc, walk) {
+    const k = `${sc}|${walk}`;
+    if (!atkCache[k]) atkCache[k] = ATK_FRAMES.map(f => { const src = attackFrame(f, sc, walk); new Image().src = src; return src; });
+    return atkCache[k];
+  }
+  const atkImg = $('#atk');
+  let atkTimer = null;
+  function sizeAttack() {
+    atkImg.width = ATK_W * scale; atkImg.height = ATK_H * scale;
+    atkImg.style.left = `${-OX * scale}px`;
+    atkImg.style.bottom = `${-(ATK_H - OY - SPRITE_H) * scale}px`;
+    attackFrames(scale, false);   // 미리 그려 둠
+  }
+  function playAttack() {
+    const frames = attackFrames(scale, player.y > 0);
+    clearTimeout(atkTimer);
+    player.el.classList.add('attacking');
+    let i = 0;
+    const step = () => {
+      if (i >= ATK_FRAMES.length) { player.el.classList.remove('attacking'); return; }
+      atkImg.src = frames[i];
+      atkTimer = setTimeout(step, ATK_FRAMES[i].ms);
+      i++;
+    };
+    step();
+  }
 
   // 불꽃 이펙트 SVG: 베기 궤적 3개 + 불꽃 폭발 + 불꽃 혀 + 불티
   function fireSVG() {
@@ -436,10 +512,11 @@
     if (dialog.open || now - lastSlash < COOL) return;
     lastSlash = now;
     restart(player.el, 'slashing');
+    playAttack();
     restart(skillBtn, 'cool');
     clearTimeout(player.slashT);
-    player.slashT = setTimeout(() => player.el.classList.remove('slashing'), 820);
-    setTimeout(() => restart(world, 'shake'), 330);
+    player.slashT = setTimeout(() => player.el.classList.remove('slashing'), 900);
+    setTimeout(() => restart(world, 'shake'), 400);
     const d = dummy.px - player.x, face = player.face < 0 ? -1 : 1;
     const hit = Math.abs(d) < 30 || (Math.abs(d) <= 150 && Math.sign(d) === face);
     if (hit) HITS.forEach((t, i) => setTimeout(() => hitDummy(i === HITS.length - 1), t));
