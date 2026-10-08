@@ -76,7 +76,7 @@ img, svg { display: block; }
 .stage[data-time="dusk"] { --scene: brightness(.86) saturate(1.1) sepia(.28); --chr: brightness(.95) sepia(.1); }
 .stage[data-time="night"] { --scene: brightness(.5) saturate(.65); --chr: brightness(.8) saturate(.85); }
 .far, .mid, .ground, .props { filter: var(--scene); transition: filter 2.5s ease; }
-.npc .sprite, .npc .board-art, .player img, .dummy img { filter: var(--chr); transition: filter .6s ease; }
+.npc .sprite, .npc .board-art, .player img, .player canvas, .dummy img { filter: var(--chr); transition: filter .6s ease; }
 /* 밤의 반딧불이 */
 .fireflies { position: absolute; left: 0; right: 0; bottom: var(--ground); height: 170px; z-index: 5; pointer-events: none; opacity: 0; transition: opacity 2.5s ease; }
 .stage[data-time="night"] .fireflies { opacity: 1; }
@@ -218,7 +218,7 @@ img, svg { display: block; }
 
 /* ── 스킬: 검술 ── */
 .player .fx { position: absolute; inset: 0; transform: scaleX(var(--face, 1)); pointer-events: none; }
-/* 공격 동작: JS 가 프레임 그림을 한 장씩 바꿔 끼움 (공격 중에는 평소 그림을 숨김) */
+/* 공격 동작: JS 가 캔버스에 매 화면 다시 그림 (공격 중에는 평소 그림을 숨김) */
 .player .atk { position: absolute; display: none; max-width: none; }
 .player.attacking .atk { display: block; }
 .player.attacking .body { visibility: hidden; }
@@ -226,13 +226,13 @@ img, svg { display: block; }
 .player .fire { position: absolute; left: calc(50% - 125px); bottom: -88px; width: 340px; height: 295px; overflow: visible; pointer-events: none; }
 .fire * { transform-box: view-box; transform-origin: 0 0; }   /* viewBox 의 (0,0) = 이펙트 중심 */
 .fire .arc, .fire .core, .fire .flash, .fire .wisp, .fire .ember { opacity: 0; }
-.player.slashing .a1 { animation: arc1 .3s ease-out .05s backwards; }
-.player.slashing .a2 { animation: arc2 .3s ease-out .16s backwards; }
-.player.slashing .a3 { animation: arc3 .42s ease-out .36s backwards; }
-.player.slashing .flash { animation: fireflash .24s ease-out .39s backwards; }
-.player.slashing .core { animation: firecore .46s ease-out .38s backwards; }
-.player.slashing .wisp { animation: wisp .46s ease-out .39s backwards; }
-.player.slashing .ember { animation: ember var(--t, .5s) ease-out .39s backwards; }
+.player.slashing .a1 { animation: arc1 .3s ease-out .07s backwards; }
+.player.slashing .a2 { animation: arc2 .3s ease-out .2s backwards; }
+.player.slashing .a3 { animation: arc3 .42s ease-out .4s backwards; }
+.player.slashing .flash { animation: fireflash .24s ease-out .43s backwards; }
+.player.slashing .core { animation: firecore .46s ease-out .42s backwards; }
+.player.slashing .wisp { animation: wisp .46s ease-out .43s backwards; }
+.player.slashing .ember { animation: ember var(--t, .5s) ease-out .43s backwards; }
 @keyframes arc1 { 0% { opacity: 0; transform: rotate(-65deg) scale(.6); } 25% { opacity: 1; } 100% { opacity: 0; transform: rotate(0deg) scale(.92); } }
 @keyframes arc2 { 0% { opacity: 0; transform: scaleY(-1) rotate(-65deg) scale(.6); } 25% { opacity: 1; } 100% { opacity: 0; transform: scaleY(-1) rotate(0deg) scale(.85); } }
 @keyframes arc3 { 0% { opacity: 0; transform: rotate(-70deg) scale(.8, .7); } 20% { opacity: 1; } 100% { opacity: 0; transform: rotate(-12deg) scale(1.35, .95); } }
