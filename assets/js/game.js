@@ -375,7 +375,7 @@
   // ═══════════════════════════ 스킬: 화염검 (검술) ═══════════════════════════
   // Z 키 · 🔥 버튼으로 3연속 화염 베기. 연습용 허수아비를 맞히면 데미지 숫자가 뜸
   const dummy = { el: $('#dummy'), img: $('#dummy img'), px: 0 };
-  const fxLayer = $('#fxLayer'), skillBtn = $('#skillSlash');
+  const fxLayer = $('#fxLayer');   // 점프(↑ · W · Alt)와 화염검(Z)은 화면에 안내하지 않는 숨은 기능
   const COOL = 700;   // ms
   const HITS = [110, 230, 433];   // 3연타가 맞는 시각 (ms) — 아래 SWING 에서 칼날이 앞(0°)을 지나는 순간
 
@@ -575,7 +575,6 @@
     lastSlash = now;
     restart(player.el, 'slashing');
     playAttack();
-    restart(skillBtn, 'cool');
     clearTimeout(player.slashT);
     player.slashT = setTimeout(() => player.el.classList.remove('slashing'), 960);
     setTimeout(() => restart(world, 'shake'), 430);
@@ -603,13 +602,11 @@
     fxLayer.appendChild(el);
     setTimeout(() => el.remove(), 1000);
   }
-  skillBtn.addEventListener('click', e => { e.stopPropagation(); slash(); });
-  $('#skillJump').addEventListener('click', e => { e.stopPropagation(); jump(); });
   dummy.el.addEventListener('click', e => {
     e.stopPropagation();
     if (dialog.open) closeDialog(false);
     const spot = Math.max(24, Math.min(worldW - 24, dummy.px + (player.x < dummy.px ? -60 : 60)));
-    const attack = () => { player.face = Math.sign(dummy.px - player.x) || player.face; render(0); slash(); };
+    const attack = () => { player.face = Math.sign(dummy.px - player.x) || player.face; render(0); };   // 걸어가서 바라보기만 (공격은 Z 를 아는 사람만)
     player.talkTo = null;
     if (REDUCE || Math.abs(spot - player.x) < 6) { player.x = spot; player.target = null; attack(); return; }
     player.target = spot; player.arrive = attack;
