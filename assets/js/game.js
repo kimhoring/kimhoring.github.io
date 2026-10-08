@@ -382,14 +382,14 @@
   // ── 공격 동작: 화면이 바뀔 때마다(초당 약 60번) 검 각도를 부드럽게 바꿔 그림 → 3연타가 하나의 동작으로 이어짐 ──
   // 검 각도는 아래 키프레임 사이를 가속 · 감속 곡선으로 이음. 팔은 검을 따라 돌고, 몸은 휘두르는 쪽으로 기울며,
   // 칼끝이 지나간 자리는 최근 0.12초의 궤적을 띠로 이어 그림.
-  const ATK_W = 60, ATK_H = 46, OX = 18, OY = 13;   // 캐릭터(16×23 격자)를 가운데 두고 검이 돌 여유
+  const ATK_W = 72, ATK_H = 56, OX = 24, OY = 18;   // 캐릭터(16×23 격자)를 가운데 두고 검 · 불꽃이 퍼질 여유
   const SWING = [   // t: ms, a: 검 각도 (0 = 앞, + = 아래)
     { t: 0, a: -100 }, { t: 50, a: -115 },     // 들어 올림
     { t: 150, a: 45 },                          // 1타: 내려 베기
     { t: 175, a: 47 }, { t: 290, a: -55 },      // 2타: 올려 베기
     { t: 330, a: -70 }, { t: 380, a: -135 },    // 크게 들어 올림
     { t: 470, a: 52 },                          // 마무리 베기
-    { t: 620, a: 44 },                          // 자세 유지 (칼끝이 땅에 박히지 않게)
+    { t: 700, a: 44 },                          // 자세 유지 (칼끝이 땅에 박히지 않게, 남은 불꽃이 사그라질 동안)
   ];
   const ATK_MS = SWING[SWING.length - 1].t;
   const DPR = Math.min(2, window.devicePixelRatio || 1);
@@ -412,7 +412,15 @@
     return atkBase[k];
   }
   const atkCv = $('#atk'), atkCtx = atkCv.getContext('2d');
-  const atk = { on: false, t0: 0, walk: false, trail: [] };
+  const atk = { on: false, t0: 0, walk: false, trail: [], parts: [], prev: null, lastT: 0 };
+  // 불꽃 알갱이용 둥근 빛 (흰색 → 노랑 → 주황 → 빨강 순서로 식어 감)
+  const GLOW = [[255, 251, 230], [255, 214, 74], [255, 130, 30], [230, 52, 12]].map(([R, G, B]) => {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 32;
+    const c = cv.getContext('2d'), gr = c.createRadialGradient(16, 16, 0, 16, 16, 16);
+    gr.addColorStop(0, `rgba(${R},${G},${B},1)`); gr.addColorStop(0.4, `rgba(${R},${G},${B},.85)`); gr.addColorStop(1, `rgba(${R},${G},${B},0)`);
+    c.fillStyle = gr; c.fillRect(0, 0, 32, 32);
+    return cv;
+  });
   function sizeAttack() {
     atkCv.width = ATK_W * scale * DPR; atkCv.height = ATK_H * scale * DPR;
     atkCv.style.width = `${ATK_W * scale}px`; atkCv.style.height = `${ATK_H * scale}px`;
@@ -421,7 +429,7 @@
     attackBase(false); attackBase(true);   // 미리 그려 둠
   }
   function playAttack() {
-    atk.t0 = performance.now(); atk.walk = player.y > 0; atk.trail = [];
+    atk.t0 = performance.now(); atk.walk = player.y > 0; atk.trail = []; atk.parts = []; atk.prev = null; atk.lastT = 0;
     player.el.classList.add('attacking');
     if (!atk.on) { atk.on = true; requestAnimationFrame(drawAttack); }
   }
@@ -462,9 +470,47 @@
       }
       g.globalAlpha = 1; g.shadowBlur = 0;
     };
-    band(big ? 0.12 : 0.3, '#ff6a14', 0.55, true);
-    band(big ? 0.38 : 0.55, '#ffc23a', 0.8, false);
-    band(0.78, '#fffbe6', 0.95, false);
+    band(big ? 0.1 : 0.28, '#ff3d0a', 0.6, true);
+    band(big ? 0.35 : 0.5, '#ff8a1f', 0.75, false);
+    band(0.75, '#ffd23a', 0.8, false);
+    g.globalCompositeOperation = 'lighter';
+    // 화염: 칼날이 지나간 자리에 불꽃 알갱이를 뿌림 → 제자리에 남아 위로 피어오르며 식어 감
+    const dt = Math.min(0.05, Math.max(0.001, (t - atk.lastT) / 1000));
+    atk.lastT = t;
+    if (atk.prev) {
+      const pv = atk.prev, n = Math.min(16, Math.round(Math.abs(a - pv.a) * (big ? 1.2 : 0.8)));   // 빨리 휘두를수록 많이
+      for (let i = 0; i < n; i++) {
+        const f = 0.3 + Math.random() * 0.7, s = Math.random();
+        const x1 = hx + (tipX - hx) * f, y1 = hy + (tipY - hy) * f;
+        const x0 = pv.hx + (pv.tipX - pv.hx) * f, y0 = pv.hy + (pv.tipY - pv.hy) * f;
+        atk.parts.push({
+          x: x0 + (x1 - x0) * s, y: y0 + (y1 - y0) * s,
+          vx: (Math.random() - 0.5) * 24 * S, vy: -(18 + Math.random() * 40) * S,
+          life: 0, max: 0.14 + Math.random() * 0.16, r: (1.5 + Math.random() * 2.2) * S * (big ? 1.4 : 1),
+        });
+      }
+    }
+    atk.prev = { a, hx, hy, tipX, tipY };
+    atk.parts = atk.parts.filter(p => (p.life += dt) < p.max);
+    for (const p of atk.parts) {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      const k = p.life / p.max, rr = p.r * (1.15 - k * 0.65);
+      g.globalAlpha = (1 - k) * 0.5;
+      g.drawImage(GLOW[[1, 2, 2, 3][Math.min(3, Math.floor(k * 4))]], p.x - rr * 2, p.y - rr * 2, rr * 4, rr * 4);   // 노랑 → 주황 → 빨강
+    }
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    const bladeFire = () => {   // 칼날 자체가 타오름 (검과 함께 움직임)
+      g.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 7; i++) {
+        const f = 0.25 + i * 0.12, x = hx + (tipX - hx) * f, y = hy + (tipY - hy) * f;
+        const rr = (1.8 + Math.random() * 1.1 + (big ? 0.6 : 0)) * S;
+        g.globalAlpha = 0.32 + Math.random() * 0.2;
+        g.drawImage(GLOW[i < 3 ? 3 : i < 5 ? 2 : 1], x - rr * 2, y - rr * 2 - S, rr * 4, rr * 4);
+      }
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+    };
     // 팔
     g.lineCap = 'round';
     g.strokeStyle = '#2a1d16'; g.lineWidth = 3.4 * S;
@@ -483,6 +529,7 @@
     g.fillStyle = '#f2c230'; g.strokeStyle = '#2a1d16'; g.lineWidth = 0.6;
     g.fillRect(-0.4, -2.6, 1.4, 5.2); g.strokeRect(-0.4, -2.6, 1.4, 5.2);
     g.restore();
+    bladeFire();
     // 손
     g.fillStyle = pal.s; g.strokeStyle = '#2a1d16'; g.lineWidth = 0.6 * S;
     g.beginPath(); g.arc(hx, hy, 1.3 * S, 0, Math.PI * 2); g.fill(); g.stroke();
@@ -506,12 +553,8 @@
       const a = rnd(0, Math.PI * 2), d = rnd(70, 150);
       return `<circle class="ember" r="${rnd(1.5, 3.6).toFixed(1)}" style="--dx:${(Math.cos(a) * d).toFixed(0)}px;--dy:${(Math.sin(a) * d * 0.7).toFixed(0)}px;--t:${rnd(0.35, 0.6).toFixed(2)}s" fill="${Math.random() < 0.5 ? '#ffe680' : '#ff8a1f'}"/>`;
     }).join('');
-    const ARC = 'M-110 -70 C-20 -120 110 -60 120 60 C80 -20 -10 -70 -110 -70 Z';
-    const EDGE = 'M-110 -70 C-20 -120 110 -60 120 60';
-    const arc = cls => `<g class="arc ${cls}"><path d="${ARC}" fill="url(#fxArc)" filter="url(#fxFire)"/><path d="${EDGE}" fill="none" stroke="#fffbe6" stroke-width="3" stroke-linecap="round" filter="url(#fxGlow)"/></g>`;
     return `<svg class="fire" viewBox="-150 -130 300 260" aria-hidden="true">
       <defs>
-        <linearGradient id="fxArc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c41a00" stop-opacity="0"/><stop offset=".3" stop-color="#ff5a14"/><stop offset=".6" stop-color="#ffb21f"/><stop offset=".85" stop-color="#ffe95c"/><stop offset="1" stop-color="#fffbe6"/></linearGradient>
         <radialGradient id="fxCore"><stop offset="0" stop-color="#fffbe6"/><stop offset=".3" stop-color="#ffd84a"/><stop offset=".65" stop-color="#ff7a1a"/><stop offset="1" stop-color="#e02800" stop-opacity="0"/></radialGradient>
         <linearGradient id="fxWisp" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ffe680"/><stop offset=".5" stop-color="#ff8a1f"/><stop offset="1" stop-color="#d42a00" stop-opacity="0"/></linearGradient>
         <filter id="fxFire" x="-30%" y="-30%" width="160%" height="160%"><feTurbulence type="fractalNoise" baseFrequency="0.04 0.09" numOctaves="2" seed="3"/><feDisplacementMap in="SourceGraphic" scale="16" xChannelSelector="R" yChannelSelector="G" result="d"/><feGaussianBlur in="d" stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="d"/></feMerge></filter>
@@ -520,7 +563,6 @@
       <circle class="flash" r="60" fill="url(#fxCore)"/>
       <path class="core" d="${spikes}Z" fill="url(#fxCore)" filter="url(#fxFire)"/>
       <g class="wisps">${wisps}</g>
-      ${arc('a1')}${arc('a2')}${arc('a3')}
       <g class="embers">${embers}</g>
     </svg>`;
   }

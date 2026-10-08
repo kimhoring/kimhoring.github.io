@@ -222,20 +222,14 @@ img, svg { display: block; }
 .player .atk { position: absolute; display: none; max-width: none; }
 .player.attacking .atk { display: block; }
 .player.attacking .body { visibility: hidden; }
-/* 화염 베기 이펙트: 베기 궤적 3개 → 불꽃 폭발 · 불꽃 혀 · 불티 */
+/* 마무리 베기의 폭발: 섬광 · 불꽃 폭발 · 불꽃 혀 · 불티 (칼날을 따라가는 불꽃은 캔버스에서 그림) */
 .player .fire { position: absolute; left: calc(50% - 125px); bottom: -88px; width: 340px; height: 295px; overflow: visible; pointer-events: none; }
 .fire * { transform-box: view-box; transform-origin: 0 0; }   /* viewBox 의 (0,0) = 이펙트 중심 */
-.fire .arc, .fire .core, .fire .flash, .fire .wisp, .fire .ember { opacity: 0; }
-.player.slashing .a1 { animation: arc1 .3s ease-out .07s backwards; }
-.player.slashing .a2 { animation: arc2 .3s ease-out .2s backwards; }
-.player.slashing .a3 { animation: arc3 .42s ease-out .4s backwards; }
+.fire .core, .fire .flash, .fire .wisp, .fire .ember { opacity: 0; }
 .player.slashing .flash { animation: fireflash .24s ease-out .43s backwards; }
 .player.slashing .core { animation: firecore .46s ease-out .42s backwards; }
 .player.slashing .wisp { animation: wisp .46s ease-out .43s backwards; }
 .player.slashing .ember { animation: ember var(--t, .5s) ease-out .43s backwards; }
-@keyframes arc1 { 0% { opacity: 0; transform: rotate(-65deg) scale(.6); } 25% { opacity: 1; } 100% { opacity: 0; transform: rotate(0deg) scale(.92); } }
-@keyframes arc2 { 0% { opacity: 0; transform: scaleY(-1) rotate(-65deg) scale(.6); } 25% { opacity: 1; } 100% { opacity: 0; transform: scaleY(-1) rotate(0deg) scale(.85); } }
-@keyframes arc3 { 0% { opacity: 0; transform: rotate(-70deg) scale(.8, .7); } 20% { opacity: 1; } 100% { opacity: 0; transform: rotate(-12deg) scale(1.35, .95); } }
 @keyframes fireflash { 0% { opacity: 0; transform: scale(.3); } 30% { opacity: .95; } 100% { opacity: 0; transform: scale(1.6); } }
 @keyframes firecore { 0% { opacity: 0; transform: scale(.2); } 25% { opacity: 1; } 100% { opacity: 0; transform: scale(1.25) rotate(40deg); } }
 @keyframes wisp { 0% { opacity: 1; transform: rotate(var(--a)) translateY(-8px) scale(.2); } 100% { opacity: 0; transform: rotate(var(--a)) translateY(-46px) scale(1); } }
@@ -261,7 +255,7 @@ img, svg { display: block; }
 @keyframes dummyhit { 0% { filter: brightness(2.2) drop-shadow(0 0 8px #ff8a00); } 25% { transform: rotate(-9deg) translateX(4px); } 55% { transform: rotate(6deg); filter: none; } 100% { transform: none; } }
 
 @media (prefers-reduced-motion: reduce) {   /* 움직임 줄이기: 휘두르는 대신 잠깐 멈춘 그림으로 */
-  .player.slashing .fire .arc, .player.slashing .fire .core { opacity: 1; }
+  .player.slashing .fire .core { opacity: 1; }
 }
 
 .fx-layer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
