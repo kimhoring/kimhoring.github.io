@@ -179,6 +179,7 @@
   const byId = Object.fromEntries(npcs.map(n => [n.id, n]));
   const npcsByX = [...npcs].sort((a, b) => a.x - b.x);
   let worldW = 0, camX = 0, scale = 4;
+  let map = 'village';   // 'village' 마을 | 'hunt' 사냥터
   const keys = { left: false, right: false };
 
   function buildNpcs() {
@@ -207,8 +208,8 @@
   function layout() {
     const vw = stage.clientWidth;
     scale = vw < 640 ? 3 : 4;
-    const prevFrac = worldW ? player.x / worldW : null;
-    worldW = Math.max(vw, vw < 640 ? 1450 : 1700);
+    const prevFrac = worldW ? player.x / worldW : null, prevW = worldW;
+    worldW = Math.max(vw, map === 'hunt' ? (vw < 640 ? 1400 : 1600) : (vw < 640 ? 1550 : 1800));
     world.style.width = worldW + 'px';
     npcs.forEach(n => {
       n.px = Math.round(n.x * worldW);
@@ -216,8 +217,9 @@
       const img = n.el.querySelector('img.sprite');
       if (img) { img.src = sprite(n.sprite, scale); img.width = W * scale; img.height = SPRITE_H * scale; }
     });
-    // 소품 위치
-    document.querySelectorAll('[data-at]').forEach(el => { el.style.left = Math.round(parseFloat(el.dataset.at) * worldW) + 'px'; });
+    // 소품 위치 (data-at: 마을 기준, data-hat: 사냥터 기준)
+    document.querySelectorAll(map === 'hunt' ? '[data-hat]' : '[data-at]').forEach(el => { el.style.left = Math.round(parseFloat(map === 'hunt' ? el.dataset.hat : el.dataset.at) * worldW) + 'px'; });
+    if (map === 'hunt' && prevW) mobs.forEach(m => { m.x *= worldW / prevW; setMobSprite(m); });
     $('#ball').src = draw(BALL, { ...BASE_PAL, w: '#ffffff', k: '#2a1d16' }, scale);
     player.img.width = W * scale; player.img.height = SPRITE_H * scale;
     sizeAttack();
@@ -251,6 +253,7 @@
   function walkAndTalk(id) {
     const n = byId[id];
     if (!n) return;
+    if (map === 'hunt') { toast('🏡 마을 사람과는 마을에서 이야기할 수 있어요 (왼쪽 포탈)'); return; }
     if (dialog.open) closeDialog(false);
     const spot = Math.max(30, Math.min(worldW - 30, standSpot(n)));
     if (REDUCE || Math.abs(spot - player.x) < 6) { player.x = spot; player.target = null; openDialog(id); render(0); return; }
@@ -279,7 +282,14 @@
       if (keys.right) dir += 1;
     }
     let moving = false;
-    if (dir) { player.target = null; player.talkTo = null; player.arrive = null; player.x += dir * SPEED * dt; moving = true; player.face = dir; }
+    if (player.dash) {   // 화염 돌진: 정해진 거리를 빠르게 미끄러지듯
+      const d = player.dash; d.t += dt;
+      const k = Math.min(1, d.t / d.dur);
+      player.x = d.from + (d.to - d.from) * (1 - Math.pow(1 - k, 3));
+      if (k >= 1) player.dash = null;
+      dir = 0;
+    }
+    else if (dir) { player.target = null; player.talkTo = null; player.arrive = null; player.x += dir * SPEED * dt; moving = true; player.face = dir; }
     else if (player.target != null) {
       const d = player.target - player.x, step = SPEED * dt;
       player.face = Math.sign(d) || player.face;
@@ -295,6 +305,7 @@
       player.y += player.vy * dt;
       if (player.y <= 0) land();
     }
+    if (map === 'hunt') updateMobs(dt);
     if (moving !== player.walking) { player.walking = moving; player.el.classList.toggle('walking', moving); }
     if (moving) {
       player.frameT += dt;
@@ -336,10 +347,14 @@
       }
       n.bubble.classList.toggle('mute', mute);
     });
+    // 포탈 · 사냥터
+    (map === 'hunt' ? portals.home : portals.hunt).classList.toggle('near', nearPortal());
+    if (map === 'hunt') renderMobs();
     // 미니맵
     if (mm.player) mm.player.style.left = (player.x / worldW * 100).toFixed(2) + '%';
   }
   function nearest(range) {
+    if (map === 'hunt') return null;
     let best = null, bd = range;
     npcs.forEach(n => { const d = Math.abs(n.px - player.x); if (d < bd) { bd = d; best = n; } });
     return best;
@@ -360,7 +375,13 @@
     if (LEFT.includes(e.key)) { keys.left = true; e.preventDefault(); }
     else if (RIGHT.includes(e.key)) { keys.right = true; e.preventDefault(); }
     else if ((e.key === 'z' || e.key === 'Z' || e.key === 'ㅋ') && !e.repeat) { e.preventDefault(); slash(); }
-    else if (['ArrowUp', 'w', 'W', 'ㅈ', 'Alt'].includes(e.key)) { e.preventDefault(); if (!e.repeat) jump(); }
+    else if (['x', 'X', 'ㅌ'].includes(e.key) && !e.repeat) { e.preventDefault(); useSkill('dash'); }
+    else if (['c', 'C', 'ㅊ'].includes(e.key) && !e.repeat) { e.preventDefault(); useSkill('storm'); }
+    else if (['s', 'S', 'ㄴ'].includes(e.key) && !e.repeat) { e.preventDefault(); toggleStats(); }
+    else if (['ArrowUp', 'w', 'W', 'ㅈ', 'Alt'].includes(e.key)) {
+      e.preventDefault();
+      if (!e.repeat) { if (e.key === 'ArrowUp' && nearPortal()) enterPortal(); else jump(); }   // 포탈 앞에서 ↑ = 이동
+    }
     else if (e.key === ' ' && !e.target.closest('button, a')) {
       const n = nearest(100);
       if (n) { e.preventDefault(); walkAndTalk(n.id); }
@@ -376,7 +397,7 @@
   // Z 키 · 🔥 버튼으로 3연속 화염 베기. 연습용 허수아비를 맞히면 데미지 숫자가 뜸
   const dummy = { el: $('#dummy'), img: $('#dummy img'), px: 0 };
   const fxLayer = $('#fxLayer');   // 점프(↑ · W · Alt)와 화염검(Z)은 화면에 안내하지 않는 숨은 기능
-  const COOL = 700;   // ms
+  const COOL = window.HUNT_DATA.skills.find(sk => sk.id === 'slash').cool;   // ms
   const HITS = [110, 230, 433];   // 3연타가 맞는 시각 (ms) — 아래 SWING 에서 칼날이 앞(0°)을 지나는 순간
 
   // ── 공격 동작: 화면이 바뀔 때마다(초당 약 60번) 검 각도를 부드럽게 바꿔 그림 → 3연타가 하나의 동작으로 이어짐 ──
@@ -446,7 +467,6 @@
     const fx = (OX + 8) * S, fy = (OY + 23) * S;
     g.save();
     g.translate(fx + lunge, fy); g.rotate(lean); g.translate(-fx, -fy);
-    g.drawImage(attackBase(atk.walk), OX * S, OY * S, 16 * S, 23 * S);
     // 어깨 → 손 → 칼끝
     const sx = (OX + 12.5) * S, sy = (OY + 13.5) * S, arm = (a * 0.55 + 15) * Math.PI / 180;
     const hx = sx + Math.cos(arm) * 6.5 * S, hy = sy + Math.sin(arm) * 6.5 * S;
@@ -486,7 +506,7 @@
         atk.parts.push({
           x: x0 + (x1 - x0) * s, y: y0 + (y1 - y0) * s,
           vx: (Math.random() - 0.5) * 24 * S, vy: -(18 + Math.random() * 40) * S,
-          life: 0, max: 0.14 + Math.random() * 0.16, r: (1.5 + Math.random() * 2.2) * S * (big ? 1.4 : 1),
+          life: 0, max: 0.14 + Math.random() * 0.16, r: (1.5 + Math.random() * 2.2) * S * (big ? 1.15 : 1),
         });
       }
     }
@@ -500,6 +520,7 @@
     }
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
+    g.drawImage(attackBase(atk.walk), OX * S, OY * S, 16 * S, 23 * S);   // 몸은 불꽃 위에 → 불꽃이 캐릭터를 가리지 않음
     const bladeFire = () => {   // 칼날 자체가 타오름 (검과 함께 움직임)
       g.globalCompositeOperation = 'lighter';
       for (let i = 0; i < 7; i++) {
@@ -537,47 +558,22 @@
     requestAnimationFrame(drawAttack);
   }
 
-  // 불꽃 이펙트 SVG: 베기 궤적 3개 + 불꽃 폭발 + 불꽃 혀 + 불티
-  function fireSVG() {
-    const rnd = (a, b) => a + Math.random() * (b - a);
-    let spikes = '';
-    for (let i = 0; i < 44; i++) {
-      const ang = i / 44 * Math.PI * 2, r = i % 2 ? rnd(22, 34) : rnd(48, 82);
-      spikes += `${i ? 'L' : 'M'}${(Math.cos(ang) * r).toFixed(1)} ${(Math.sin(ang) * r * 0.8).toFixed(1)} `;
-    }
-    const wisps = Array.from({ length: 10 }, (_, i) => {
-      const a = i * 36 + rnd(-12, 12), L = rnd(40, 70), m = (L * 0.6).toFixed(0);
-      return `<path class="wisp" style="--a:${a.toFixed(0)}deg" d="M0 0 C9 -12 7 -${m} 0 -${L.toFixed(0)} C-7 -${m} -9 -12 0 0 Z" fill="url(#fxWisp)"/>`;
-    }).join('');
-    const embers = Array.from({ length: 18 }, () => {
-      const a = rnd(0, Math.PI * 2), d = rnd(70, 150);
-      return `<circle class="ember" r="${rnd(1.5, 3.6).toFixed(1)}" style="--dx:${(Math.cos(a) * d).toFixed(0)}px;--dy:${(Math.sin(a) * d * 0.7).toFixed(0)}px;--t:${rnd(0.35, 0.6).toFixed(2)}s" fill="${Math.random() < 0.5 ? '#ffe680' : '#ff8a1f'}"/>`;
-    }).join('');
-    return `<svg class="fire" viewBox="-150 -130 300 260" aria-hidden="true">
-      <defs>
-        <radialGradient id="fxCore"><stop offset="0" stop-color="#fffbe6"/><stop offset=".3" stop-color="#ffd84a"/><stop offset=".65" stop-color="#ff7a1a"/><stop offset="1" stop-color="#e02800" stop-opacity="0"/></radialGradient>
-        <linearGradient id="fxWisp" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ffe680"/><stop offset=".5" stop-color="#ff8a1f"/><stop offset="1" stop-color="#d42a00" stop-opacity="0"/></linearGradient>
-        <filter id="fxFire" x="-30%" y="-30%" width="160%" height="160%"><feTurbulence type="fractalNoise" baseFrequency="0.04 0.09" numOctaves="2" seed="3"/><feDisplacementMap in="SourceGraphic" scale="16" xChannelSelector="R" yChannelSelector="G" result="d"/><feGaussianBlur in="d" stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="d"/></feMerge></filter>
-        <filter id="fxGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-      </defs>
-      <circle class="flash" r="60" fill="url(#fxCore)"/>
-      <path class="core" d="${spikes}Z" fill="url(#fxCore)" filter="url(#fxFire)"/>
-      <g class="wisps">${wisps}</g>
-      <g class="embers">${embers}</g>
-    </svg>`;
-  }
-  $('#player .fx').insertAdjacentHTML('beforeend', fireSVG());
-  let lastSlash = 0, slashCount = 0, stack = 0, stackT = null;
+  let lastSlash = 0, slashCount = 0;
   const restart = (el, cls) => { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); };
   function slash() {
     const now = performance.now();
-    if (dialog.open || now - lastSlash < COOL) return;
+    if (dialog.open || (lastSlash && now - lastSlash < COOL)) return;
     lastSlash = now;
     restart(player.el, 'slashing');
     playAttack();
+    coolBtn('slash', COOL);
     clearTimeout(player.slashT);
     player.slashT = setTimeout(() => player.el.classList.remove('slashing'), 960);
     setTimeout(() => restart(world, 'shake'), 430);
+    if (map === 'hunt') {   // 앞쪽 150px 안의 빌런을 가까운 순서로 3마리까지
+      HITS.forEach((t, i) => setTimeout(() => strikeFront(150, i === HITS.length - 1 ? 1.5 : 1, 3), t));
+      return;
+    }
     const d = dummy.px - player.x, face = player.face < 0 ? -1 : 1;
     const hit = Math.abs(d) < 30 || (Math.abs(d) <= 150 && Math.sign(d) === face);
     if (hit) HITS.forEach((t, i) => setTimeout(() => hitDummy(i === HITS.length - 1), t));
@@ -585,22 +581,36 @@
   }
   function hitDummy(finisher) {
     restart(dummy.el, 'hit');
-    const spark = document.createElement('span');
-    spark.className = 'hitspark';
-    spark.style.left = dummy.px + 'px';
-    fxLayer.appendChild(spark);
-    setTimeout(() => spark.remove(), 320);
-    const crit = Math.random() < 0.2;
-    const dmg = Math.round((1000 + Math.random() * 2000) * (crit ? 1.8 : 1) * (finisher ? 1.5 : 1));
+    spark(dummy.px);
+    const { dmg, crit } = rollDamage(finisher ? 1.5 : 1);
+    number(dummy, dmg.toLocaleString('ko-KR'), crit ? 'crit' : '');
+  }
+  function spark(x) {
     const el = document.createElement('span');
-    el.className = 'dmg' + (crit ? ' crit' : '');
-    el.textContent = dmg.toLocaleString('ko-KR');
-    el.style.left = dummy.px + 'px';
-    el.style.setProperty('--stack', stack);
-    stack = (stack + 1) % 4;
-    clearTimeout(stackT); stackT = setTimeout(() => { stack = 0; }, 900);
+    el.className = 'hitspark';
+    el.style.left = x + 'px';
+    fxLayer.appendChild(el);
+    setTimeout(() => el.remove(), 320);
+  }
+  // 떠오르는 숫자 (같은 대상에 연달아 맞으면 위로 쌓임). t: { x } 또는 { px }
+  function number(t, text, cls) {
+    const el = document.createElement('span');
+    el.className = `dmg ${cls}`;
+    el.textContent = text;
+    el.style.left = (t.x != null ? t.x : t.px) + 'px';
+    el.style.setProperty('--stack', t.stack || 0);
+    t.stack = ((t.stack || 0) + 1) % 4;
+    clearTimeout(t.stackT); t.stackT = setTimeout(() => { t.stack = 0; }, 900);
     fxLayer.appendChild(el);
     setTimeout(() => el.remove(), 1000);
+  }
+  function floatText(x, text, cls) {
+    const el = document.createElement('span');
+    el.className = cls;
+    el.textContent = text;
+    el.style.left = x + 'px';
+    fxLayer.appendChild(el);
+    setTimeout(() => el.remove(), 1500);
   }
   dummy.el.addEventListener('click', e => {
     e.stopPropagation();
@@ -611,6 +621,306 @@
     if (REDUCE || Math.abs(spot - player.x) < 6) { player.x = spot; player.target = null; attack(); return; }
     player.target = spot; player.arrive = attack;
   });
+
+
+  // ═══════════════════════════ 사냥터: 포탈 · 빌런 몬스터 · 전투 성장 · 스킬 ═══════════════════════════
+  // 마을 오른쪽 끝 포탈에서 ↑ (또는 포탈 클릭) → 사냥터. 빌런을 물리치면 전투 경험치 → 레벨 업 → 능력치 포인트 · 새 스킬
+  const HUNT = window.HUNT_DATA;
+  const mobLayer = $('#mobs'), fxBack = $('#fxBack'), statWin = $('#statWin'), skillBar = $('#skillBar');
+  const portals = { hunt: $('#portalHunt'), home: $('#portalHome') };
+  const mobs = [];
+  const battle = Object.assign({ lv: 1, exp: 0, ap: 0, str: 0, dex: 0, vit: 0 }, store.get('hs.battle', {}));
+  const maxHp = () => 100 + 15 * (battle.lv - 1) + 20 * battle.vit;
+  battle.hp = maxHp();
+  const expNeed = lv => 30 + (lv - 1) * 25;
+  const critRate = () => Math.min(0.75, 0.15 + 0.03 * battle.dex);
+  const atkPow = () => 1000 * (1 + 0.12 * (battle.lv - 1)) * (1 + 0.08 * battle.str);
+  function rollDamage(mult) {
+    const crit = Math.random() < critRate();
+    return { dmg: Math.round(atkPow() * (0.7 + Math.random() * 0.6) * mult * (crit ? 1.8 : 1)), crit };
+  }
+  function saveBattle() { const { hp, ...keep } = battle; store.set('hs.battle', keep); }
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+
+  // ── 포탈 ──
+  const curPortalPx = () => Math.round((map === 'hunt' ? 0.035 : 0.98) * worldW);
+  const nearPortal = () => !dialog.open && Math.abs(curPortalPx() - player.x) < 50;
+  let warping = false;
+  function enterPortal() {
+    if (warping) return;
+    warping = true;
+    const to = map === 'hunt' ? 'village' : 'hunt';
+    closeQuests();
+    stage.classList.add('warping');
+    setTimeout(() => {
+      map = to;
+      stage.classList.toggle('hunting', to === 'hunt');
+      if (to === 'hunt') clearMobs();
+      layout();
+      player.x = to === 'hunt' ? curPortalPx() + 80 : curPortalPx() - 80;
+      player.target = null; player.talkTo = null; player.arrive = null; player.dash = null; player.y = 0; player.vy = 0;
+      camX = Math.max(0, Math.min(worldW - stage.clientWidth, player.x - stage.clientWidth / 2));
+      if (to === 'hunt') spawnAll(); else clearMobs();
+      $('#mapName').textContent = to === 'hunt' ? HUNT.mapName : DATA.mapName;
+      updateHud();
+      render(0);
+      setTimeout(() => { stage.classList.remove('warping'); warping = false; }, 80);
+      toast(to === 'hunt' ? '⚔️ 빌런 출몰 지역! 빌런을 물리치고 경험치를 모아 보세요' : '🏡 김호성의 마을로 돌아왔어요');
+    }, 380);
+  }
+  Object.values(portals).forEach(p => p.addEventListener('click', e => {
+    e.stopPropagation();
+    if (dialog.open) closeDialog(false);
+    const px = curPortalPx();
+    player.talkTo = null;
+    if (REDUCE || Math.abs(px - player.x) < 8) { player.x = px; enterPortal(); return; }
+    player.target = px; player.arrive = enterPortal;
+  }));
+
+  // ── 빌런 몬스터 ──
+  const mobArtCache = {};
+  function setMobSprite(m) {   // 빌런 그림은 hunt-data.js 의 HUNT_ART (플레이어보다 큰 24×29 격자)
+    const art = window.HUNT_ART[m.def.id], k = `${m.def.id}|${scale}`;
+    if (!mobArtCache[k]) mobArtCache[k] = draw(art.rows, art.pal, scale);
+    m.img.src = mobArtCache[k];
+    m.img.width = art.rows[0].length * scale; m.img.height = art.rows.length * scale;
+  }
+  function spawnMob(def, x) {
+    const el = document.createElement('div');
+    el.className = `mob mob-${def.id}`;
+    el.innerHTML = `<span class="mob-say"></span><span class="mob-hp"><i></i></span><img alt=""><span class="tag">${def.name} <small>Lv.${def.lv}</small></span>`;
+    mobLayer.appendChild(el);
+    const m = { def, el, img: el.querySelector('img'), hpEl: el.querySelector('.mob-hp i'), say: el.querySelector('.mob-say'),
+      x, hp: def.hp, vx: 0, face: -1, t: 0, stun: 0, kb: 0, aggro: 0, dead: false, sayT: 2 + Math.random() * 6 };
+    setMobSprite(m);
+    mobs.push(m);
+    return m;
+  }
+  function randomX() {
+    let x, n = 0;
+    do { x = 300 + Math.random() * (worldW - 400); } while (Math.abs(x - player.x) < 220 && ++n < 20);
+    return x;
+  }
+  function spawnAll() { clearMobs(); HUNT.mobs.forEach(def => { for (let i = 0; i < def.count; i++) spawnMob(def, randomX()); }); }
+  function clearMobs() { mobs.forEach(m => { clearTimeout(m.respawnT); m.el.remove(); }); mobs.length = 0; }
+  function updateMobs(dt) {
+    const now = performance.now();
+    for (const m of mobs) {
+      if (m.dead) continue;
+      if (m.stun > 0) { m.stun -= dt; m.x += m.kb * dt; m.kb *= 0.86; }
+      else if (m.aggro > 0) {   // 맞으면 잠시 쫓아옴
+        m.aggro -= dt;
+        const d = player.x - m.x;
+        if (Math.abs(d) > 20) { m.face = Math.sign(d); m.x += m.face * m.def.speed * 1.7 * dt; }
+      } else {   // 어슬렁어슬렁
+        m.t -= dt;
+        if (m.t <= 0) { const r = Math.random(); m.vx = r < 0.3 ? 0 : (r < 0.65 ? -1 : 1) * m.def.speed; m.t = 1.2 + Math.random() * 2.2; }
+        m.x += m.vx * dt;
+        if (m.vx) m.face = Math.sign(m.vx);
+      }
+      if (m.x < 200 || m.x > worldW - 60) { m.x = Math.max(200, Math.min(worldW - 60, m.x)); m.vx = -m.vx; }
+      m.sayT -= dt;
+      if (m.sayT <= 0) {
+        m.say.textContent = pick(m.def.quotes);
+        m.el.classList.add('saying');
+        setTimeout(() => m.el.classList.remove('saying'), 2400);
+        m.sayT = 6 + Math.random() * 8;
+      }
+      if (!player.invul && now - (player.hurtAt || 0) > 900 && Math.abs(m.x - player.x) < 30 && player.y < 26) hurtPlayer(m);
+    }
+    if (now - (player.hurtAt || 0) > 3000 && battle.hp < maxHp()) { battle.hp = Math.min(maxHp(), battle.hp + maxHp() * 0.03 * dt); updateHp(); }
+  }
+  function renderMobs() { for (const m of mobs) { m.el.style.left = m.x.toFixed(1) + 'px'; m.el.style.setProperty('--mf', m.face < 0 ? -1 : 1); } }   // 가는 쪽을 바라봄
+  function strikeFront(range, mult, max) {
+    const face = player.face < 0 ? -1 : 1;
+    mobs.filter(m => { const d = m.x - player.x; return !m.dead && (Math.abs(d) < 30 || (Math.abs(d) <= range && Math.sign(d) === face)); })
+      .sort((p, q) => Math.abs(p.x - player.x) - Math.abs(q.x - player.x)).slice(0, max)
+      .forEach(m => hitMob(m, mult));
+  }
+  function hitMob(m, mult) {
+    if (m.dead || map !== 'hunt') return;
+    const { dmg, crit } = rollDamage(mult);
+    m.hp -= dmg;
+    m.aggro = 4; m.stun = 0.22; m.kb = (m.x >= player.x ? 1 : -1) * 160;
+    restart(m.el, 'hit');
+    m.el.classList.add('hurt-shown');
+    spark(m.x);
+    number(m, dmg.toLocaleString('ko-KR'), crit ? 'crit' : '');
+    m.hpEl.style.width = Math.max(0, m.hp / m.def.hp * 100) + '%';
+    if (m.hp <= 0) killMob(m);
+  }
+  function killMob(m) {
+    m.dead = true;
+    m.el.classList.add('dead');
+    gainExp(m.def.exp, m.x);
+    m.respawnT = setTimeout(() => {
+      m.el.remove();
+      const i = mobs.indexOf(m);
+      if (i >= 0) mobs.splice(i, 1);
+      if (map === 'hunt') spawnMob(m.def, randomX());
+    }, 4000);
+  }
+  function hurtPlayer(m) {
+    const dmg = Math.max(1, Math.round(m.def.atk * (0.85 + Math.random() * 0.3)));
+    battle.hp -= dmg;
+    player.hurtAt = performance.now();
+    number(player, `-${dmg}`, 'hurt');
+    player.x = Math.max(24, Math.min(worldW - 24, player.x + (player.x >= m.x ? 1 : -1) * 40));
+    player.target = null; player.arrive = null;
+    restart(player.el, 'hurt');
+    if (battle.hp <= 0) {
+      battle.hp = maxHp();
+      player.x = curPortalPx() + 80;
+      toast('💫 기절했어요! 입구에서 다시 시작해요');
+    }
+    updateHp();
+  }
+
+  // ── 경험치 · 레벨 업 ──
+  function gainExp(n, x) {
+    battle.exp += n;
+    floatText(x, `+${n} EXP`, 'expgain');
+    while (battle.exp >= expNeed(battle.lv)) {
+      battle.exp -= expNeed(battle.lv);
+      battle.lv++; battle.ap += 3; battle.hp = maxHp();
+      floatText(player.x, 'LEVEL UP!', 'lvup');
+      const sk = HUNT.skills.find(k => k.lv === battle.lv);
+      toast(`⭐ 전투 Lv.${battle.lv}! 능력치 포인트 +3 (S)${sk ? ` · 새 스킬 「${sk.name}」 (${sk.key})` : ''}`);
+    }
+    saveBattle(); updateHud(); renderStats();
+  }
+
+  // ── 스킬: 화염 돌진 · 화염 폭풍 ──
+  const cools = {};
+  function coolBtn(id, ms) {
+    const b = skillBar.querySelector(`[data-skill="${id}"]`);
+    if (!b) return;
+    b.style.setProperty('--cd', `${ms}ms`);
+    restart(b, 'cool');
+  }
+  function useSkill(id) {
+    const sk = HUNT.skills.find(k => k.id === id);
+    if (!sk || dialog.open) return;
+    if (battle.lv < sk.lv) { if (map === 'hunt') toast(`🔒 「${sk.name}」은(는) 전투 Lv.${sk.lv}에 배워요`); return; }
+    if (id === 'slash') { slash(); return; }
+    const now = performance.now();
+    if (cools[id] && now - cools[id] < sk.cool) return;   // 처음 쓸 때는 바로
+    cools[id] = now;
+    coolBtn(id, sk.cool);
+    if (id === 'dash') dash(); else if (id === 'storm') storm();
+  }
+  function hitAt(lo, hi, mult) {   // lo~hi 안의 대상 (사냥터: 빌런, 마을: 허수아비)
+    if (map === 'hunt') mobs.filter(m => !m.dead && m.x >= lo && m.x <= hi).forEach(m => hitMob(m, mult));
+    else if (dummy.px >= lo && dummy.px <= hi) hitDummy(false);
+  }
+  function dash() {
+    const dir = player.face < 0 ? -1 : 1, from = player.x, to = Math.max(24, Math.min(worldW - 24, from + dir * 230));
+    player.dash = { t: 0, dur: 0.22, from, to };
+    player.invul = true; player.target = null; player.arrive = null;
+    restart(player.el, 'dashing');
+    const src = player.img.src;
+    for (let i = 1; i <= 4; i++) setTimeout(() => ghost(src, from + (to - from) * i / 5, dir), i * 45);   // 잔상
+    for (let i = 0; i <= 7; i++) setTimeout(() => groundFire(from + (to - from) * i / 7), i * 30);    // 지나간 길에 불길
+    const lo = Math.min(from, to) - 25, hi = Math.max(from, to) + 25;
+    [140, 280].forEach(t => setTimeout(() => hitAt(lo, hi, 1.3), t));
+    setTimeout(() => { player.invul = false; player.el.classList.remove('dashing'); }, 420);
+  }
+  function storm() {
+    const cx = player.x;
+    setTimeout(() => restart(world, 'shake'), 150);
+    [70, -70, 140, -140, 210, -210].forEach((o, i) => setTimeout(() => {
+      const x = cx + o;
+      pillar(x);
+      [120, 320].forEach(t => setTimeout(() => hitAt(x - 50, x + 50, 1.1), t));
+    }, Math.floor(i / 2) * 110));
+  }
+  function fxEl(cls, x, html, life) {
+    const el = document.createElement('span');
+    el.className = cls;
+    el.style.left = x.toFixed(0) + 'px';
+    if (html) el.innerHTML = html;
+    fxBack.appendChild(el);
+    setTimeout(() => el.remove(), life);
+    return el;
+  }
+  function ghost(src, x, dir) {
+    const el = fxEl('ghost', x, `<img alt="" src="${src}" width="${W * scale}" height="${SPRITE_H * scale}">`, 380);
+    el.style.setProperty('--f', dir);
+  }
+  const groundFire = x => fxEl('groundfire', x, '', 600);
+  const pillar = x => fxEl('pillar', x, '<i class="o"></i><i class="m"></i><i class="c"></i>', 850);
+
+  // ── 능력치 창 (S) ──
+  function renderStats() {
+    if (statWin.hidden) return;
+    const need = expNeed(battle.lv), lo = Math.round(atkPow() * 0.7), hi = Math.round(atkPow() * 1.3);
+    const row = (k, icon, name, eff) => `<li><span>${icon} ${name}</span><b>${battle[k]}</b><small>${eff}</small><button type="button" data-stat="${k}" aria-label="${name} 올리기"${battle.ap ? '' : ' disabled'}>+</button></li>`;
+    statWin.querySelector('.sw-body').innerHTML = `
+      <div class="sw-lv"><b>전투 Lv.${battle.lv}</b><span>EXP ${battle.exp} / ${need}</span></div>
+      <div class="sw-bar"><i style="width:${(battle.exp / need * 100).toFixed(1)}%"></i></div>
+      <dl class="sw-info">
+        <div><dt>공격력</dt><dd>${lo.toLocaleString('ko-KR')} ~ ${hi.toLocaleString('ko-KR')}</dd></div>
+        <div><dt>치명타</dt><dd>${Math.round(critRate() * 100)}%</dd></div>
+        <div><dt>HP</dt><dd>${Math.ceil(battle.hp)} / ${maxHp()}</dd></div>
+      </dl>
+      <p class="sw-ap">능력치 포인트 <b>${battle.ap}</b>${battle.ap ? ' · + 를 눌러 올리세요' : ' · 레벨 업 하면 3씩 생겨요'}</p>
+      <ul class="sw-stats">${row('str', '💪', '힘', '공격력 +8%')}${row('dex', '🎯', '민첩', '치명타 +3%p')}${row('vit', '❤️', '체력', '최대 HP +20')}</ul>
+      <h4>스킬</h4>
+      <ul class="sw-skills">${HUNT.skills.map(k => {
+        const on = battle.lv >= k.lv;
+        return `<li class="${on ? 'on' : 'lock'}"><span class="ic">${on ? k.icon : '🔒'}</span><b>${k.name}</b><kbd>${k.key}</kbd><small>${on ? k.desc : `전투 Lv.${k.lv}에 배워요`}</small></li>`;
+      }).join('')}</ul>`;
+  }
+  function toggleStats(force) {
+    const open = force != null ? force : statWin.hidden;
+    statWin.hidden = !open;
+    if (open) { renderStats(); statWin.querySelector('.sw-close').focus({ preventScroll: true }); }
+  }
+  statWin.addEventListener('click', e => {
+    if (e.target.closest('.sw-close')) { toggleStats(false); return; }
+    const b = e.target.closest('[data-stat]');
+    if (!b || battle.ap <= 0) return;
+    battle[b.dataset.stat]++; battle.ap--;
+    if (b.dataset.stat === 'vit') battle.hp += 20;
+    saveBattle(); renderStats(); updateHud();
+    const nb = statWin.querySelector(`[data-stat="${b.dataset.stat}"]`);
+    if (nb && !nb.disabled) nb.focus({ preventScroll: true });
+  });
+  window.addEventListener('keydown', e => { if (e.key === 'Escape' && !statWin.hidden && !dialog.open) { e.preventDefault(); toggleStats(false); } });
+
+  // ── 사냥터 HUD: HP · 전투 EXP · 스킬 버튼 ──
+  skillBar.innerHTML = `<button type="button" class="skill" data-skill="jump" aria-label="점프"><span class="ic" aria-hidden="true">⬆️</span><kbd>↑</kbd><span class="sn">점프</span></button>`
+    + HUNT.skills.map(k => `<button type="button" class="skill" data-skill="${k.id}" aria-label="${k.name}"><span class="ic" aria-hidden="true">${k.icon}</span><kbd>${k.key}</kbd><span class="sn">${k.name}</span><span class="cd"></span><span class="lock">Lv.${k.lv}</span></button>`).join('')
+    + `<button type="button" class="skill" data-skill="stats" aria-label="능력치"><span class="ic" aria-hidden="true">📊</span><kbd>S</kbd><span class="sn">능력치</span><span class="ap-dot" hidden></span></button>`;
+  skillBar.addEventListener('click', e => {
+    const b = e.target.closest('[data-skill]');
+    if (!b) return;
+    e.stopPropagation();
+    const id = b.dataset.skill;
+    if (id === 'jump') jump(); else if (id === 'stats') toggleStats(); else useSkill(id);
+  });
+  function updateHp() {
+    const mx = maxHp();
+    $('#hpFill').style.width = Math.max(0, battle.hp / mx * 100) + '%';
+    $('#hpText').textContent = `${Math.ceil(Math.max(0, battle.hp))} / ${mx}`;
+  }
+  function updateHud() {
+    if (map === 'hunt') {
+      const need = expNeed(battle.lv);
+      $('#expLabel').textContent = `전투 Lv.${battle.lv}`;
+      $('#expFill').style.width = (battle.exp / need * 100) + '%';
+      $('#expText').textContent = `EXP ${battle.exp} / ${need}`;
+    } else {
+      $('#expLabel').textContent = 'EXP';
+      updateQuest(false);
+    }
+    skillBar.querySelectorAll('[data-skill]').forEach(b => {
+      const k = HUNT.skills.find(x => x.id === b.dataset.skill);
+      b.classList.toggle('locked', !!k && battle.lv < k.lv);
+    });
+    skillBar.querySelector('.ap-dot').hidden = !battle.ap;
+    updateHp();
+  }
 
   // ═══════════════════════════ 대화창 ═══════════════════════════
   const dialog = { open: false, npc: null, page: 0, typing: null, full: '' };
@@ -804,11 +1114,11 @@
   function buildMinimap() {
     const track = $('#mmTrack');
     track.innerHTML = npcs.map(n => `<button type="button" class="mm-dot ${n.kind === 'board' ? 'obj' : ''}" data-id="${n.id}" style="left:${(n.x * 100).toFixed(1)}%" aria-label="${n.name}에게 가기" title="${n.name}"></button>`).join('')
-      + '<span class="mm-player" aria-hidden="true"></span>';
+      + `<span class="mm-portal" aria-hidden="true" style="left:${map === 'hunt' ? 3.5 : 98}%"></span><span class="mm-player" aria-hidden="true"></span>`;
     mm.dots = [...track.querySelectorAll('.mm-dot')];
     mm.player = track.querySelector('.mm-player');
     mm.dots.forEach(d => d.addEventListener('click', () => walkAndTalk(d.dataset.id)));
-    updateQuest(false);
+    updateHud();
   }
 
   // ═══════════════════════════ 시간대 (새벽 · 낮 · 노을 · 밤) ═══════════════════════════
@@ -857,13 +1167,20 @@
     return n > 0 ? `D-${n}` : n === 0 ? 'D-DAY' : `D+${-n}`;
   }
   function fmtDate(s) { const d = parseDate(s); return `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEK[d.getDay()]})`; }
-  const questsOf = tab => QUESTS.filter(q => (q.status === 'done') === (tab === 'done'));
+  // 완료: status 가 'done' 이거나, 날짜가 지난 진행 중 퀘스트 (시험 · 대회가 끝나면 저절로 완료 탭으로)
+  function isDone(q) {
+    if (q.status === 'done') return true;
+    if (!q.date) return false;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return parseDate(q.date) < today;
+  }
+  const questsOf = tab => QUESTS.filter(q => isDone(q) === (tab === 'done'));
   function questItem(q, cls) {
-    const tail = q.status === 'done' ? '<span class="q-ok">완료</span>' : q.date ? `<span class="q-d">${dday(q.date)}</span>` : '';
+    const tail = isDone(q) ? '<span class="q-ok">완료</span>' : q.date ? `<span class="q-d">${dday(q.date)}</span>` : '';
     return `<li><button type="button" class="${cls}" data-q="${esc(q.id)}"><span class="q-cat">${esc(q.category || '')}</span><span class="q-t">${esc(q.title)}</span>${tail}</button></li>`;
   }
   function questDetail(q) {
-    const done = q.status === 'done';
+    const done = isDone(q);
     return `<div class="qd-badges"><span class="qd-status${done ? ' done' : ''}">${done ? '✔ 완료한 퀘스트' : '▶ 진행 중인 퀘스트'}</span>${q.category ? `<span class="qd-cat">${esc(q.category)}</span>` : ''}</div>
       <h3>${esc(q.title)}</h3>
       ${q.date ? `<p class="qd-date">📅 ${esc(q.dateLabel || '날짜')} <b>${fmtDate(q.date)}</b>${done ? '' : `<span class="q-d">${dday(q.date)}</span>`}</p>` : ''}
@@ -891,7 +1208,7 @@
   }
   function openQuests(id) {
     const q = id && QUESTS.find(x => x.id === id);
-    if (q) { quest.tab = q.status === 'done' ? 'done' : 'progress'; quest.sel = q.id; }
+    if (q) { quest.tab = isDone(q) ? 'done' : 'progress'; quest.sel = q.id; }
     if (qWin.hidden) qReturn = document.activeElement;
     renderQuestWin();
     qWin.hidden = false;

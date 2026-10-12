@@ -11,7 +11,7 @@
  *  우체부(post)의 연락 선택지는 config.js 의 github · email 값으로 자동 생성됩니다.
  *
  *  quests: 퀘스트 창(미니맵 아래 📜 · 단축키 Q)에 나오는 지금 하고 있는 일 · 해낸 일
- *  - status   : 'progress'(진행 중) 또는 'done'(완료)
+ *  - status   : 'progress'(진행 중) 또는 'done'(완료) — 진행 중이어도 date 가 지나면 저절로 완료로 보임
  *  - date     : 'YYYY-MM-DD' (있으면 D-day 를 자동 계산), dateLabel: 날짜 이름 (예: '시험일')
  *  - desc     : 설명. **굵게** 를 쓸 수 있습니다.
  *  - steps    : (선택) [{ text, done }] 체크리스트
@@ -107,12 +107,6 @@ window.GAME_DATA = {
   quests: [
     // ── 진행 중 ──
     {
-      id: 'toeic-speaking', status: 'progress', category: '시험', title: '토익 스피킹 시험',
-      date: '2026-10-11', dateLabel: '시험일',
-      desc: '영어 말하기 시험 **토익 스피킹**을 봐요. 시험일은 **10월 11일**이에요.',
-      reward: '영어 말하기 자신감 +10',
-    },
-    {
       id: 'safety-practical', status: 'progress', category: '자격증', title: '산업안전기사 실기시험 준비',
       date: '2026-10-25', dateLabel: '시험일',
       desc: '필기에 합격한 **산업안전기사**의 실기시험을 준비하고 있어요. 시험일은 **10월 25일**이에요.',
@@ -129,6 +123,12 @@ window.GAME_DATA = {
       steps: [{ text: '필기시험 합격', done: true }, { text: '실기시험', done: false }],
     },
     // ── 완료 ──
+    {
+      id: 'toeic-speaking', status: 'done', category: '시험', title: '토익 스피킹 시험',
+      date: '2026-10-11', dateLabel: '시험일',
+      desc: '**10월 11일**에 영어 말하기 시험 **토익 스피킹**을 봤어요.',
+      reward: '영어 말하기 자신감 +10',
+    },
     { id: 'cert-architect', status: 'done', category: '자격증', title: '건축기사 취득', desc: '**건축기사** 자격을 땄어요.' },
     { id: 'cert-history', status: 'done', category: '자격증', title: '한국사능력검정시험 1급', desc: '**한국사능력검정시험 1급**을 땄어요.' },
     { id: 'cert-safety', status: 'done', category: '자격증', title: '산업안전기사 필기 합격', desc: '**산업안전기사** 필기시험에 합격했어요.' },

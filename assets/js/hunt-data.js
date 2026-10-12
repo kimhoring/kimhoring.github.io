@@ -1,0 +1,137 @@
+/* ═══════════════════════════════════════════════════════════════
+ *  사냥터 설정 — 마을 오른쪽 끝 포탈(↑)로 들어가는 숨은 맵
+ *  - mobs  : 빌런 몬스터 (hp 체력, exp 처치 경험치, atk 닿았을 때 피해, speed px/s, count 동시에 나오는 수, quotes 혼잣말)
+ *  - skills: 전투 레벨(lv)에 따라 배우는 스킬 (cool 재사용 대기시간 ms)
+ *  전투 성장(전투 Lv · 능력치)은 방문자 브라우저에 저장됩니다 (hs.battle).
+ * ═══════════════════════════════════════════════════════════════ */
+window.HUNT_DATA = {
+  mapName: '빌런 사냥터',
+  mobs: [
+    {
+      id: 'worker', name: '공사장 빌런', title: '안전모 미착용', lv: 3, hp: 4000, exp: 8, atk: 8, speed: 45, count: 3,
+      quotes: ['안전모? 귀찮아~', '대충 하자 대충!', '안전벨트는 무슨~'],
+    },
+    {
+      id: 'student', name: '학생 빌런', title: '팀플 무임승차', lv: 5, hp: 9000, exp: 15, atk: 12, speed: 60, count: 2,
+      quotes: ['자료조사는 네가 해~', '난 발표만 할게!', '단톡방 읽씹 중…'],
+    },
+    {
+      id: 'complainer', name: '민원인 빌런', title: '"책임자 나와!"', lv: 8, hp: 18000, exp: 30, atk: 20, speed: 35, count: 2,
+      quotes: ['책임자 나와!', '내가 누군지 알아?', '민원 넣을 거야!'],
+    },
+  ],
+  skills: [
+    { id: 'slash', key: 'Z', icon: '🔥', name: '화염검', lv: 1, cool: 700, desc: '앞의 적을 3연속으로 베기' },
+    { id: 'dash', key: 'X', icon: '💨', name: '화염 돌진', lv: 3, cool: 3000, desc: '앞으로 돌진하며 지나간 적 2연타 · 돌진 중 무적' },
+    { id: 'storm', key: 'C', icon: '🌋', name: '화염 폭풍', lv: 5, cool: 6000, desc: '주변에 불기둥 6개가 솟아 2연타' },
+  ],
+};
+
+/* 빌런 픽셀 그림 (24×29 격자, 글자 하나 = 픽셀 하나, "." = 투명). pal 에서 글자별 색을 정합니다. */
+window.HUNT_ART = {
+  // 공사장 빌런: 머리띠 · 흉터 · 악문 이 · 파이프 렌치
+  worker: {
+    rows: [
+      '.....oooooooooooottootTo',
+      '....ohHhHhHhHhHhhttootTo',
+      '....oHhhHhhHhhHhhtttttTo',
+      '...okkkkkkkkkkkkktttttTo',
+      '..okobbbssssssbbSotTooo.',
+      '...oossbbbssbbbsSotTo...',
+      '....oxseyesseyesSotTo...',
+      '....osxsssSSssssSotTo...',
+      '....ossxssSSssssSotTo...',
+      '....odddmwwwwmdddotTo...',
+      '....odddmwmwmwdddotTo...',
+      '.....oddddddddddootTo...',
+      '.oooooooSSSSSSooootTo...',
+      'ossccccccnnnnccccCtTso..',
+      'ossccccccnnnnccccCtTso..',
+      'ossccccccnnnnccccCtTso..',
+      'ossvvvvvvnnnnvvvvvtTSo..',
+      'ossccccccnnnnccccCtTso..',
+      'oSSccccccnnnnccccCsssso.',
+      'oSSvvvvvvnnnnvvvvvsssso.',
+      'sssscCcccnnnnccccCsssso.',
+      'sssBBBBBBBggBBBBBBBooo..',
+      'ooooppppPPooppppPPo.....',
+      '...oppppPPooppppPPo.....',
+      '...oppppPPooppppPPo.....',
+      '...oppppPPooppppPPo.....',
+      '..oKKKKKKKooKKKKKKKo....',
+      '..oKKKKKKKooKKKKKKKo....',
+      '...ooooooo..ooooooo.....',
+    ],
+    pal: { o: '#140c0a', e: '#1a0f0c', b: '#1a0f0c', y: '#ff2b1a', x: '#c76a5a', d: '#a6795c', m: '#5a1010', w: '#f4f1ea', s: '#e2a77e', S: '#c08560', h: '#3a2a20', H: '#5a4535', k: '#d6352a', c: '#e8701f', C: '#b8530f', v: '#d9cfa6', n: '#3a3d45', B: '#5a3a22', g: '#e0b030', p: '#4a4f5c', P: '#383c47', K: '#3a2a1e', t: '#9aa3b0', T: '#5b6070' },
+  },
+  // 학생 빌런: 후드 · 그늘진 얼굴 · 빛나는 눈 · 마스크
+  student: {
+    rows: [
+      '....ooqqqqqqqqqqoo......',
+      '...oqqqqqqqqqqqqQQo.....',
+      '...oqqqqqqqqqqqqQQo.....',
+      '...oqqhhhhhhhhhhQQo.....',
+      '...oqqhShSShSShSQQo.....',
+      '...oqqbbSSSSSSbbQQo.....',
+      '...oqqSSbbSSbbSSQQo.....',
+      '...oqqSSYYSSYYSSQQo.....',
+      '...oqqKKKKKKKKKKQQo.....',
+      '...oqqkkkkkkkkkkQQo.....',
+      '...oqqKKKKKKKKKKQQo.....',
+      '...oqqKKKKKKKKKKQQo.....',
+      '.oooqqqqqqqqqqqqQQooo...',
+      'oqqqzqqqqwqqwqqqQQQqqo..',
+      'oqqqqzqqqwqqwqqqQQQqqoo.',
+      'oqqqqqzqqwqqwqqqQQQqWWWo',
+      'oqqqqqqzqqqqqqqqQQQqWRWW',
+      'oqqqqqqqzqqqqqqqQQQqWWRW',
+      'oqqqqqqQQzQQQQQqQQQqWWWW',
+      'oqqqqqqQQQzQQQQqQQQsssoo',
+      'sssqqqqQQQQQQQQqQQQssso.',
+      'sssqqqqqqqqqqqqqQQQooo..',
+      'ooooppppPPooppppPPo.....',
+      '...oppppPPooppppPPo.....',
+      '...oppppPPooppppPPo.....',
+      '...oppppPPooppppPPo.....',
+      '..oWWWWWWWooWWWWWWWo....',
+      '..oRRRRRRRooRRRRRRRo....',
+      '...ooooooo..ooooooo.....',
+    ],
+    pal: { o: '#0e0a12', q: '#3d2a5c', Q: '#2a1c42', S: '#8a6450', h: '#15101a', b: '#0d0a0f', Y: '#e8ff4a', K: '#16161a', k: '#2c2c34', w: '#e8e2f0', s: '#d6a688', z: '#1f1f26', W: '#efeae0', R: '#d6352a', p: '#3c4f78', P: '#2c3a5c' },
+  },
+  // 민원인 빌런: 이마 핏줄 · 고함 · 치켜든 주먹 · 민원 서류
+  complainer: {
+    rows: [
+      '......osssssssso........',
+      '.....ossLLhshshso.......',
+      '....ohssLsshsrssho......',
+      '....ohssssssrrrsho......',
+      '...ohHHHHssssHHHHhoooo..',
+      '...ohhsHHHssHHHshhsssSo.',
+      '...ohhswewsswewshhsssso.',
+      '....ohssssSSsssshosssso.',
+      '....orsHHHHHHHHsroocco..',
+      '....osssmwwwwmssSoocco..',
+      '....osssmTTTTmssSoocco..',
+      '.....osssssssssso.occo..',
+      '...oooooSSSSSSooooocco..',
+      '.oocccccCwkkwCccCCCcco..',
+      'occccccccwkkwcccCCCcco..',
+      'occccccccwkkwcccCCCoo...',
+      'occccccccckkccccCCCo....',
+      'WWWccccccckkccccCCCo....',
+      'WWWccccccckkccccCCCo....',
+      'RRRscccccckkccccCCCo....',
+      'WWWsccccccccccccCCCo....',
+      'WWWKKKKKKKKKKKKKKKKo....',
+      'WWWoppppPPooppppPPo.....',
+      'ooooppppPPooppppPPo.....',
+      '...oppppPPooppppPPo.....',
+      '...oppppPPooppppPPo.....',
+      '..oKGKKKKKooKGKKKKKo....',
+      '..oKKKKKKKooKKKKKKKo....',
+      '...ooooooo..ooooooo.....',
+    ],
+    pal: { o: '#140c0a', L: '#ffd2c4', e: '#1a0f0c', b: '#1a0f0c', s: '#ea8f76', S: '#c4644f', h: '#bdbdbd', H: '#6e6e6e', r: '#c4161c', w: '#f4f1ea', m: '#3a0808', T: '#d65a5a', c: '#3b3f4a', C: '#2a2d36', k: '#c4161c', W: '#f6f1e2', R: '#d6352a', p: '#2a2d36', P: '#1f2129', K: '#0f0f12', G: '#5a5f6e' },
+  },
+};

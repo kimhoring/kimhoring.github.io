@@ -83,7 +83,7 @@
       <img class="prop ball" id="ball" data-at="0.715" alt="">
 
       <!-- 우체국 -->
-      <svg class="prop house" data-at="0.945" viewBox="0 0 170 150">
+      <svg class="prop house" data-at="0.92" viewBox="0 0 170 150">
         <path d="M6 70 L85 10 L164 70Z" fill="#c0532a"/><path d="M6 70 L85 10 L164 70" fill="none" stroke="#9e4220" stroke-width="6"/>
         <rect x="20" y="68" width="130" height="82" fill="#f6ead7"/>
         <rect x="70" y="98" width="30" height="52" fill="#7a5235"/>
@@ -110,6 +110,26 @@
 
     <!-- 연습용 허수아비 (검술 과녁) -->
     <button type="button" class="dummy" id="dummy" data-at="0.115" aria-label="연습용 허수아비"><img alt=""><span class="tag"><span class="tag-long">연습용 </span>허수아비</span></button>
+
+    <!-- 포탈: 마을 오른쪽 끝 → 사냥터 -->
+    <button type="button" class="portal" id="portalHunt" data-at="0.98" aria-label="사냥터로 가는 포탈"><span class="swirl" aria-hidden="true"></span><span class="near-hint" aria-hidden="true">↑</span><span class="tag">사냥터 →</span></button>
+
+    <!-- ═══ 사냥터 (포탈로 들어가는 맵) ═══ -->
+    <div class="hunt" id="hunt">
+      <div class="hunt-props" aria-hidden="true">
+        <svg class="prop hsign" data-hat="0.17" viewBox="0 0 120 96"><rect x="55" y="34" width="10" height="62" fill="#7a5235"/><rect x="4" y="6" width="112" height="34" rx="4" fill="#ffd23f" stroke="#2a1d16" stroke-width="3"/><text x="60" y="29" text-anchor="middle" font-size="13" font-family="Galmuri11, sans-serif" fill="#2a1d16">⚠ 빌런 출몰</text></svg>
+        <svg class="prop hbarrier" data-hat="0.3" viewBox="0 0 120 60"><defs><pattern id="hstripe" width="16" height="16" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="8" height="16" fill="#ffd23f"/><rect x="8" width="8" height="16" fill="#2a1d16"/></pattern></defs><path d="M16 24 L8 60 M30 24 L38 60 M90 24 L82 60 M104 24 L112 60" stroke="#e8e2d8" stroke-width="4"/><rect x="4" y="10" width="112" height="18" rx="2" fill="url(#hstripe)"/></svg>
+        <svg class="prop hcones" data-hat="0.46" viewBox="0 0 90 40"><g><path d="M10 38 L20 6 L30 38Z" fill="#ef7d2d"/><rect x="15" y="20" width="10" height="5" fill="#fff"/><rect x="4" y="36" width="32" height="4" fill="#cf6420"/></g><g transform="translate(48 0)"><path d="M10 38 L20 6 L30 38Z" fill="#ef7d2d"/><rect x="15" y="20" width="10" height="5" fill="#fff"/><rect x="4" y="36" width="32" height="4" fill="#cf6420"/></g></svg>
+        <svg class="prop hpile" data-hat="0.55" viewBox="0 0 160 60"><path d="M0 60 Q30 14 70 10 Q120 8 160 60Z" fill="#a07a52"/><path d="M30 60 Q60 30 92 28 Q120 30 140 60Z" fill="#8a6644"/><g fill="#c9a274"><circle cx="58" cy="30" r="3"/><circle cx="96" cy="22" r="2.5"/><circle cx="118" cy="40" r="3"/></g></svg>
+        <svg class="prop hdigger" data-hat="0.74" viewBox="0 0 220 150"><rect x="20" y="118" width="120" height="24" rx="12" fill="#3b3b44"/><g fill="#6b6b76"><circle cx="38" cy="130" r="7"/><circle cx="80" cy="130" r="7"/><circle cx="122" cy="130" r="7"/></g><rect x="30" y="78" width="100" height="40" rx="4" fill="#f2b632"/><rect x="88" y="50" width="44" height="40" rx="4" fill="#f2b632"/><rect x="95" y="57" width="30" height="20" fill="#9fc6dd"/><path d="M128 84 L178 36 L196 46 L150 92Z" fill="#e0a21f"/><path d="M178 36 L200 96" stroke="#e0a21f" stroke-width="12" stroke-linecap="round"/><path d="M188 92 L214 92 L206 118 L186 110Z" fill="#5b5b66"/></svg>
+        <svg class="prop hbarrier" data-hat="0.64" viewBox="0 0 120 60"><path d="M16 24 L8 60 M30 24 L38 60 M90 24 L82 60 M104 24 L112 60" stroke="#e8e2d8" stroke-width="4"/><rect x="4" y="10" width="112" height="18" rx="2" fill="url(#hstripe)"/></svg>
+        <svg class="prop hcones" data-hat="0.86" viewBox="0 0 90 40"><g><path d="M10 38 L20 6 L30 38Z" fill="#ef7d2d"/><rect x="15" y="20" width="10" height="5" fill="#fff"/><rect x="4" y="36" width="32" height="4" fill="#cf6420"/></g></svg>
+        <svg class="prop hpile" data-hat="0.94" viewBox="0 0 160 60"><path d="M0 60 Q30 14 70 10 Q120 8 160 60Z" fill="#a07a52"/><path d="M30 60 Q60 30 92 28 Q120 30 140 60Z" fill="#8a6644"/></svg>
+      </div>
+      <button type="button" class="portal back" id="portalHome" data-hat="0.035" aria-label="마을로 돌아가는 포탈"><span class="swirl" aria-hidden="true"></span><span class="near-hint" aria-hidden="true">↑</span><span class="tag">← 마을</span></button>
+      <div class="mobs" id="mobs" aria-hidden="true"></div>
+    </div>
+    <div class="fx-back" id="fxBack" aria-hidden="true"></div>
     <div class="fx-layer" id="fxLayer" aria-hidden="true"></div>
 
     <div class="ground" aria-hidden="true"></div>
@@ -151,10 +171,21 @@
 
   <div class="hud statusbar">
     <div class="who"><span class="lv" id="lv">Lv.24</span><span class="nm"><b>김호성</b><small>전남대학교 건축공학과</small></span></div>
-    <div class="exp" aria-live="polite"><span class="exp-label">EXP</span><span class="exp-bar"><span class="exp-fill" id="expFill"></span></span><span class="exp-text" id="expText">대화 0 / 5</span></div>
-    <div class="keys"><kbd>←</kbd><kbd>→</kbd> 이동 <kbd>Space</kbd> 대화 <kbd>Q</kbd> 퀘스트</div>
+    <div class="hpbox"><span class="hp-label">HP</span><span class="hp-bar"><span class="hp-fill" id="hpFill"></span></span><span class="hp-text" id="hpText"></span></div>
+    <div class="exp" aria-live="polite"><span class="exp-label" id="expLabel">EXP</span><span class="exp-bar"><span class="exp-fill" id="expFill"></span></span><span class="exp-text" id="expText">대화 0 / 5</span></div>
+    <div class="keys village-keys"><kbd>←</kbd><kbd>→</kbd> 이동 <kbd>Space</kbd> 대화 <kbd>Q</kbd> 퀘스트</div>
+    <div class="keys hunt-keys"><kbd>←</kbd><kbd>→</kbd> 이동 <kbd>↑</kbd> 점프 <kbd>Z</kbd> 화염검 <kbd>X</kbd> 돌진 <kbd>C</kbd> 폭풍 <kbd>S</kbd> 능력치</div>
   </div>
 
+
+  <!-- 사냥터 스킬 버튼 (사냥터에서만 보임, game.js 가 채움) -->
+  <div class="hud skills" id="skillBar"></div>
+
+  <!-- 능력치 창 (S) -->
+  <section class="hud statwin" id="statWin" role="dialog" aria-modal="false" aria-labelledby="swTitle" hidden>
+    <header class="qw-head"><b id="swTitle">📊 능력치</b><button type="button" class="qw-close sw-close" aria-label="능력치 창 닫기">✕</button></header>
+    <div class="sw-body"></div>
+  </section>
 
   <div class="toast" id="toast" role="status" hidden></div>
 
@@ -188,6 +219,7 @@
 
 <script src="assets/js/config.js?v=dev"></script>
 <script src="assets/js/game-data.js?v=dev"></script>
+<script src="assets/js/hunt-data.js?v=dev"></script>
 <script src="assets/js/game.js?v=dev"></script>
 </body>
 </html>
