@@ -22,7 +22,14 @@ $('lead').textContent = SUP ? '노트북 화면의 「🦺 관리감독자 앱�
   : Directory.enabled() ? '관리자에게 받은 참여 코드 6자리를 넣거나 QR을 찍으면 바로 들어갑니다.' : '노트북 화면의 QR을 찍으면 바로 들어갑니다. 초대 링크를 받았다면 그 링크를 누르세요.';
 // v14.14 화면 패치 번호(만든 시각)도 보여 준다 → 업데이트가 들어왔는지 눈으로 확인
 const patchAt = info.shell ? new Date(info.shell * 1000) : null, two = (n) => String(n).padStart(2, '0');
-$('foot').textContent = `앱 v${info.version || '-'}${patchAt ? ` · 화면 ${two(patchAt.getMonth() + 1)}-${two(patchAt.getDate())} ${two(patchAt.getHours())}:${two(patchAt.getMinutes())}` : ''} · ${info.model || ''}`;
+// v14.16 「업데이트 확인」 — 앱 안에서 바로 (본체가 지원할 때만)
+if (N && typeof N.updateNow === 'function') {
+  const b = document.createElement('button');
+  b.className = 'btn-ghost'; b.id = 'updBtn'; b.textContent = '🔄 업데이트 확인'; b.style.cssText = 'display:block;margin:6px auto 0;text-align:center';
+  b.onclick = () => updateNow();
+  $('foot').after(b);
+}
+$('foot').textContent = `앱 v${info.version || '-'}${patchAt ? ` · 화면 ${two(patchAt.getMonth() + 1)}-${two(patchAt.getDate())} ${two(patchAt.getHours())}:${two(patchAt.getMinutes())}` : ''}${info.model ? ` · ${info.model}` : ''}`;
 // 지난 서버가 안 보이면(노트북을 껐다 켰으면) 안내판으로 찾아 들어간다. 서버가 켜질 때까지 기다리므로 누를 것이 없다
 const autoFind = info.lost && Directory.enabled();
 if (info.error && !autoFind) showErr(info.error);
@@ -54,7 +61,8 @@ function routeFor(text) {
     if (SUP) return { error: '근로자용 QR입니다.\n관리감독자는 관리자 화면 📱 현장 합류 → 「🦺 관리감독자 앱」 QR을 찍으세요.' };
     return CODE_RE.test(c) ? { code: c } : { error: '초대 주소가 올바르지 않습니다. 관리자에게 다시 받으세요.' };
   }
-  if (/\/projects\/soc-map\//.test(p)) return { error: '앱 받기 페이지 QR입니다. 앱은 이미 설치되어 있으니, 현장의 「현장 합류」 QR을 찍으세요.' };
+  // v14.16 앱 받기 QR·앱 파일 QR: 앱은 이미 있으니 파일을 다시 받지 않고 앱 안에서 업데이트 확인
+  if (/\/projects\/soc-map\//.test(p) || /\.apk$/i.test(p)) return { update: true, error: '앱 받기 QR입니다. 앱은 이미 설치되어 있어 파일을 다시 받을 필요가 없습니다 — 새 버전은 앱 안에서 받습니다.\n현장에 들어가려면 「현장 합류」 QR을 찍으세요.' };
   if (p.startsWith('/download')) {                                                   // 노트북의 앱 받기 QR → 바로 들어가기
     const c = (q.get('code') || '').toUpperCase();
     if (!SUP && CODE_RE.test(c)) return { url: `${u.origin}/j/${c}` };
@@ -67,8 +75,11 @@ function routeFor(text) {
   if (p === '/' || p === '') return { url: u.origin + (SUP ? '/supervisor' : '/worker') };
   return { url: u.href };
 }
+/** v14.16 앱 안에서 바로 업데이트 확인 (새것이면 받아 설치, 최신이면 알림). 옛 본체면 아무것도 안 함 */
+function updateNow() { try { if (N && typeof N.updateNow === 'function') { N.updateNow(); return true; } } catch (e) { /* noop */ } return false; }
 function openRoute(text) {
   const r = routeFor(text);
+  if (r.update) updateNow();
   if (r.error) { showErr(r.error); return false; }
   showErr('');
   enterRoute(r);
@@ -129,7 +140,7 @@ const video = $('video'), canvas = $('canvas'), ctx = canvas.getContext('2d', { 
 $('scanBtn').onclick = async () => {
   $('scanMsg').textContent = 'QR 코드를 네모 안에 맞추세요.';
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
   } catch (e) {
     showErr('카메라를 열 수 없습니다. 휴대폰 설정 → 앱 → 권한에서 카메라를 허용하세요.' + (SUP ? '' : '\n또는 참여 코드를 넣으세요.'));
     return;
@@ -137,6 +148,12 @@ $('scanBtn').onclick = async () => {
   video.srcObject = stream;
   $('scan').hidden = false;
   await video.play().catch(() => {});
+  // v14.15 자동 초점(되는 휴대폰만) — 노트북 화면 QR 은 가까이 찍어 초점이 안 맞으면 뿌옇게 보인다
+  try {
+    const t = stream.getVideoTracks()[0], caps = t.getCapabilities ? t.getCapabilities() : {};
+    if ((caps.focusMode || []).includes('continuous')) await t.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+  } catch (e) { /* 지원 안 함 */ }
+  scanStart = Date.now(); hinted = false;
   tick();
 };
 $('scanClose').onclick = stopScan;
@@ -148,19 +165,29 @@ function stopScan() {
   $('scan').hidden = true;
 }
 
-let lastBad = '';
+let lastBad = '', frameNo = 0, scanStart = 0, hinted = false;
+/** v14.15 한 장면에서 해석할 부분: 번갈아 넓게(가운데 80 %, 480px 로 줄임) / 좁게(가운데 50 %, 줄이지 않고 최대 720px).
+ *  좁게 = 2배쯤 확대한 효과 → 작거나 촘촘한 QR(관리자 키가 든 관리감독자 QR)도 칸이 뭉개지지 않는다 */
+function scanWindow(vw, vh, n) {
+  const wide = n % 2 === 0, s = Math.min(vw, vh) * (wide ? 0.8 : 0.5);
+  return { s, sx: (vw - s) / 2, sy: (vh - s) / 2, size: wide ? 480 : Math.min(720, Math.round(s)) };
+}
 function tick() {
   if (!stream) return;
+  if (!hinted && scanStart && Date.now() - scanStart > 6000) {
+    hinted = true;
+    $('scanMsg').textContent = '잘 안 읽히면 15~30 cm 거리에서 천천히 앞뒤로 움직여 보세요. 노트북 화면의 QR 을 누르면 크게 보입니다.';
+  }
   if (video.readyState >= 2 && video.videoWidth) {
     // 화면 가운데(네모 안)만 잘라 해석 — 빠르고 주변 다른 QR 을 덜 읽는다
-    const s = Math.min(video.videoWidth, video.videoHeight) * 0.8;
-    const sx = (video.videoWidth - s) / 2, sy = (video.videoHeight - s) / 2, size = 480;
+    const { s, sx, sy, size } = scanWindow(video.videoWidth, video.videoHeight, frameNo++);
     canvas.width = size; canvas.height = size;
     ctx.drawImage(video, sx, sy, s, s, 0, 0, size, size);
     const img = ctx.getImageData(0, 0, size, size);
     const code = window.jsQR && jsQR(img.data, size, size, { inversionAttempts: 'dontInvert' });
     if (code && code.data) {
       const text = code.data.trim(), r = routeFor(text);
+      if (r.update) { if (navigator.vibrate) navigator.vibrate(60); stopScan(); showErr(r.error); updateNow(); return; }
       if (r.url || r.code) {
         if (navigator.vibrate) navigator.vibrate(60);
         stopScan();

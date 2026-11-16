@@ -1,10 +1,10 @@
 {
-  "serial": 1794809675,
+  "serial": 1794817328,
   "needs_api": 2,
   "files": {
     "directory.js": "9026926a4c19d758a72415ce27d8f67806140cf447a8fbe96be3f7f3e12ffa8e",
     "jsQR.js": "bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859",
     "start.html": "097d6e5f2abd89cee7c5dc6583ed929a45ffad3979885dc648b27c215695c225",
-    "start.js": "da9128d8b021b2bfc1a964d0ac3bd23aa05ca3b4f52f90c14e8fc91780a433a2"
+    "start.js": "2051b9524e7f38e83d6a87f1da370814e4724cb3b9e661c4ab08e0f8edeedbae"
   }
 }

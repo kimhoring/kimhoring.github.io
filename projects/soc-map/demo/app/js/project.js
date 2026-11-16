@@ -554,12 +554,13 @@ function renderProject() {
   $('joinCodeLabel').textContent = dl ? '안드로이드 앱 파일 바로 받기' : sup ? '로그인 QR' : '현장 참여 코드';
   $('joinCode').textContent = dl ? '앱 받기' : sup ? '관리감독자' : PRJ.joinCode;
   $('joinCode').style.letterSpacing = sup || dl ? '0' : '';
+  $('joinCode').style.fontSize = sup || dl ? '26px' : '';   // v14.15 QR 이 커져 글자 칸이 좁아짐 — 「관리감독자」가 두 줄로 넘어가지 않게
   $('joinUrl').innerHTML = sup ? '<span class="hint">⚠️ 이 QR에는 관리자 키가 들어 있습니다. 관리감독자에게만 보여 주세요.</span>' : `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>`;
   $('joinSteps').hidden = sup || dl;
   $('joinCopyBtn').hidden = sup || local;   // 관리감독자 QR 에는 관리자 키가 들어 있어 메시지로 보내지 않는다
   $('joinCopyBtn').dataset.label = dl ? '📋 앱 설치 메시지 복사' : '📋 초대 메시지 복사';
   if (!$('joinCopyBtn').textContent.startsWith('✅')) $('joinCopyBtn').textContent = $('joinCopyBtn').dataset.label;
-  $('joinNote').innerHTML = dl ? `📲 휴대폰 카메라로 찍으면 <b>바로 앱 파일이 내려받아집니다</b> → 알림에서 열기 → 설치. 카톡에는 「앱 설치 메시지 복사」로 <b>링크</b>를 보내세요(카톡은 앱 파일 자체는 보내지 못합니다).<br>🦺 관리감독자 앱: <a href="${esc(serverBase(true))}/supervisor.apk" target="_blank" rel="noopener">${esc(serverBase(true))}/supervisor.apk</a><br><span class="hint">노트북이 꺼져 있을 때는 홈페이지 <a href="${esc(APP_HOME_URL)}" target="_blank" rel="noopener">앱 받기 페이지</a>. 설치할 때 안드로이드가 「출처를 알 수 없는 앱」·Play 프로텍트 확인을 한 번씩 묻습니다(앱스토어를 거치지 않는 앱이라서).</span>`
+  $('joinNote').innerHTML = dl ? `📲 휴대폰 카메라로 찍으면 <b>바로 앱 파일이 내려받아집니다</b> → 알림에서 열기 → 설치. 카톡에는 「앱 설치 메시지 복사」로 <b>링크</b>를 보내세요(카톡은 앱 파일 자체는 보내지 못합니다).<br>🔄 <b>이미 앱이 있는 휴대폰은 다시 받지 않아도 됩니다</b> — 앱이 켜질 때 스스로 업데이트합니다(더보기 → 「🔄 앱 업데이트 확인」).<br>🦺 관리감독자 앱: <a href="${esc(serverBase(true))}/supervisor.apk" target="_blank" rel="noopener">${esc(serverBase(true))}/supervisor.apk</a><br><span class="hint">노트북이 꺼져 있을 때는 홈페이지 <a href="${esc(APP_HOME_URL)}" target="_blank" rel="noopener">앱 받기 페이지</a>. 설치할 때 안드로이드가 「출처를 알 수 없는 앱」·Play 프로텍트 확인을 한 번씩 묻습니다(앱스토어를 거치지 않는 앱이라서).</span>`
     : (local ? '⚠️ 서버가 이 PC에서만 열려 있습니다. 휴대폰 연동은 <b>SOC-MAP_노트북_실행.bat</b>으로 서버를 켜세요.'
     : opening ? '⏳ 인터넷 주소를 여는 중입니다(보통 1분 안팎). 지금 QR은 같은 와이파이에서만 됩니다 — 준비되면 저절로 바뀝니다.'
     : boardFailed ? '⚠️ 주소 안내판을 고치지 못했습니다. 지금은 접속되지만 노트북을 다시 켜면 휴대폰이 따라오지 못합니다. 노트북에서 <b>gh auth status</b>로 GitHub 로그인을 확인하세요.'
@@ -568,14 +569,56 @@ function renderProject() {
     : pub ? '✅ 어디서나 접속되는 주소입니다. 노트북을 다시 켜면 주소가 바뀌니 그때는 QR·초대 링크를 새로 보내 주세요. 참여 코드와 휴대폰에 저장된 이름은 그대로입니다.'
     : hasHttps ? '같은 와이파이에서 QR을 찍으세요. 처음에 “안전하지 않음” 경고가 나오면 <b>고급 → 계속</b>(자체 인증서). 인터넷 주소를 만드는 중이면 몇 초 뒤 QR이 저절로 바뀝니다.'
     : '⚠️ HTTPS 가 꺼져 있어 휴대폰 GPS가 막힙니다. <b>SOC-MAP_노트북_실행.bat</b>으로 서버를 켜세요(시연 모드는 가능).')
-    + (sup ? '<br>관리감독자 앱: 실시간 인원 위치 · 위험 진입 알림 · 대피 지시 · 근로자 앱 정책' : '');
-  const qr = $('qrBox');
-  if (qr.dataset.url !== url) {
-    qr.dataset.url = url; qr.innerHTML = '';
-    if (window.QRCode) new QRCode(qr, { text: url, width: 128, height: 128, correctLevel: QRCode.CorrectLevel.M });
-    else qr.innerHTML = '<span class="hint">QR 표시에는 인터넷이 필요합니다</span>';
+    + (sup ? '<br>관리감독자 앱: 실시간 인원 위치 · 위험 진입 알림 · 대피 지시 · 근로자 앱 정책' : '')
+    + '<br>🔍 <b>QR을 누르면 크게 보입니다</b> — 휴대폰이 잘 못 읽으면 크게 띄워 15~30 cm 거리에서 찍으세요.';
+  const qr = $('qrBox'), level = sup ? 'L' : 'M';   // 관리감독자 QR 은 화면 전용(복사·출력 안 함) → 낮은 복원 단계로 칸 수를 줄인다(45 → 37칸)
+  if (qr.dataset.url !== url || qr.dataset.dpr !== String(window.devicePixelRatio)) {
+    qr.dataset.url = url; qr.dataset.level = level; qr.dataset.dpr = String(window.devicePixelRatio);
+    drawQR(qr, url, 196, level);
   }
 }
+
+/**
+ * v14.15 또렷한 QR. 전에는 qrcodejs 그림(128px)을 그대로 썼는데, 관리자 키가 든 관리감독자 주소(약 110자)는 칸이 45개라
+ * 칸 하나가 3px 도 안 되고 화면 배율(125 % 등)로 늘어나 뿌옇게 보였다. 둘레 흰 여백(조용한 구역)도 없어 휴대폰이 잘 못 읽었다.
+ * → 칸 수를 받아 화면 실제 픽셀의 정수 배로 다시 그리고 4칸 흰 여백을 둔다. 반환: 실제로 그린 { cells, k } (시험용)
+ */
+function drawQR(el, text, cssPx, level = 'M') {
+  el.innerHTML = '';
+  if (!window.QRCode) { el.innerHTML = '<span class="hint">QR 표시에는 인터넷이 필요합니다</span>'; return null; }
+  const tmp = document.createElement('div');
+  const q = new QRCode(tmp, { text, width: 64, height: 64, correctLevel: QRCode.CorrectLevel[level] });
+  const m = q._oQRCode;
+  if (!m || typeof m.getModuleCount !== 'function') { el.appendChild(tmp); return null; }   // 라이브러리가 바뀌면 그 그림 그대로
+  const n = m.getModuleCount(), quiet = 4, cells = n + quiet * 2;
+  const dpr = Math.max(1, window.devicePixelRatio || 1), k = Math.max(2, Math.floor(cssPx * dpr / cells));
+  const c = document.createElement('canvas');
+  c.width = c.height = cells * k;
+  c.style.width = c.style.height = `${cells * k / dpr}px`;
+  c.style.imageRendering = 'pixelated';
+  c.setAttribute('role', 'img'); c.setAttribute('aria-label', 'QR 코드 (누르면 크게)');
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = '#000';
+  for (let r = 0; r < n; r++) for (let col = 0; col < n; col++) if (m.isDark(r, col)) g.fillRect((col + quiet) * k, (r + quiet) * k, k, k);
+  el.appendChild(c);
+  return { cells, k, n };
+}
+
+/** v14.15 QR 을 누르면 화면 가득 크게 — 노트북 화면을 휴대폰으로 찍을 때 훨씬 잘 읽힌다 */
+function showBigQR(url, level) {
+  if (!url) return;
+  const ov = document.createElement('div');
+  ov.className = 'qr-big'; ov.id = 'qrBig';
+  ov.innerHTML = '<div class="qr-big-box"></div><p>휴대폰 앱의 「QR 찍기」로 비추세요 · 15~30 cm 거리<br><small>누르거나 Esc 를 누르면 닫힙니다</small></p>';
+  document.body.appendChild(ov);
+  drawQR(ov.querySelector('.qr-big-box'), url, Math.min(innerWidth, innerHeight) * 0.72, level || 'M');
+  const close = () => { ov.remove(); removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  ov.addEventListener('click', close);
+  addEventListener('keydown', onKey);
+}
+$('qrBox').addEventListener('click', () => { const q = $('qrBox'); if (q.querySelector('canvas,img')) showBigQR(q.dataset.url, q.dataset.level); });
 
 // v14.9 초대 메시지: 카카오톡 단체방에 붙여 넣으면 QR 없이 들어온다
 function inviteText() {

@@ -408,7 +408,12 @@ input[type=range]::-moz-range-thumb { width: 15px; height: 15px; border: none; b
 /* 현장 합류 · 프로젝트 */
 .join-card { display: flex; gap: 14px; align-items: center; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; }
 .join-info { flex: 1; min-width: 0; }
-.qr { width: 128px; height: 128px; background: #fff; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.qr { min-width: 128px; min-height: 128px; background: #fff; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: zoom-in; }
+/* v14.15 QR 크게 보기 */
+.qr-big { position: fixed; inset: 0; z-index: 9999; background: rgba(2, 6, 23, .88); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; cursor: zoom-out; }
+.qr-big-box { background: #fff; border-radius: 12px; line-height: 0; }
+.qr-big p { color: #e2e8f0; text-align: center; margin: 0; font-size: 15px; }
+.qr-big small { color: #94a3b8; }
 .qr img, .qr canvas { display: block; }
 .qr .hint { color: #334155; padding: 6px; text-align: center; }
 .join-code { font-size: 28px; font-weight: 900; letter-spacing: .16em; color: #6ee7b7; font-variant-numeric: tabular-nums; }
