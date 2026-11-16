@@ -523,7 +523,7 @@ function renderProject() {
   if (!$('joinCopyBtn').textContent.startsWith('✅')) $('joinCopyBtn').textContent = $('joinCopyBtn').dataset.label;
   $('joinNote').innerHTML = dl ? `📲 휴대폰 카메라로 찍으면 <b>바로 앱 파일이 내려받아집니다</b> → 알림에서 열기 → 설치. 카톡에는 「앱 설치 메시지 복사」로 <b>링크</b>를 보내세요(카톡은 앱 파일 자체는 보내지 못합니다).<br>🦺 관리감독자 앱: <a href="${esc(serverBase(true))}/supervisor.apk" target="_blank" rel="noopener">${esc(serverBase(true))}/supervisor.apk</a><br><span class="hint">노트북이 꺼져 있을 때는 홈페이지 <a href="${esc(APP_HOME_URL)}" target="_blank" rel="noopener">앱 받기 페이지</a>. 설치할 때 안드로이드가 「출처를 알 수 없는 앱」·Play 프로텍트 확인을 한 번씩 묻습니다(앱스토어를 거치지 않는 앱이라서).</span>`
     : (local ? '⚠️ 서버가 이 PC에서만 열려 있습니다. 휴대폰 연동은 <b>SOC-MAP_노트북_실행.bat</b>으로 서버를 켜세요.'
-    : opening ? '⏳ 인터넷 주소를 여는 중입니다(보통 10~30초). 지금 QR은 같은 와이파이에서만 됩니다 — 준비되면 저절로 바뀝니다.'
+    : opening ? '⏳ 인터넷 주소를 여는 중입니다(보통 1분 안팎). 지금 QR은 같은 와이파이에서만 됩니다 — 준비되면 저절로 바뀝니다.'
     : boardFailed ? '⚠️ 주소 안내판을 고치지 못했습니다. 지금은 접속되지만 노트북을 다시 켜면 휴대폰이 따라오지 못합니다. 노트북에서 <b>gh auth status</b>로 GitHub 로그인을 확인하세요.'
     : board && !sup && fixedLink() ? '✅ <b>이 QR·초대 링크는 바뀌지 않습니다.</b> 출력해서 현장에 붙여 두어도 됩니다. 노트북을 다시 켜도 앱은 저절로 다시 연결됩니다.'
     : board ? '✅ 노트북을 다시 켜도 앱은 저절로 다시 연결됩니다. 새 휴대폰은 앱에서 참여 코드만 넣으면 됩니다.'
