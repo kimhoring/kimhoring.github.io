@@ -25,15 +25,21 @@ const Directory = (() => {
       return d && typeof d.url === 'string' && serverRe().test(d.url) ? d.url : null;
     } catch (e) { return null; }
   }
-  /** 안내판 읽기. 주소 뒤의 값은 GitHub CDN 캐시(5분)를 건너뛰기 위한 것 */
-  async function lookup() {
+  /** 안내판 읽기 → { url(터널 주소가 아니면 null), at(노트북이 적은 시각, 초) }, 읽지 못하면 null.
+   *  주소 뒤의 값은 GitHub CDN 캐시(5분)를 건너뛰기 위한 것 */
+  async function board() {
     const src = source();
     if (!src) return null;
     try {
       const r = await fetch(`${src}?t=${Date.now()}`, { cache: 'no-store', signal: timed(8000) });
-      return r.ok ? parse(await r.text()) : null;
+      if (!r.ok) return null;
+      const text = await r.text();
+      let at = 0;
+      try { at = +JSON.parse(text).at || 0; } catch (e) { /* 깨진 안내판 */ }
+      return { url: parse(text), at };
     } catch (e) { return null; }
   }
+  async function lookup() { const b = await board(); return b ? b.url : null; }
   async function alive(url) {
     try { return (await fetch(url + '/health', { cache: 'no-store', signal: timed(6000) })).ok; } catch (e) { return false; }
   }
@@ -42,5 +48,5 @@ const Directory = (() => {
     const url = await lookup();
     return url && (await alive(url)) ? url : null;
   }
-  return { enabled: () => !!source(), parse, lookup, alive, find };
+  return { enabled: () => !!source(), parse, board, lookup, alive, find };
 })();
