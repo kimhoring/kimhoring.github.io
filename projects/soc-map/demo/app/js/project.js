@@ -19,6 +19,12 @@ const PRJ = {
   sims: [], audio: null, focusId: null, places: [], policy: {}, joinApp: 'worker',
 };
 
+/** v14.14 휴대폰 반영(동기화) 기억 — 현장마다 { v: 이 PC 가 마지막으로 보낸·받은 배치 버전, off: 사용자가 직접 끔 } */
+const SyncMemo = {
+  all() { try { return JSON.parse(localStorage.getItem('socmap.v14.sync') || '{}'); } catch (e) { return {}; } },
+  get(pid) { return (pid && this.all()[pid]) || {}; },
+  set(pid, patch) { if (!pid) return; try { const a = this.all(); a[pid] = { ...(a[pid] || {}), ...patch }; localStorage.setItem('socmap.v14.sync', JSON.stringify(a)); } catch (e) { /* noop */ } },
+};
 const KeyStore = {
   all() { try { return JSON.parse(localStorage.getItem('socmap.v13.keys') || '{}'); } catch (e) { return {}; } },
   get(pid) { return this.all()[pid] || null; },
@@ -210,6 +216,7 @@ async function openServerProject(pid) {
     }
     await loadDocument(doc, planSrc);
     PRJ.joinCode = meta.join_code; PRJ.gpsJoin = meta.gps_join !== false; PRJ.sync = true; PRJ.lastPlanSrc = S.bgImageSrc;
+    SyncMemo.set(pid, { v: site ? site.version : 0, off: false });
     monReconnect(); renderProject(); updateAttribution();
     toast(`「${meta.name}」 프로젝트를 열었습니다.`, 'success');
   } catch (e) {
@@ -286,6 +293,7 @@ async function publishSite(force = false) {
     const r = await api(`/api/projects/${S.project.id}/site`, { method: 'POST', body: payload });
     if (planChanged) { PRJ.lastPlanSrc = S.bgImageSrc; PRJ.lastPlanT = JSON.stringify(S.plan.transform); PRJ.lastPhonePlan = payload.phonePlan; }
     PRJ.siteVersion = r.version;
+    SyncMemo.set(S.project.id, { v: r.version });
     renderProject();
   } catch (e) { toast('현장 배치 공유 실패: ' + e.message, 'error'); }
 }
@@ -298,13 +306,43 @@ function schedulePublish() {
 const _prevDocReplaced = onDocReplaced;
 onDocReplaced = () => { _prevDocReplaced(); renderProject(); };
 const _prevDocChanged = onDocChanged;
-onDocChanged = (opts) => { _prevDocChanged(opts); schedulePublish(); if (S.mode === 'align') renderModeUI(); };
+onDocChanged = (opts) => { _prevDocChanged(opts); schedulePublish(); warnNoSync(); if (S.mode === 'align') renderModeUI(); };
+
+/**
+ * v14.14 이전 작업이 자동 복원된 뒤(노트북 서버를 다시 켰을 때)에도 휴대폰에 실시간 반영.
+ * 전에는 「새 프로젝트」·「서버 프로젝트 열기」 때만 동기화가 켜져서, 다시 켠 뒤 추가한 장비가 휴대폰에 가지 않았다.
+ *  - 사용자가 직접 끈 현장은 그대로 둔다
+ *  - 이 PC 가 마지막으로 본 버전보다 서버가 새것이면(다른 PC 가 그 뒤에 바꿈) 덮어쓰지 않고 묻는다
+ */
+async function autoSync() {
+  const pid = S.project.id, memo = SyncMemo.get(pid);
+  if (!pid || !managerKey() || memo.off || PRJ.sync) return;
+  let srv = null;
+  try { srv = await api(`/api/projects/${pid}/site`); } catch (e) { /* 아직 공유 전 */ }
+  if (pid !== S.project.id || PRJ.sync) return;
+  if (srv && memo.v && srv.version > memo.v) {
+    toast(`다른 PC가 이 현장 배치를 바꿨습니다(서버 v${srv.version}, 이 PC v${memo.v}). 덮어쓰지 않도록 휴대폰 반영을 멈췄습니다.`, 'warn',
+      { duration: 20000, action: { label: '서버 배치 불러오기', fn: () => openServerProject(pid) } });
+    renderProject();
+    return;
+  }
+  PRJ.sync = true;
+  await publishSite(true);
+  if (PRJ.siteVersion) toast('📱 휴대폰과 실시간 연동 중 — 장비·위험 구역을 바꾸면 바로 반영됩니다.', 'success');
+}
+/** 휴대폰 반영이 꺼진 채로 배치를 바꾸면 한 번 알린다 */
+function warnNoSync() {
+  if (PRJ.sync || !S.project.id || !PRJ.connected || !managerKey() || PRJ.warnedNoSync) return;
+  PRJ.warnedNoSync = true;
+  toast('휴대폰 반영(실시간 동기화)이 꺼져 있어 이 변경은 휴대폰에 가지 않습니다.', 'warn',
+    { duration: 12000, action: { label: '켜기', fn: () => { const t = $('syncToggle'); t.checked = true; t.dispatchEvent(new Event('change')); } } });
+}
 
 $('syncToggle').addEventListener('change', async e => {
   if (e.target.checked) {
     if (!S.project.id) { e.target.checked = false; toast('서버 프로젝트에서만 동기화할 수 있습니다. 「새 프로젝트」를 서버에 만들거나 「서버 프로젝트」를 여세요.', 'warn'); return; }
-    PRJ.sync = true; monBeep(660, 0.05); await publishSite(true);
-  } else PRJ.sync = false;
+    PRJ.sync = true; SyncMemo.set(S.project.id, { off: false }); monBeep(660, 0.05); await publishSite(true);
+  } else { PRJ.sync = false; SyncMemo.set(S.project.id, { off: true }); }
   renderProject();
 });
 
@@ -329,7 +367,7 @@ function monConnect() {
     PRJ.connected = true;
     try { PRJ.info = await api('/api/server/info', { manager: false }); } catch (e) { PRJ.info = null; }
     try { const m = await api(`/api/projects/${S.project.id}`); PRJ.joinCode = m.join_code; PRJ.gpsJoin = m.gps_join !== false; PRJ.policy = m.policy || {}; } catch (e) { /* noop */ }
-    if (PRJ.sync) publishSite(true);
+    if (PRJ.sync) publishSite(true); else autoSync();
     renderProject(); renderMonitor();
   };
   ws.onmessage = (e) => onServerMessage(JSON.parse(e.data));
@@ -500,7 +538,7 @@ function renderProject() {
   $('prjStatus').innerHTML = !P.id ? (S.backendOnline ? '로컬 프로젝트입니다. 휴대폰 연동은 「새 프로젝트」로 서버에 등록하세요.' : '서버 꺼짐 · 로컬 작업')
     : !managerKey() ? '<span style="color:var(--warn)">관리자 키 없음 — 보기 전용</span>'
     : !PRJ.connected ? '서버 연결 중…'
-    : `실시간 연결됨 · 배치 v${PRJ.siteVersion || '-'}${PRJ.sync ? '' : ' · <span style="color:var(--warn)">동기화 꺼짐</span>'}`;
+    : `실시간 연결됨 · 배치 v${PRJ.siteVersion || '-'}${PRJ.sync ? ' · 📱 휴대폰에 바로 반영' : ' · <span style="color:var(--warn)">휴대폰 반영 꺼짐</span>'}`;
 
   const card = $('joinCard');
   $('joinSeg').hidden = !(P.id && PRJ.connected && PRJ.joinCode);

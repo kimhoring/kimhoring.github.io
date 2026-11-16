@@ -44,6 +44,14 @@ if (Test-Path (Join-Path $Apks 'apps.json')) {
   Copy-Item (Join-Path $Source 'app\download.html') (Join-Path $AppDir 'index.html') -Force
   Copy-Item (Join-Path $Apks 'apps.json') (Join-Path $AppDir 'download\apps.json') -Force
   Get-ChildItem $Apks -Filter '*.apk' | ForEach-Object { Copy-Item $_.FullName (Join-Path $AppDir "download\$($_.Name)") -Force }
+  # SOC-MAP v14.14 화면 패치(앱 첫 화면 파일 + shell.json) — 휴대폰 앱이 다시 설치 없이 받아 바꾼다
+  $Shell = Join-Path $Apks 'shell'
+  if (Test-Path (Join-Path $Shell 'shell.json')) {
+    $ShellOut = Join-Path $AppDir 'download\shell'
+    if (Test-Path $ShellOut) { Remove-Item $ShellOut -Recurse -Force }
+    New-Item -ItemType Directory -Force $ShellOut | Out-Null
+    Get-ChildItem $Shell -File | ForEach-Object { Copy-Item $_.FullName (Join-Path $ShellOut $_.Name) -Force }
+  }
   foreach ($r in 'worker', 'supervisor') {
     Copy-Item (Join-Path $Source "app\pwa\icons\$r-192.png") (Join-Path $AppDir "icons\$r-192.png") -Force
   }

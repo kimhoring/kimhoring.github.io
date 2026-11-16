@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SOC-MAP</title>
+<style>
+  :root { --bg: #0a0f1c; --surface: #111a2e; --line: rgba(148,163,184,.18); --text: #e8eef9; --text-2: #b6c2d9; --muted: #8392ad; --primary: #3b82f6; }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { min-height: 100%; background: var(--bg); color: var(--text); font-family: "Pretendard", "Segoe UI", sans-serif; font-size: 15px; }
+  button, input { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+  main { max-width: 480px; margin: 0 auto; padding: 28px 22px 32px; display: flex; flex-direction: column; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .ic { width: 52px; height: 52px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); display: grid; place-items: center; font-size: 28px; }
+  .brand b { font-size: 21px; display: block; }
+  .brand small { color: var(--muted); font-size: 13px; }
+  .lead { color: var(--text-2); line-height: 1.6; font-size: 14.5px; }
+  .err { background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.45); color: #fecaca; border-radius: 12px; padding: 12px 14px; font-size: 14px; line-height: 1.55; white-space: pre-line; }
+  .btn { width: 100%; padding: 16px; font-size: 17px; font-weight: 800; border-radius: 14px; border: none; background: var(--primary); color: #fff; }
+  .btn-ghost { width: 100%; padding: 14px; font-size: 15px; border-radius: 14px; border: 1px solid var(--line); background: transparent; color: var(--text-2); text-align: left; }
+  .btn-ghost small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; word-break: break-all; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .card h2 { font-size: 15px; }
+  .row { display: flex; gap: 8px; }
+  .input { flex: 1; min-width: 0; padding: 13px; font-size: 15px; border-radius: 12px; border: 1px solid var(--line); background: #0d1526; outline: none; }
+  .input:focus { border-color: #60a5fa; }
+  .btn-sm { padding: 0 16px; border-radius: 12px; border: none; background: #1e293b; font-weight: 700; }
+  ol { padding-left: 20px; color: var(--text-2); font-size: 14px; line-height: 1.7; }
+  .foot { color: var(--muted); font-size: 12px; text-align: center; }
+  .title { font-size: 22px; margin-top: 4px; }
+  .hint { color: var(--muted); font-size: 13px; line-height: 1.5; }
+  .input.code { font-size: 20px; letter-spacing: 6px; text-transform: uppercase; text-align: center; font-weight: 800; }
+  .adv summary { cursor: pointer; color: var(--text-2); font-size: 14px; }
+  .adv[open] summary { margin-bottom: 4px; }
+  /* QR 스캐너 */
+  .scan { position: fixed; inset: 0; background: #000; z-index: 10; display: flex; flex-direction: column; }
+  .scan video { flex: 1; width: 100%; object-fit: cover; min-height: 0; }
+  .scan .frame { position: absolute; left: 50%; top: 42%; width: 66vw; max-width: 300px; aspect-ratio: 1; transform: translate(-50%, -50%); border: 3px solid rgba(255,255,255,.9); border-radius: 18px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.45); }
+  .scan .bar { padding: 16px 20px calc(20px + env(safe-area-inset-bottom)); background: #0a0f1c; display: flex; flex-direction: column; gap: 10px; text-align: center; }
+  .scan .bar p { color: var(--text-2); font-size: 14px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand"><span class="ic" id="roleIc">📱</span><span><b id="appName">SOC-MAP</b><small>GPS 기반 공사 현장 위험 관제</small></span></div>
+
+  <div class="err" id="err" hidden></div>
+
+  <h1 class="title">현장 들어가기</h1>
+  <p class="lead" id="lead">노트북 화면의 QR을 찍으면 바로 들어갑니다.</p>
+  <button class="btn" id="scanBtn">📷 QR 찍기</button>
+  <div class="card" id="findCard" hidden>
+    <h2>📡 현장 서버를 찾는 중…</h2>
+    <p class="hint" id="findMsg">노트북이 켜지면 저절로 연결됩니다. 그대로 두세요.</p>
+    <button class="btn-sm" id="findCancel">그만 기다리기</button>
+  </div>
+  <button class="btn-ghost" id="lastBtn" hidden><b>↩︎ 지난 현장 다시 들어가기</b></button>
+
+  <div class="card" id="codeCard" hidden>
+    <h2>🔢 참여 코드로 들어가기</h2>
+    <div class="row">
+      <input class="input code" id="codeInput" maxlength="6" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="예: 9HZLET">
+      <button class="btn-sm" id="codeGo">들어가기</button>
+    </div>
+    <p class="hint" id="codeHint">관리자 화면 📱 현장 합류에 적힌 6자리 코드입니다.</p>
+  </div>
+
+  <details class="card adv">
+    <summary>QR은 어디에 있나요?</summary>
+    <ol id="howto">
+      <li>노트북에서 SOC-MAP 관리자 화면을 엽니다.</li>
+      <li>위쪽 <b>📱 현장 합류</b> 버튼을 누릅니다.</li>
+      <li id="howtoPick">「👷 근로자 앱」 QR을 이 앱으로 찍습니다.</li>
+    </ol>
+  </details>
+
+  <details class="card adv">
+    <summary>QR을 찍을 수 없을 때 — 초대 링크 붙여넣기</summary>
+    <div class="row">
+      <input class="input" id="urlInput" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="초대 메시지나 주소를 붙여넣기">
+      <button class="btn-sm" id="urlGo">열기</button>
+    </div>
+    <p class="hint">받은 초대 메시지를 통째로 붙여 넣어도 됩니다.</p>
+  </details>
+
+  <p class="foot" id="foot"></p>
+</main>
+
+<div class="scan" id="scan" hidden>
+  <video id="video" playsinline muted></video>
+  <div class="frame"></div>
+  <div class="bar">
+    <p id="scanMsg">QR 코드를 네모 안에 맞추세요.</p>
+    <button class="btn-ghost" id="scanClose" style="text-align:center">닫기</button>
+  </div>
+</div>
+<canvas id="canvas" hidden></canvas>
+
+<script src="jsQR.js"></script>
+<script src="directory.js"></script>
+<script src="start.js"></script>
+</body>
+</html>
