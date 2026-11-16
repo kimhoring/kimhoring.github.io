@@ -8,7 +8,7 @@
  * ═══════════════════════════════════════════════════════════════ */
 'use strict';
 
-const APP_VERSION = 13;
+const APP_VERSION = 14;
 const AUTOSAVE_KEY = 'socmap.v13.doc';
 const AUTOSAVE_BG_KEY = 'socmap.v13.bg';
 
@@ -18,6 +18,9 @@ const S = {
   // ── 문서(저장 대상) ──
   project: { id: null, name: '새 현장', origin: null },   // origin: {lat, lon}
   plan: { width: 0, height: 0, transform: null, refs: [], opacity: 0.85 },
+  // plan 선택 필드: imageType('floorplan'|'construction'), capturedAt(EXIF 촬영 시각), source(PDF 쪽·dpi·용지·축척),
+  //   alignMethod('fixedScale'|'similarity'|'affine', 없으면 자동), alignError(정합 오차 m → 근로자 경고 거리),
+  //   knownMpp·knownMppSrc(도면 축척 m/px — PDF 1/N 또는 치수), dimCheck({pa, pb, real}), refs[].check(검증점)
   bgImage: null, bgImageSrc: null,                           // 배치도 이미지 (px)
   nodes: [], contours: [],
   markers: [], polylines: [], fences: [], walkableAreaPolygon: [],
@@ -28,7 +31,7 @@ const S = {
 
   // ── 화면 상태 ──
   mode: 'select', envZoneType: 'softGround',
-  layers: { bg: true, heat: false, zones: true, shortest: true, basemap: 'satellite' },
+  layers: { bg: true, heat: false, zones: true, shortest: true, basemap: 'satellite', cadastral: false, people: true, lastBasemap: null },
   view: { s: 0, ox: 0, oy: 0 },            // 화면 = 현장 좌표(m) × s + (ox, oy)
   selection: null,
   route: null,
@@ -36,6 +39,12 @@ const S = {
   draft: null,
   measure: null,                       // 거리·면적 측정 {points: [x,y,...], closed}
   live: {},                            // 운전원 휴대폰이 보낸 장비 실시간 위치 {markerId: {x, y, heading, ts}}
+  shadow: null,                        // 그림자 높이 측정 중 {idx, a, b}
+  view3d: {                            // 3D 보기 설정 (문서에 저장하지 않음)
+    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10),
+    hour: Math.min(18, Math.max(7, new Date().getHours() + Math.round(new Date().getMinutes() / 15) / 4)),
+    xray: false, scaffold: true,
+  },
 };
 
 let _idSeq = Date.now();

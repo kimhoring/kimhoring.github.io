@@ -11,18 +11,19 @@ const fmtLen = (m) => (m >= 1000 ? `${fmt(m / 1000, 2)} km` : `${fmt(m, m < 10 ?
 const MODES = [
   { id: 'select',   group: 'draw',  icon: '🖐️', label: '선택 · 이동', short: '선택', key: '1', desc: '항목 선택, 끌어서 이동', hint: '장비·위험물·건물을 클릭해 선택하고 끌어서 옮깁니다. 빈 곳을 드래그하면 지도가 이동합니다.' },
   { id: 'building', group: 'draw',  icon: '🏢', label: '건물',        key: '6', desc: '외곽을 그려 건물 지정', hint: '드래그로 건물 외곽을 그립니다. AI 인식 없이 건물을 지정할 때 씁니다.' },
+  { id: 'aipick',   group: 'draw',  icon: '✨', label: 'AI 건물 따기', desc: '감싸 끌면 외곽선 자동', hint: '도면 위 건물을 사각형으로 감싸듯 끌면 AI가 외곽선을 땁니다(가장 정확). 건물 안을 한 번 눌러도 됩니다. 틀리면 Ctrl+Z.' },
   { id: 'road',     group: 'draw',  icon: '〰️', label: '도로',        short: '도로', key: '2', desc: '이동 가능한 길', status: true, hint: '드래그해 이동 가능한 도로(우회로)를 그립니다. 보행 구역이 없으면 경로는 도로 위로만 찾습니다.' },
   { id: 'lasso',    group: 'draw',  icon: '🚶', label: '보행 구역',   short: '보행', key: '3', desc: '걸을 수 있는 범위', status: true, hint: '드래그로 보행 가능 구역의 외곽을 그립니다. 경로는 이 안에서만 찾습니다.' },
   { id: 'fence',    group: 'draw',  icon: '🚧', label: '울타리',      short: '울타리', key: '4', desc: '통행 차단선', status: true, hint: '드래그해 통행할 수 없는 안전 울타리를 설치합니다.' },
   { id: 'zone',     group: 'draw',  icon: '🌧️', label: '환경 구역',  key: '7', desc: '연약지반·고압선·침수', hint: '구역 종류를 고른 뒤 드래그로 영역을 그립니다.' },
   { id: 'route',    group: 'route', icon: '🧭', label: '안전 경로 탐색', short: '경로 탐색', key: '5', hint: '출발지 → 도착지를 차례로 클릭하세요. 핀을 끌면 위치를 바꿔 다시 찾습니다.' },
-  { id: 'align',    group: 'plan',  icon: '📍', label: '도면 정합',  key: '9', hint: '도면 위 지점을 클릭하고 실제 위치(현장 측량점·좌표·위성 지도)를 지정하세요. 2~3점이면 위치·축척·방향이 맞춰집니다.' },
+  { id: 'align',    group: 'plan',  icon: '📍', label: '도면 정합',  key: '9', hint: '도면 위 지점을 클릭하고 실제 위치(현장 측량점·좌표·위성 지도)를 지정하세요. 기준점 3~4개 + 정합에 쓰지 않는 검증점 2개를 권장합니다.' },
   { id: 'measure',  group: 'map',   icon: '📏', label: '거리 측정',  key: '0', hint: '클릭해 점을 이으면 거리를, 첫 점을 다시 누르면 면적을 잽니다. Esc: 초기화' },
   { id: '3d',       group: 'map',   icon: '🧊', label: '3D 보기',    key: '8', hint: '드래그 회전 · 우클릭 드래그 이동 · 휠 확대/축소', cls: 'mode-3d' },
 ];
 
 /** 도구가 속한 작업 화면 */
-const MODE_WS = { building: 'layout', road: 'layout', lasso: 'layout', fence: 'layout', zone: 'layout', route: 'route', align: 'plan' };
+const MODE_WS = { building: 'layout', aipick: 'layout', road: 'layout', lasso: 'layout', fence: 'layout', zone: 'layout', route: 'route', align: 'plan' };
 const WORKSPACES = ['layout', 'route', 'monitor', 'plan', 'site'];
 
 function setWorkspace(ws, { fromMode = false, toggle = false } = {}) {
@@ -87,7 +88,7 @@ function buildModeGrid() {
        <span class="ti">${m.icon}</span>
        <span class="tt"><b>${m.label}</b><small>${m.desc}</small></span>
        ${m.status ? `<span class="chip" data-status="${m.id}"></span>` : ''}
-       <kbd>${m.key}</kbd></button>`).join('');
+       ${m.key ? `<kbd>${m.key}</kbd>` : ''}</button>`).join('');
   // 지도 하단 빠른 도구: 선택 + 동선 도구 + 경로 탐색
   const dockModes = ['select', 'road', 'lasso', 'fence'].map(id => MODES.find(m => m.id === id));
   $('dock').innerHTML = dockModes.map(m =>
@@ -135,6 +136,13 @@ function renderModeUI() {
       h = `<div class="hint">${mode.hint}</div>
            <div class="row"><span class="label-sm">건물 ${S.contours.length}개</span>${S.contours.length ? '<button class="btn btn-xs" data-act="clearBuildings">모두 지우기</button>' : ''}</div>`;
       break;
+    case 'aipick':
+      h = `<div class="hint">${mode.hint}</div>
+           ${!S.bgImageSrc ? '<div class="hint warn">⚠️ 먼저 배치도(이미지·PDF)를 불러오세요 — 도면 위에서만 됩니다.</div>' : ''}
+           ${!S.backendOnline ? '<div class="hint warn">⚠️ AI 서버가 꺼져 있습니다 (노트북 실행 파일로 켜세요).</div>' : ''}
+           <div class="hint">학습 없이 쓰는 범용 분할 모델(MobileSAM)이라 처음 보는 도면 양식에도 씁니다. 한 동에 약 1초(첫 사용은 모델 준비로 더 걸림).</div>
+           <div class="row"><span class="label-sm">건물 ${S.contours.length}개</span>${S.contours.length ? '<button class="btn btn-xs" data-act="clearBuildings">모두 지우기</button>' : ''}</div>`;
+      break;
     case 'road':
     case 'fence': {
       const isRoad = S.mode === 'road', key = isRoad ? 'roadWidth' : 'fenceWidth', list = isRoad ? S.polylines : S.fences;
@@ -152,7 +160,7 @@ function renderModeUI() {
       break;
     case 'zone':
       h = `<div class="zone-picker">${Object.entries(ENV_ZONE_TYPES).map(([k, z]) =>
-        `<button class="zone-opt ${S.envZoneType === k ? 'active' : ''}" data-zone="${k}" style="--zc:${z.color}">${z.icon} ${z.label.split(' ')[0]}<small>보행 ${z.pedestrian}점${k === 'floodedArea' || k === 'powerLine' ? ' · 장비 통제' : ''}</small></button>`).join('')}</div>`;
+        `<button class="zone-opt ${S.envZoneType === k ? 'active' : ''}" data-zone="${k}" style="--zc:${z.color}">${hzIconHTML(hzZoneSign(k), z.icon)} ${z.label.split(' ')[0]}<small>보행 ${z.pedestrian}점${k === 'floodedArea' || k === 'powerLine' ? ' · 장비 통제' : ''}</small></button>`).join('')}</div>`;
       break;
     case 'route': {
       const method = S.walkableAreaPolygon.length >= 6 ? '보행 구역 안에서' : (S.polylines.length ? '그려진 도로 위로' : '현장 전체에서 (건물·울타리 회피)');
@@ -176,13 +184,13 @@ function renderModeUI() {
 
 function buildItemGrids() {
   $('equipmentGrid').innerHTML = Object.entries(EQUIPMENT_TYPES).map(([k, v]) =>
-    `<div class="drag-item eq" draggable="true" data-item='${esc(JSON.stringify({ type: k, isEquipment: true }))}' title="끌어서 배치 또는 클릭">
+    `<div class="drag-item eq" draggable="true" data-item='${esc(JSON.stringify({ type: k, isEquipment: true }))}' title="누른 뒤 지도에서 놓을 곳을 누르세요 (끌어다 놓아도 됨)">
        <span class="ico">${v.icon}</span><span class="lbl">${v.label}</span><span class="sub" title="사고 빈도 가중치 — 설계값 (통계 산출값 아님)">W ×${new v.cls({ x: 0, y: 0 }, {}).w_freq}</span></div>`).join('');
   const items = [...HAZARD_ITEMS, ...S.customItems];
   $('hazardGrid').innerHTML = items.map(it =>
-    `<div class="drag-item" draggable="true" data-item='${esc(JSON.stringify(it))}' title="끌어서 배치 또는 클릭">
+    `<div class="drag-item" draggable="true" data-item='${esc(JSON.stringify(it))}' title="누른 뒤 지도에서 놓을 곳을 누르세요 (끌어다 놓아도 됨)">
        ${it.type.startsWith('custom-') ? `<button class="icon-btn del" data-del-custom="${esc(it.type)}" title="삭제">✕</button>` : ''}
-       <span class="ico">${esc(it.icon || '⚠️')}</span><span class="lbl">${esc(it.label)}</span><span class="sub">등급 ${it.riskLevel}</span></div>`).join('');
+       <span class="ico">${hzIconHTML(hzMarkerSign(it.type), esc(it.icon || '⚠️'))}</span><span class="lbl">${esc(it.label)}</span><span class="sub">등급 ${it.riskLevel}</span></div>`).join('');
 }
 
 function renderEnvZoneList() {
@@ -192,7 +200,7 @@ function renderEnvZoneList() {
     const info = ENV_ZONE_TYPES[z.type] || { label: z.type, icon: '⚠️', color: '#fff' };
     const kv = z.type === 'powerLine'
       ? `<label class="label-sm" title="장비 이격거리 ${powerLineClearance(z.kV)} m (안전보건규칙 제322조)"><input type="number" class="input input-num" min="1" max="765" step="0.1" value="${+z.kV > 0 ? +z.kV : DEFAULT_POWERLINE_KV}" data-zone-kv="${esc(z.id)}"> kV · 이격 ${powerLineClearance(z.kV)} m</label>` : '';
-    return `<div class="list-item" style="--c:${info.color}"><span>${info.icon} ${info.label}</span>${kv}<button class="icon-btn" data-del-zone="${esc(z.id)}" title="삭제">✕</button></div>`;
+    return `<div class="list-item" style="--c:${info.color}"><span>${hzIconHTML(hzZoneSign(z.type), info.icon)} ${info.label}</span>${kv}<button class="icon-btn" data-del-zone="${esc(z.id)}" title="삭제">✕</button></div>`;
   }).join('');
 }
 
@@ -226,7 +234,7 @@ function selectedMarker() {
 function renderInspector() {
   const el = $('inspector');
   const sel = S.selection;
-  if (!sel || S.mode === '3d') { el.hidden = true; return; }
+  if (!sel || (S.mode === '3d' && sel.kind !== 'building')) { el.hidden = true; return; }   // 3D 에서는 건물만 (누르면 선택)
   if (sel.kind === 'marker') {
     const m = selectedMarker();
     if (!m) { S.selection = null; el.hidden = true; return; }
@@ -278,7 +286,7 @@ function equipmentFormula(eq) {
   if (!eq) return '';
   const fc = eq.fullControlReason();
   const wf = eq.w_freq, sp = eq.sPenalty, hm = eq.hMitigation;
-  const zoneFlags = Object.keys(eq.flags).map(k => ENV_ZONE_TYPES[k] ? ENV_ZONE_TYPES[k].icon + ENV_ZONE_TYPES[k].label : k).join(', ');
+  const zoneFlags = Object.keys(eq.flags).map(k => ENV_ZONE_TYPES[k] ? hzIconHTML(hzZoneSign(k), esc(ENV_ZONE_TYPES[k].icon)) + esc(ENV_ZONE_TYPES[k].label) : esc(k)).join(', ');   // 이미 esc 됨
   const chip = (v) => { const g = riskGrade(v); return `<span class="badge" style="background:${g.color}22;color:${g.color}">${fmt(v, 1)}</span>`; };
   const missing = Object.entries(MITIGATIONS).filter(([k, info]) => info.required && info.appliesTo.includes(eq.equipmentType) && !eq.mitigation[k]);
   return `${fc ? `<div class="alert danger" style="margin-bottom:8px">⛔ <b>전면 통제</b> — ${esc(fc)}<br>영향 반경(${fmt(eq.getMaxRadius())} m) 전체가 100점</div>` : ''}
@@ -286,7 +294,7 @@ function equipmentFormula(eq) {
   <div class="formula">
     <div class="row" title="설계값: 사망자 수 순위를 참고해 정한 값이며 통계로 산출한 값이 아닙니다"><span>📊 W_freq (사고 빈도 가중치 · 설계값)</span><b style="color:#a78bfa">×${wf}</b></div>
     <div class="row"><span>🌍 S_penalty (장비 위치 지반)</span><b style="color:${sp ? 'var(--warn)' : 'var(--ok)'}">+${sp}</b></div>
-    ${zoneFlags ? `<div class="label-sm" style="margin-top:-2px">↳ ${esc(zoneFlags)}</div>` : ''}
+    ${zoneFlags ? `<div class="label-sm" style="margin-top:-2px">↳ ${zoneFlags}</div>` : ''}
     <div class="row"><span>🛡️ H_mitigation (통제 완화)</span><b style="color:${hm ? 'var(--ok)' : 'var(--muted)'}">−${hm}</b></div>
     <div class="row total"><span>🔴 Red Zone</span>${chip(fc ? 100 : 100)}</div>
     <div class="row"><span>🟠 Orange Zone</span>${chip(fc ? 100 : eq.orangeRisk())}</div>
@@ -296,7 +304,7 @@ function equipmentFormula(eq) {
 }
 
 function hazardInspector(m) {
-  let h = inspectorHeader(`${esc(m.icon || '⚠️')} ${esc(m.label)}`);
+  let h = inspectorHeader(`${hzIconHTML(hzMarkerSign(m.type), esc(m.icon || '⚠️'))} ${esc(m.label)}`);
   h += `<div class="field"><div class="row"><span>위험 반경</span><span class="value" id="insRadius">${m.radius} m</span></div>
         <input type="range" min="0.5" max="30" step="0.5" value="${m.radius}" data-hz="radius"></div>
         <div class="field"><div class="row"><span>위험 등급</span><span class="value" id="insLevel">${m.riskLevel || 3} → R=${(m.riskLevel || 3) * 20}</span></div>
@@ -307,10 +315,30 @@ function hazardInspector(m) {
 
 function buildingInspector(idx) {
   const bd = S.buildingData[idx] || {};
+  const sp = buildingSpec(idx), lay = structuralLayout(getContourPolys()[idx] || [], sp.type);
+  const opts = (obj, cur) => Object.entries(obj).map(([k, v]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${v.label}</option>`).join('');
   let h = inspectorHeader(`🏢 ${esc(bd.name || `건물 #${idx + 1}`)}`);
   h += `<div class="field"><div class="label-sm" style="margin-bottom:4px">건물 이름 (동 번호)</div><input type="text" class="input" maxlength="20" placeholder="예: 101동" value="${esc(bd.name || '')}" data-bd="name"></div>
-        <div class="field row"><span>층수 <span class="label-sm">(3D 높이, 비우면 기본값)</span></span><input type="number" class="input input-num" min="1" max="80" value="${bd.floors || ''}" data-bd="floors"></div>
-        <div class="card" style="border-color:rgba(239,68,68,.35)"><div class="row"><div><b>🚫 현관 출입 불가</b><div class="label-sm">타일 작업 등으로 현관이 막힘</div></div>
+        <div class="field row"><span>층수 <span class="label-sm">(비우면 기본 높이 ${S.settings.buildingHeight} m)</span></span><input type="number" class="input input-num" min="1" max="80" value="${bd.floors || ''}" placeholder="${sp.floors}" data-bd="floors"></div>
+        <h4>구조 · 공정</h4>
+        <div class="field row"><span>구조 형식</span><select class="input input-sel" data-bd="structure">
+          <option value="" ${sp.auto ? 'selected' : ''}>자동 추정 (${STRUCTURE_TYPES[suggestStructure(getContourPolys()[idx] || []).type].label})</option>${opts(STRUCTURE_TYPES, sp.auto ? '' : sp.type)}</select></div>
+        <div class="label-sm" style="margin:-4px 0 8px">${sp.auto ? `↳ ${esc(sp.reason)}` : esc(sp.T.desc)}</div>
+        <div class="field row"><span>공정 단계</span><select class="input input-sel" data-bd="stage">${opts(CONSTRUCTION_STAGES, sp.stage)}</select></div>
+        ${sp.stage === 'frame' ? `<div class="field"><div class="row"><span>골조 진행</span><span class="value" id="insBuilt">${sp.built} / ${sp.floors}층</span></div>
+          <input type="range" min="0" max="${sp.floors}" value="${sp.built}" data-bd="builtFloors"></div>` : ''}
+        <div class="field row"><span>층고 (m) <span class="label-sm">설계값 · 기본 ${sp.T.floorH}</span></span><input type="number" class="input input-num" min="2.4" max="8" step="0.1" value="${bd.floorHeight || ''}" placeholder="${sp.T.floorH}" data-bd="floorHeight"></div>
+        <div class="field row"><span>지하층 수 <span class="label-sm">(터파기 깊이)</span></span><input type="number" class="input input-num" min="0" max="8" value="${bd.basements || ''}" placeholder="0" data-bd="basements"></div>
+        <div class="formula">
+          <div class="row"><span>바닥 면적</span><b>${fmt(lay.area)} ㎡</b></div>
+          <div class="row"><span>높이</span><b>${fmt(sp.height, 1)} m <span class="label-sm">(${sp.floors}층 × ${sp.floorH} m)</span></b></div>
+          <div class="row"><span>연면적 (추정)</span><b>${fmt(lay.area * sp.floors)} ㎡</b></div>
+          ${sp.type === 'wall' ? `<div class="row"><span>세대 경계벽</span><b>${lay.walls.length}개 · 간격 ${fmt(lay.spanU, 1)} m</b></div>`
+            : `<div class="row"><span>기둥</span><b>${lay.columns.length}개 · 경간 ${fmt(lay.spanU, 1)} × ${fmt(lay.spanV, 1)} m</b></div>`}
+        </div>
+        <div class="label-sm" style="margin-top:6px">기둥·벽 배치는 3D 표현용 추정입니다 (구조 설계 아님).</div>
+        <div class="row-gap" style="margin-top:10px"><button class="btn flex1" data-act="regularizeSel" title="이 건물 외곽선을 직각으로 정리">📐 직각 보정</button>${S.bgImage ? '<button class="btn flex1" data-act="shadowHeight" title="항공 사진의 그림자 길이로 높이 계산">☀️ 그림자로 높이</button>' : ''}</div>
+        <div class="card" style="border-color:rgba(239,68,68,.35);margin-top:10px"><div class="row"><div><b>🚫 현관 출입 불가</b><div class="label-sm">타일 작업 등으로 현관이 막힘</div></div>
         <label class="switch danger"><input type="checkbox" data-bd="entranceBlocked" ${bd.entranceBlocked ? 'checked' : ''}><span class="sl"></span></label></div></div>
         ${bd.entranceBlocked ? '<div class="alert info" style="margin-top:8px">이 건물을 도착지로 지정하면 가장 가까운 다른 건물로 진입해 <b>지하 B1</b>을 거쳐 도착하도록 안내합니다.</div>' : ''}
         <button class="btn btn-danger" style="width:100%;margin-top:14px" data-act="deleteBuilding">건물 삭제</button>`;

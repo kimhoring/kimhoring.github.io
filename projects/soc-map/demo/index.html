@@ -2,8 +2,9 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SOC-MAP v13 — 공사 현장 안전 위치 관제</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0b1120">
+<title>SOC-MAP v14 — 공사 현장 안전 위치 관제</title>
 <meta name="description" content="KOSHA 기반 건설현장 장비 충돌·위험도 맵과 안전 경로 탐색">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦺</text></svg>">
 <link rel="stylesheet" href="app/style.css">
@@ -42,6 +43,7 @@
 
     <div class="top-status">
       <span class="status-chip" id="backendChip" title="AI·현장 서버 상태"><span class="dot checking" id="statusDot"></span><span id="statusText">서버 확인 중…</span></span>
+      <button class="status-chip wx-chip" id="wxChip" hidden title="기상청 날씨 — 눌러서 현장 설정에서 자세히"></button>
     </div>
 
     <div class="top-actions">
@@ -77,7 +79,7 @@
           </div>
           <div class="mode-slot" data-slot="layout"><div class="mode-options" id="modeOptions"></div></div>
           <div class="group">
-            <div class="group-title">KOSHA 장비 <small>지도로 끌어 놓거나 클릭</small></div>
+            <div class="group-title">KOSHA 장비 <small>누른 뒤 지도에서 놓을 곳 누르기</small></div>
             <div class="items-grid" id="equipmentGrid"></div>
           </div>
           <div class="group">
@@ -124,6 +126,11 @@
             <button class="btn flex1" id="simWorkersBtn">🧪 가상 인원 투입</button>
           </div>
           <div class="group">
+            <div class="group-title">대피 장소 · 목적지 <button class="btn btn-xs" id="placeAddBtn">＋ 지도에서 추가</button></div>
+            <div class="list" id="placeList"></div>
+            <div class="hint">근로자 앱의 안전 경로 목적지입니다. 「전체 알림 → 즉시 대피」를 보내면 근로자 앱이 가까운 대피 장소까지 경로를 안내합니다.</div>
+          </div>
+          <div class="group">
             <div class="group-title">경보 기록 <button class="btn btn-danger btn-xs" id="ackAllBtn" hidden></button></div>
             <div class="list events" id="eventList"></div>
           </div>
@@ -142,11 +149,14 @@
                 <label><input type="radio" name="imageType" value="floorplan" checked>일반 배치도</label>
                 <label><input type="radio" name="imageType" value="construction">항공 사진</label>
               </div>
-              <button class="btn btn-primary" id="uploadBtn">⬆ 배치도 업로드</button>
+              <button class="btn btn-primary" id="uploadBtn" title="이미지·PDF 는 AI 가 건물을 찾고, CAD 원본(DXF)은 도형을 그대로 실제 단위로 읽습니다">⬆ 배치도 업로드 (이미지 · PDF · DXF)</button>
+              <div class="hint" id="dxfInfo" hidden></div>
+              <button class="btn" data-act="aipickMode" title="AI 가 건물을 못 찾았거나 빠뜨렸을 때 — 건물을 사각형으로 감싸 끌면 외곽선을 땁니다 (MobileSAM)">✨ AI 건물 따기 (감싸 끌기)</button>
               <div class="row-gap">
                 <button class="btn flex1" id="reanalyzeBtn" title="현재 도면을 지금 설정으로 다시 분석 (Ctrl+Z로 이전 결과 복원)">🔄 다시 분석</button>
                 <button class="btn flex1" id="saveSampleBtn" title="현재 건물 외곽선을 정답으로 삼아 재학습용 데이터에 추가">🎯 학습용 저장</button>
               </div>
+              <button class="btn" data-act="regularizeAll" title="모든 건물 외곽선을 단순화하고 주축 방향 직각으로 정리 (Ctrl+Z로 되돌리기)">📐 외곽선 직각 보정 (구조 정합)</button>
               <details class="adv" id="aiAdvanced">
                 <summary>AI 검출 설정 <span class="label-sm" id="aiOptsSummary"></span></summary>
                 <div class="adv-body">
@@ -158,6 +168,7 @@
                     <select class="input input-sel" id="optTiling"><option value="auto">자동</option><option value="on">항상</option><option value="off">끄기</option></select></div>
                   <label class="field-row"><span>반전 추론(TTA) <small>정확도↑ 약 3배 느림</small></span><span class="switch"><input type="checkbox" id="optTta"><span class="sl"></span></span></label>
                   <label class="field-row"><span>선 도면 선명도 보정</span><span class="switch"><input type="checkbox" id="optEnhance"><span class="sl"></span></span></label>
+                  <label class="field-row"><span>외곽선 직각 보정 <small>인식 직후 자동 · 실제 건물처럼 반듯하게</small></span><span class="switch"><input type="checkbox" id="optRegularize"><span class="sl"></span></span></label>
                   <button class="btn btn-xs" id="optReset">기본값으로</button>
                 </div>
               </details>
@@ -167,14 +178,25 @@
           <div class="step">
             <div class="step-no">2</div>
             <div class="step-body">
-              <div class="step-title">실제 위치에 맞추기 (정합)</div>
-              <div class="hint">도면의 확실한 지점 2~3곳에 실제 위치를 지정하면 위치·축척·방향이 맞춰집니다.</div>
-              <button class="btn btn-outline" data-mode="align">📍 도면 정합 시작 <kbd>9</kbd></button>
-              <div class="mode-slot" data-slot="plan"></div>
+              <div class="step-title">실제 건물 데이터 (브이월드)</div>
+              <div class="hint">국토교통부 <b>GIS건물통합정보</b> — 실제 축척의 건물 외곽선과 지상·지하 층수, 높이, 구조. 현장 위치(📍)가 정해져 있어야 합니다.</div>
+              <button class="btn" id="realBldgBtn" title="현장 주변의 실제 건물을 외곽선·층수·높이·구조와 함께 추가 (이미 그린 건물 자리는 건너뜀)">🏢 주변 실제 건물 불러오기</button>
+              <button class="btn" id="autoAlignBtn" title="AI가 도면에서 찾은 건물을 실제 건물과 짝 지어 도면의 축척·방향·위치를 자동으로 맞춤 (맞는 건물 5동 이상)">🧭 AI 인식 건물로 도면 자동 맞추기</button>
+              <div class="hint" id="realBldgInfo"></div>
             </div>
           </div>
           <div class="step">
             <div class="step-no">3</div>
+            <div class="step-body">
+              <div class="step-title">실제 위치에 맞추기 (정합)</div>
+              <div class="hint">도면의 확실한 지점 3~4곳(기준점)에 실제 위치를 지정하면 위치·축척·방향이 맞춰집니다. 정합에 쓰지 않는 검증점 2곳을 더하면 실제 오차를 알 수 있습니다.</div>
+              <button class="btn btn-outline" data-mode="align">📍 도면 정합 시작 <kbd>9</kbd></button>
+              <button class="btn" data-act="dimCheck" title="도면에 적힌 치수로 지금 축척이 맞는지 확인">📏 치수로 축척 확인</button>
+              <div class="mode-slot" data-slot="plan"></div>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-no">4</div>
             <div class="step-body">
               <div class="step-title">표시</div>
               <div class="field-row"><span>도면 불투명도</span></div>
@@ -191,6 +213,15 @@
         <div class="ws-body">
           <div class="group">
             <div class="group-title">현장 조건</div>
+            <div class="wx-card" id="wxCard" hidden>
+              <div class="wx-head"><b>☁️ 기상청 날씨</b><span class="label-sm" id="wxMeta"></span><button class="icon-btn" id="wxRefresh" title="다시 받기">↻</button></div>
+              <div class="wx-now" id="wxNow"></div>
+              <div class="wx-hours" id="wxHours"></div>
+              <div class="hint warn" id="wxMiss" hidden></div>
+              <div class="wx-checks" id="wxChecks"></div>
+              <label class="field-row"><span>순간풍속에 자동 반영<small class="wx-sub">기상청 평균풍속 × <span id="wxGf">1.66</span>(돌풍계수, 설계값). 장비 풍속계 값이 있으면 끄고 아래에 직접 넣으세요.</small></span><span class="switch"><input type="checkbox" id="wxAuto"><span class="sl"></span></span></label>
+            </div>
+            <div class="hint" id="wxOff" hidden></div>
             <div class="field-row"><span title="작업 중지 판단은 순간풍속 기준 (안전보건규칙 제37조)">🌬️ 순간풍속</span><b class="value" id="windLabel">0 m/s</b></div>
             <input type="range" id="windSlider" min="0" max="25" step="1" value="0">
             <div class="hint">10 m/s 이상이면 크레인·항타기가 전면 통제 구역이 됩니다.</div>
@@ -202,7 +233,8 @@
           <div class="group">
             <div class="group-title">지도 표시</div>
             <div class="field-row"><span>배경 지도</span>
-              <select class="input input-sel" id="basemapSelect"><option value="satellite">위성 영상</option><option value="street">일반 지도</option><option value="none">끄기</option></select></div>
+              <select class="input input-sel" id="basemapSelect"><option value="vworld" data-vw>브이월드 영상</option><option value="vworldHybrid" data-vw>브이월드 영상+지명</option><option value="vworldBase" data-vw>브이월드 지도</option><option value="satellite">위성 (Esri)</option><option value="street">일반 지도 (OSM)</option><option value="none">끄기</option></select></div>
+            <label class="field-row" id="cadastralRow"><span>연속지적도 <small>필지 경계 · 줌 15 이상 · 도면 정합 때 경계점에 붙이기</small></span><span class="switch"><input type="checkbox" id="layerCadastral"><span class="sl"></span></span></label>
             <label class="field-row"><span>위험도 히트맵 <kbd>H</kbd></span><span class="switch"><input type="checkbox" id="layerHeat"><span class="sl"></span></span></label>
             <label class="field-row"><span>장비 위험 구역</span><span class="switch"><input type="checkbox" id="layerZones" checked><span class="sl"></span></span></label>
             <label class="field-row"><span>최단 경로 비교선</span><span class="switch"><input type="checkbox" id="layerShortest" checked><span class="sl"></span></span></label>
@@ -221,7 +253,7 @@
           </div>
         </div>
       </section>
-      <input type="file" id="fileInput" accept="image/*" hidden>
+      <input type="file" id="fileInput" accept="image/*,application/pdf,.pdf,.dxf,.dwg" hidden>
       <input type="file" id="jsonInput" accept=".json,application/json" hidden>
     </aside>
 
@@ -235,7 +267,13 @@
           <div class="field-row"><span>기본 건물 높이</span><b class="value" id="bldgHeightLabel">18</b></div>
           <input type="range" id="bldgHeightSlider" min="3" max="120" value="18">
           <label class="field-row"><span>지하층(B1) 표시</span><span class="switch"><input type="checkbox" id="showUnderground" checked><span class="sl"></span></span></label>
-          <div class="hint">드래그 회전 · 우클릭 드래그 이동 · 휠 확대</div>
+          <label class="field-row"><span>구조 골조 보기 <small>모든 건물을 기둥·보·슬래브로</small></span><span class="switch"><input type="checkbox" id="show3dXray"><span class="sl"></span></span></label>
+          <label class="field-row"><span>비계 · 보호망</span><span class="switch"><input type="checkbox" id="show3dScaffold" checked><span class="sl"></span></span></label>
+          <div class="field-row"><span>☀️ 태양</span><b class="value sun-label" id="sunLabel">-</b></div>
+          <div class="row-gap"><input type="date" class="input" id="sunDate"><button class="btn btn-xs" id="sunNow" title="지금 시각">지금</button></div>
+          <input type="range" id="sunHour" min="5" max="20" step="0.25">
+          <button class="btn btn-xs" id="sunPhoto" hidden>📷 항공 사진 촬영 시각으로</button>
+          <div class="hint">건물을 누르면 구조 형식·공정 단계를 바꿀 수 있습니다.<br>드래그 회전 · 우클릭 드래그 이동 · 휠 확대</div>
           <button class="btn" data-mode="select">2D 지도로 돌아가기</button>
         </div>
       </div>
@@ -251,6 +289,28 @@
             <button class="btn" id="emptySampleBtn">🧪 샘플 현장</button>
           </div>
         </div>
+      </div>
+
+      <!-- 보기 막대 (왼쪽 위): 2D/3D 전환 + 자주 켜고 끄는 레이어 — 글자로 보이게 (v14.6) -->
+      <div class="viewbar" id="viewbar" hidden>
+        <div class="vb-seg" role="tablist" aria-label="지도 보기">
+          <button class="vb-mode" id="vb2d" title="2D 지도 — 배치·경로·관제 (Esc)">🗺️ <span class="vb-t">2D 지도</span></button>
+          <button class="vb-mode" id="vb3d" title="3D 보기 — 건물 구조·공정, 위성 지도, 현장 인원을 입체로 (8)">🏙️ <span class="vb-t">3D 보기</span></button>
+        </div>
+        <div class="vb-chips" aria-label="레이어">
+          <button class="vb-chip" data-layer="basemap" title="위성 지도 켜기/끄기 (2D·3D)"><i class="vb-dot"></i>🛰️ <span class="vb-t">위성 지도</span></button>
+          <button class="vb-chip" data-layer="bg" title="배치도(올린 도면 그림) 켜기/끄기 (2D·3D)"><i class="vb-dot"></i>📐 <span class="vb-t">배치도</span></button>
+          <button class="vb-chip" data-layer="zones" title="장비 위험 구역 켜기/끄기 (2D·3D)"><i class="vb-dot"></i>⚠️ <span class="vb-t">위험 구역</span></button>
+          <button class="vb-chip" data-layer="heat" title="위험도 히트맵 (H, 2D)"><i class="vb-dot"></i>🔥 <span class="vb-t">히트맵</span></button>
+          <button class="vb-chip" data-layer="people" title="현장 인원 실시간 위치 (2D·3D)"><i class="vb-dot"></i>👷 <span class="vb-t">인원</span></button>
+        </div>
+      </div>
+
+      <!-- 장비·위험물 배치 안내 (v14.8): 목록에서 누르면 「OO를 배치하세요」 → 지도에서 누른 곳에 생김 -->
+      <div class="place-banner" id="placeBanner" hidden role="status" aria-live="polite">
+        <span class="pb-ico" id="placeIcon"></span>
+        <div class="pb-txt"><b id="placeTitle">배치하세요</b><small>지도에서 놓을 곳을 누르세요 · Shift 누른 채 누르면 여러 개 · Esc 취소</small></div>
+        <button class="btn btn-xs" id="placeCancel">취소</button>
       </div>
 
       <!-- 지도 컨트롤 (오른쪽) -->
@@ -272,10 +332,12 @@
       <div class="popover layers-pop" id="layersPop" hidden>
         <div class="pop-title">배경 지도</div>
         <div class="seg" id="basemapSeg">
+          <label data-vw><input type="radio" name="basemapQuick" value="vworld">브이월드</label>
           <label><input type="radio" name="basemapQuick" value="satellite">위성</label>
           <label><input type="radio" name="basemapQuick" value="street">일반</label>
           <label><input type="radio" name="basemapQuick" value="none">끄기</label>
         </div>
+        <label class="row label-sm" data-vw style="margin-top:8px;cursor:pointer"><span>연속지적도</span><input type="checkbox" id="layerCadastralQuick"></label>
         <div class="pop-title">도면 불투명도</div>
         <input type="range" id="planOpacityQuick" min="0" max="1" step="0.05" value="0.85">
       </div>
@@ -294,21 +356,26 @@
 <!-- 현장 합류 (QR) -->
 <div class="modal" id="joinModal" hidden>
   <div class="modal-box" style="width:420px">
-    <h3>📱 휴대폰으로 현장 합류</h3>
+    <h3>📱 휴대폰 연결</h3>
+    <div class="seg" id="joinSeg">
+      <label><input type="radio" name="joinApp" value="worker" checked>👷 근로자 앱</label>
+      <label><input type="radio" name="joinApp" value="supervisor">🦺 관리감독자 앱</label>
+      <label><input type="radio" name="joinApp" value="download">📲 앱 받기</label>
+    </div>
     <div class="join-card" id="joinCard" hidden>
       <div id="qrBox" class="qr"></div>
       <div class="join-info">
-        <div class="label-sm">현장 참여 코드</div>
+        <div class="label-sm" id="joinCodeLabel">현장 참여 코드</div>
         <div class="join-code" id="joinCode"></div>
         <div class="join-url" id="joinUrl"></div>
       </div>
     </div>
+    <button class="btn btn-primary" id="joinCopyBtn" hidden>📋 초대 메시지 복사</button>
     <div class="hint" id="joinNote"></div>
-    <div class="alert info" id="joinEmpty">휴대폰 합류는 <b>서버 프로젝트</b>에서 가능합니다. 상단의 프로젝트 메뉴에서 「새 프로젝트」를 만들거나 「서버 프로젝트 열기」를 하세요. 서버는 <b>현장모니터링_실행.bat</b>으로 켭니다.</div>
-    <ol class="join-steps">
-      <li>휴대폰을 이 PC와 <b>같은 와이파이</b>에 연결합니다.</li>
-      <li>카메라로 QR을 찍거나 주소를 열고, 이름과 역할(작업자/장비 운전원)을 고릅니다.</li>
-      <li>화면을 켠 채로 두면 위험 반경 경보를 받습니다.</li>
+    <div class="alert info join-empty" id="joinEmpty"><span id="joinEmptyText"></span><button class="btn btn-primary" id="joinStartBtn" hidden></button></div>
+    <ol class="join-steps" id="joinSteps">
+      <li>휴대폰으로 QR을 찍거나, 「초대 메시지 복사」를 눌러 카카오톡 단체방에 붙여 넣습니다.</li>
+      <li>이름을 넣고 「동의하고 현장 합류」를 누르면 끝입니다. 다음부터는 앱을 열기만 하면 됩니다.</li>
     </ol>
     <button class="btn" data-close>닫기</button>
   </div>
@@ -421,10 +488,12 @@ python main.py --host 0.0.0.0  # 다른 PC 접속 허용</pre>
 <div class="modal" id="alignModal" hidden>
   <div class="modal-box" style="width:440px">
     <h3 id="alignTitle">새 기준점</h3>
-    <p class="hint">클릭한 도면 지점의 <b>실제 위치</b>를 지정하세요. 정확도: 현장 측량점 ≫ 좌표 직접 입력 ≈ 위성 지도 클릭</p>
+    <p class="hint">클릭한 도면 지점의 <b>실제 위치</b>를 지정하세요. 정확도: 도면에 적힌 TM 좌표(대지 경계점·기준점) ≫ 현장 측량점 ≈ 지적 경계점 &gt; 위성 지도 클릭</p>
     <select class="input" id="alignSurvey"></select>
-    <input type="text" class="input" id="alignInput" placeholder="위도, 경도 (예: 35.1760123, 126.9065123)">
-    <button class="btn" id="alignPick">🛰️ 위성 지도에서 같은 지점 클릭</button>
+    <div class="row-gap"><select class="input input-sel" id="alignCrs" style="flex:0 0 44%"></select><input type="text" class="input" id="alignInput" placeholder="위도, 경도 (예: 35.1760123, 126.9065123)" style="flex:1"></div>
+    <div class="hint" id="alignPreview"></div>
+    <button class="btn" id="alignPick">🛰️ 지도에서 같은 지점 클릭</button>
+    <label class="row label-sm" style="cursor:pointer"><span>🔍 <b>검증점</b> — 정합 계산에 쓰지 않고 실제 오차 확인에만 사용</span><input type="checkbox" id="alignCheck"></label>
     <div class="hint" id="alignMsg"></div>
     <div class="row-gap">
       <button class="btn btn-danger" id="alignDelete" hidden>삭제</button>
@@ -432,6 +501,24 @@ python main.py --host 0.0.0.0  # 다른 PC 접속 허용</pre>
       <button class="btn btn-primary flex1" id="alignSave" style="padding:8px">저장</button>
     </div>
   </div>
+</div>
+
+<!-- 그림자로 건물 높이 추정 -->
+<div class="modal" id="shadowModal" hidden>
+  <div class="modal-box" style="width:440px">
+    <h3>☀️ 그림자로 건물 높이 추정</h3>
+    <p class="hint">항공 사진에서 잰 그림자 길이와 <b>촬영 시각의 태양 고도</b>로 높이를 계산합니다 (높이 = 그림자 길이 × tan 고도). 도면 정합(축척·방향)이 맞아야 정확합니다.</p>
+    <label class="label-sm">촬영 날짜 · 시각 (사진 EXIF 가 있으면 자동)</label>
+    <input type="datetime-local" class="input" id="shadowTime">
+    <div class="prj-info" id="shadowResult"></div>
+    <div class="row-gap"><button class="btn flex1" data-close>취소</button><button class="btn btn-primary flex1" id="shadowApply" style="padding:8px">층수에 적용</button></div>
+  </div>
+</div>
+
+<div class="phone-banner" id="phoneBanner" hidden>
+  <span>관리자 화면은 <b>노트북용</b>입니다. 휴대폰에서는 <b>관리감독자 앱</b>을 쓰세요</span>
+  <a class="btn btn-primary btn-xs" id="phoneBannerGo" href="/supervisor">열기</a>
+  <button class="btn btn-ghost btn-xs" id="phoneBannerX" aria-label="닫기">✕</button>
 </div>
 
 <!-- 전체 알림 -->
@@ -447,7 +534,9 @@ python main.py --host 0.0.0.0  # 다른 PC 접속 허용</pre>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer></script>
 <script src="app/js/costmap.js"></script>
+<script src="app/js/hazardviz.js"></script>
 <script src="app/js/geo.js"></script>
+<script src="app/js/structure.js"></script>
 <script src="app/js/pathfinding.js"></script>
 <script src="app/js/state.js"></script>
 <script src="app/js/basemap.js"></script>

@@ -95,9 +95,9 @@ function flattenContour(c) {
 
 // ── 환경 구역 ──
 const ENV_ZONE_TYPES = {
-  softGround:  { label: '연약지반',        icon: '🍮', color: '#eab308', pedestrian: 20 },
+  softGround:  { label: '연약지반',        icon: '⚠️', color: '#d97706', pedestrian: 20 },   // 그림·무늬는 hazardviz.js HZ_ZONE_STYLE
   steepSlope:  { label: '경사도 30% 이상', icon: '📐', color: '#f97316', pedestrian: 30 },
-  powerLine:   { label: '고압선 (전선 아래)', icon: '⚡', color: '#a855f7', pedestrian: 50 },   // 장비 판정은 제322조 이격거리 + 장비 도달거리
+  powerLine:   { label: '고압선 (전선 아래)', icon: '⚡', color: '#facc15', pedestrian: 50 },   // 장비 판정은 제322조 이격거리 + 장비 도달거리
   floodedArea: { label: '침수 지역',       icon: '💧', color: '#3b82f6', pedestrian: 100 },
 };
 

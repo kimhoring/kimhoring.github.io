@@ -21,8 +21,33 @@ Copy-Item (Join-Path $Source 'SOC_MAP.html') (Join-Path $Demo 'index.html') -For
 Copy-Item (Join-Path $Source 'app\style.css') (Join-Path $Demo 'app\style.css') -Force
 
 # 관리자 화면이 쓰는 스크립트만 (현장 앱 field.js 는 서버가 필요해 제외)
-$scripts = 'costmap', 'geo', 'pathfinding', 'state', 'basemap', 'render2d', 'view3d', 'ui', 'app', 'detection', 'project'
+$scripts = 'costmap', 'hazardviz', 'geo', 'structure', 'pathfinding', 'state', 'basemap', 'render2d', 'view3d', 'ui', 'app', 'detection', 'project'
 foreach ($s in $scripts) {
   Copy-Item (Join-Path $Source "app\js\$s.js") (Join-Path $Demo "app\js\$s.js") -Force
 }
 Write-Host "projects/soc-map/demo/ 갱신 완료 <- $Source"
+
+# 고정 초대 주소 (https://kimhoring.github.io/projects/soc-map/go/) — SOC-MAP v14.10
+# 관리자 화면의 QR·초대 링크가 이 주소를 쓴다. 지금 켜져 있는 서버로 넘겨 주므로 노트북을 다시 켜도 같은 QR 을 쓴다
+$GoDir = Join-Path $PSScriptRoot '..\projects\soc-map\go'
+New-Item -ItemType Directory -Force $GoDir | Out-Null
+Copy-Item (Join-Path $Source 'app\go.html') (Join-Path $GoDir 'index.html') -Force
+Copy-Item (Join-Path $Source 'app\js\directory.js') (Join-Path $GoDir 'directory.js') -Force
+Write-Host "projects/soc-map/go/ (고정 초대) 갱신 완료"
+
+# 안드로이드 앱 받기 (고정 주소 https://kimhoring.github.io/projects/soc-map/app/) — SOC-MAP v14.7
+# 같은 download.html 이 서버 없이(정적) 열리면 옆의 download/apps.json · icons/ 를 쓴다
+$AppDir = Join-Path $PSScriptRoot '..\projects\soc-map\app'
+$Apks = Join-Path $Source 'app\download'
+if (Test-Path (Join-Path $Apks 'apps.json')) {
+  New-Item -ItemType Directory -Force (Join-Path $AppDir 'download'), (Join-Path $AppDir 'icons') | Out-Null
+  Copy-Item (Join-Path $Source 'app\download.html') (Join-Path $AppDir 'index.html') -Force
+  Copy-Item (Join-Path $Apks 'apps.json') (Join-Path $AppDir 'download\apps.json') -Force
+  Get-ChildItem $Apks -Filter '*.apk' | ForEach-Object { Copy-Item $_.FullName (Join-Path $AppDir "download\$($_.Name)") -Force }
+  foreach ($r in 'worker', 'supervisor') {
+    Copy-Item (Join-Path $Source "app\pwa\icons\$r-192.png") (Join-Path $AppDir "icons\$r-192.png") -Force
+  }
+  Write-Host "projects/soc-map/app/ (앱 받기 · APK) 갱신 완료"
+} else {
+  Write-Host "APK 가 없어 앱 받기 페이지는 건너뜀 (android\APK_빌드.bat 으로 먼저 빌드)"
+}

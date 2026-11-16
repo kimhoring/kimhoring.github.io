@@ -119,6 +119,8 @@ function render() {
   else {
     ctx.fillStyle = '#0d1524'; ctx.fillRect(vis.minX, vis.minY, vis.maxX - vis.minX, vis.maxY - vis.minY);
   }
+  // v14.6: 지적도 줄이 위성 지도 if 와 else 사이에 끼어 있어(v14.3) 지적도를 끄면 else 가 위성 지도를 덮던 문제 수정
+  if (S.project.origin && S.layers.cadastral) Basemap.drawCadastral(ctx, s, vis);
   const PT = planTransform();
   if (S.bgImage && S.layers.bg && PT) {
     const [a, b, c, d, e, f] = PT.matrix;
@@ -149,7 +151,7 @@ function render() {
     ctx.strokeStyle = '#10b981'; ctx.lineWidth = px(2.5); ctx.setLineDash([px(10), px(6)]); ctx.stroke(); ctx.setLineDash([]);
   }
 
-  // 환경 구역
+  // 환경 구역 — 종류마다 무늬가 다르다 (hazardviz.js: 연약지반 진흙 물결 · 급경사 꺾쇠 · 고압선 노랑·검정 띠 · 침수 물결)
   for (const z of S.siteEnvironment.envZones) {
     if (z.polygon.length < 6) continue;
     const info = ENV_ZONE_TYPES[z.type] || { color: '#fff' };
@@ -157,10 +159,10 @@ function render() {
       ctx.beginPath(); tracePoly(z.polygon);
       ctx.strokeStyle = info.color + '30'; ctx.lineWidth = 2 * powerLineClearance(z.kV); ctx.lineJoin = 'round'; ctx.stroke();
     }
-    ctx.beginPath(); tracePoly(z.polygon);
-    ctx.fillStyle = info.color + '2a'; ctx.fill();
-    ctx.strokeStyle = info.color; ctx.lineWidth = px(2.5); ctx.stroke();
+    hzZoneArea(ctx, z, px);
   }
+  // 닫힌 울타리 안쪽 = 통행 금지 구역 (빨간 빗금)
+  for (const f of S.fences) hzFenceArea(ctx, f, px);
 
   // 장비 위험 구역
   const field = getRiskField();
@@ -178,11 +180,8 @@ function render() {
 
   // 도로
   for (const line of S.polylines) strokePolyline(line.points, '#10b981', Math.max(px(2), line.width || 3), null, 0.55);
-  // 울타리
-  for (const f of S.fences) {
-    strokePolyline(f.points, '#f97316', Math.max(px(6), (f.width || 0.4) + px(2)), null, 0.35);
-    strokePolyline(f.points, '#f97316', Math.max(px(3), f.width || 0.4), [px(12), px(7)], 1);
-  }
+  // 울타리 — 가설 울타리처럼 빨강·흰 줄무늬 띠 + 기둥 (표지는 아래 글자 층에서)
+  for (const f of S.fences) hzFence(ctx, f, px, { signs: false });
 
   // 건물 (AI 외곽선)
   const sel = S.selection;
@@ -222,26 +221,19 @@ function render() {
     if (name) label(name, c.x, c.y - (bd.entranceBlocked ? px(10) : 0), px(13), '#fff');
     if (bd.entranceBlocked) emoji('🚫', c.x, c.y + (name ? px(10) : 0), px(16));
   });
-  for (const z of S.siteEnvironment.envZones) {
-    if (z.polygon.length < 6) continue;
-    const c = polygonCentroid(z.polygon);
-    emoji((ENV_ZONE_TYPES[z.type] || {}).icon || '⚠️', c.x, c.y, px(24));
-  }
+  for (const z of S.siteEnvironment.envZones) hzZoneLabel(ctx, z, px);   // 경고표지 + 「연약지반 · 침하 위험」 글자 판
+  for (const f of S.fences) hzFenceSigns(ctx, f, px);                    // 출입 금지 표지 + 「통행 금지」
   for (const n of S.nodes) {
     ctx.beginPath(); ctx.arc(n.cx, n.cy, px(3.5), 0, Math.PI * 2);
     ctx.fillStyle = '#f59e0b'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = px(1.2); ctx.stroke();
   }
 
   const markersNow = liveMarkers();
-  // 단순 위험물
+  // 단순 위험물 — 통제구역(빨강·흰 띠 + 출입 금지), 고전압(노랑·검정 띠 + 번개), 개구부(어두운 구멍 + 추락 경고) …
   for (const m of markersNow) {
     if (m.isEquipment) continue;
     const isSel = sel && sel.kind === 'marker' && sel.id === m.id;
-    ctx.beginPath(); ctx.arc(m.x, m.y, m.radius, 0, Math.PI * 2);
-    ctx.fillStyle = simpleMarkerColor(m); ctx.fill();
-    ctx.strokeStyle = isSel ? '#fff' : 'rgba(255,255,255,0.35)'; ctx.lineWidth = px(isSel ? 2.5 : 1); ctx.stroke();
-    emoji(m.icon || '⚠️', m.x, m.y, px(20));
-    label(m.label, m.x, m.y - m.radius - px(9), px(11.5), '#fff');
+    hzMarker(ctx, m, px, { sel: isSel, fill: simpleMarkerColor(m) });
   }
 
   // 장비 (운전원 휴대폰과 연동된 장비는 실시간 위치)
@@ -275,12 +267,23 @@ function render() {
   // 현장 인원 위치 · 정합 기준점 (project.js)
   if (typeof drawMonitorLayer === 'function') drawMonitorLayer(ctx, s);
 
+  // 장비·위험물 배치 중: 놓일 모습을 마우스 위치에 미리 보여 줌 (app.js)
+  if (typeof drawPlacingGhost === 'function') drawPlacingGhost(ctx, s);
+
   // 그리는 중
   const d = S.draft;
   if (d && d.points.length >= 2) {
-    const col = d.kind === 'road' ? '#10b981' : d.kind === 'fence' ? '#f97316' : d.kind === 'lasso' ? '#10b981' : (ENV_ZONE_TYPES[S.envZoneType] || {}).color;
-    if (d.kind === 'road' || d.kind === 'fence') strokePolyline(d.points, col, Math.max(px(2), d.width), d.kind === 'fence' ? [px(12), px(7)] : null, 1);
-    else {
+    const col = d.kind === 'road' ? '#10b981' : d.kind === 'lasso' ? '#10b981' : d.kind === 'aibox' ? '#a78bfa' : (ENV_ZONE_TYPES[S.envZoneType] || {}).color;
+    if (d.kind === 'road') strokePolyline(d.points, col, Math.max(px(2), d.width), null, 1);
+    else if (d.kind === 'fence') {
+      hzFence(ctx, { points: d.points, width: d.width }, px, { signs: false });
+      // 시작점 가까이 오면 「놓으면 닫힘 → 통행 금지 구역」 안내
+      if (fenceWillClose(d.points, s)) {
+        ctx.beginPath(); ctx.arc(d.points[0], d.points[1], px(12), 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(220,38,38,0.35)'; ctx.fill(); ctx.lineWidth = px(3); ctx.strokeStyle = '#fff'; ctx.stroke();
+        hzTag(ctx, '여기서 놓으면 닫힘 → 통행 금지 구역', d.points[0], d.points[1] + px(16), px, '#dc2626', '#fff', 11.5);
+      }
+    } else {
       ctx.beginPath(); ctx.moveTo(d.points[0], d.points[1]);
       for (let i = 2; i < d.points.length; i += 2) ctx.lineTo(d.points[i], d.points[i + 1]);
       ctx.closePath(); ctx.fillStyle = col + '22'; ctx.fill();
@@ -343,6 +346,13 @@ function drawMeasure(s) {
   ctx.restore();
 }
 function fmtDist(m) { return m >= 1000 ? `${(m / 1000).toFixed(3)} km` : m >= 100 ? `${m.toFixed(1)} m` : `${m.toFixed(2)} m`; }
+
+/** 그리던 울타리의 끝이 시작점 가까이(화면 20 px, 1~5 m)에 오면 닫힌 울타리(= 통행 금지 구역)로 만든다 — app.js finishDraft */
+function fenceWillClose(pts, s) {
+  if (!pts || pts.length < 8) return false;
+  const tol = Math.min(5, Math.max(1, 20 / s));
+  return hzPolyLength(pts) > 4 * tol && Math.hypot(pts[0] - pts[pts.length - 2], pts[1] - pts[pts.length - 1]) <= tol;
+}
 
 function strokePolyline(pts, color, width, dash, alpha) {
   if (!pts || pts.length < 4) return;

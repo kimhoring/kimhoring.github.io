@@ -8,7 +8,7 @@
 'use strict';
 
 const AI_OPTS_KEY = 'socmap.v12.aiopts';
-const AI_DEFAULTS = { imgsz: 1024, tiling: 'auto', tta: false, enhance: false };
+const AI_DEFAULTS = { imgsz: 1024, tiling: 'auto', tta: false, enhance: false, regularize: true };
 const AiOpts = (() => {
   try { return { ...AI_DEFAULTS, ...JSON.parse(localStorage.getItem(AI_OPTS_KEY) || '{}') }; } catch (e) { return { ...AI_DEFAULTS }; }
 })();
@@ -18,9 +18,11 @@ function syncAiOptsUI() {
   $('optTiling').value = AiOpts.tiling;
   $('optTta').checked = AiOpts.tta;
   $('optEnhance').checked = AiOpts.enhance;
+  $('optRegularize').checked = AiOpts.regularize;
   const parts = [`${AiOpts.imgsz}px`, { auto: '타일 자동', on: '타일 항상', off: '타일 끔' }[AiOpts.tiling]];
   if (AiOpts.tta) parts.push('TTA');
   if (AiOpts.enhance) parts.push('보정');
+  if (AiOpts.regularize) parts.push('직각');
   $('aiOptsSummary').textContent = parts.join(' · ');
 }
 function saveAiOpts() {
@@ -31,6 +33,7 @@ $('optImgsz').addEventListener('change', e => { AiOpts.imgsz = +e.target.value; 
 $('optTiling').addEventListener('change', e => { AiOpts.tiling = e.target.value; saveAiOpts(); });
 $('optTta').addEventListener('change', e => { AiOpts.tta = e.target.checked; saveAiOpts(); });
 $('optEnhance').addEventListener('change', e => { AiOpts.enhance = e.target.checked; saveAiOpts(); });
+$('optRegularize').addEventListener('change', e => { AiOpts.regularize = e.target.checked; saveAiOpts(); });
 $('optReset').addEventListener('click', () => { Object.assign(AiOpts, AI_DEFAULTS); saveAiOpts(); });
 
 const dataUrlToBlob = async (src) => (await fetch(src)).blob();
@@ -62,14 +65,18 @@ async function runDetection(blob, filename, { reset = false } = {}) {
     S.contours = (data.contours || []).map(c => c.map(pt => { const q = Array.isArray(pt[0]) ? pt[0] : pt, w = T.apply({ x: +q[0], y: +q[1] }); return [[+w.x.toFixed(2), +w.y.toFixed(2)]]; }));
     S.nodes = (data.nodes || []).map(n => { const w = T.apply({ x: n.cx, y: n.cy }); return { ...n, cx: w.x, cy: w.y }; });
     S.buildingData = {}; S.selection = null;
+    // 외곽선 직각 보정: 세그멘테이션 마스크의 울퉁불퉁한 외곽 → 실제 건물처럼 반듯한 다각형 (현장 m 좌표에서)
+    let regular = 0;
+    if (AiOpts.regularize) S.contours = S.contours.map(c => { const p = flattenContour(c), q = regularizeFootprint(p); if (q.length < p.length) regular++; return toContour(q); });
     const m = data.meta || {};
     const detail = [`${fmt((data.inference_ms || 0) / 1000, 1)}초`, `${m.imgsz || '?'}px`];
+    if (regular) detail.push(`외곽선 ${regular}개 직각 보정`);
     if (m.tiles) detail.push(`타일 ${m.tiles}개`);
     if (m.raw_detections > S.contours.length) detail.push(`중복 ${m.raw_detections - S.contours.length}개 병합`);
     if (S.contours.length) {
       toast(`건축물 ${S.contours.length}개를 인식했습니다. (${detail.join(' · ')})\n틀린 외곽선은 지우거나 「🏢 건물 그리기」로 고친 뒤 「🎯 학습용 저장」하면 재학습에 쓸 수 있습니다.`, 'success', { duration: 7000 });
     } else {
-      toast(`건축물을 찾지 못했습니다. (${detail.join(' · ')})\n신뢰도 임계값을 낮추거나, 고급 설정에서 해상도를 올리거나 타일을 「항상」으로 두고 다시 분석해 보세요.`, 'warn', { duration: 8000 });
+      toast(`건축물을 찾지 못했습니다. (${detail.join(' · ')})\n처음 보는 도면 양식이면 「✨ AI 건물 따기」로 건물을 사각형으로 감싸 끌어 한 동씩 따세요.\n(신뢰도 임계값을 낮추거나 타일을 「항상」으로 두고 다시 분석해 볼 수도 있습니다)`, 'warn', { duration: 9000 });
     }
   } catch (err) {
     console.warn('AI 분석 실패', err);
@@ -89,6 +96,64 @@ async function reanalyze() {
   if (named && !confirm('다시 분석하면 건물 이름·층수·현관 통제 설정이 초기화됩니다. 계속할까요?\n(Ctrl+Z로 이전 결과를 되돌릴 수 있습니다)')) return;
   History.flush();
   await runDetection(await dataUrlToBlob(S.bgImageSrc), S.bgFileName || 'plan.jpg');
+}
+
+// ═══════════════════════════════════════════════
+//  v14.7 AI 건물 따기 — 사각형(끌기)·점(누르기) → MobileSAM 외곽선 (backend/sam_inference.py)
+//  학습한 YOLO 가 처음 보는 도면 양식에서 못 찾을 때(P1-2) 한 동씩 빠르게 지정
+// ═══════════════════════════════════════════════
+const AiPick = { src: null, id: null, busy: false };
+
+/** @param {{point?: {x,y}, box?: [{x,y},{x,y}]}} prompt  현장 m 좌표 */
+async function aiPick(prompt) {
+  if (AiPick.busy) return;
+  if (!S.bgImageSrc) { toast('먼저 배치도(도면 이미지·PDF)를 불러오세요. AI 건물 따기는 도면 위에서만 됩니다.', 'warn'); return; }
+  if (!S.backendOnline) await checkBackend();
+  if (!S.backendOnline) { toast('AI 서버가 꺼져 있어 쓸 수 없습니다. 「🏢 건물」로 직접 그려 주세요.', 'error'); return; }
+  const T = planTransform() || makeTransform(defaultPlanTransform(S.plan.width, S.plan.height));
+  let field, value;
+  if (prompt.point) { const q = T.inverse(prompt.point); field = 'point'; value = [+q.x.toFixed(1), +q.y.toFixed(1)]; }
+  else {   // 현장에서 그린 사각형 → 도면 px 의 네 모서리 바깥 사각형 (도면이 회전돼 있어도)
+    const [a, b] = prompt.box, cs = [{ x: a.x, y: a.y }, { x: b.x, y: a.y }, { x: b.x, y: b.y }, { x: a.x, y: b.y }].map(p => T.inverse(p));
+    const xs = cs.map(p => p.x), ys = cs.map(p => p.y);
+    field = 'box'; value = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)].map(v => +v.toFixed(1));
+  }
+  const src = S.bgImageSrc;
+  const send = async (withFile) => {
+    const form = new FormData();
+    if (withFile) form.append('file', await dataUrlToBlob(src), S.bgFileName || 'plan.jpg');
+    else form.append('image_id', AiPick.id);
+    form.append(field, JSON.stringify(value));
+    const res = await fetch(BACKEND_URL + '/api/segment_building', { method: 'POST', body: form, signal: AbortSignal.timeout(90000) });
+    return { res, data: await res.json().catch(() => ({})) };
+  };
+  AiPick.busy = true;
+  $('hintText').textContent = '✨ AI가 외곽선을 따는 중…'; canvas.style.cursor = 'progress';
+  try {
+    const fresh = AiPick.src !== src || !AiPick.id;
+    let { res, data } = await send(fresh);
+    if (res.status === 404 && !fresh) ({ res, data } = await send(true));   // 서버를 다시 켜 도면이 없어졌으면 다시 올림
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    AiPick.src = src; AiPick.id = data.image_id;
+    if (S.bgImageSrc !== src) return;   // 기다리는 동안 도면이 바뀜
+    if (!data.polygon) { toast(data.reason || '외곽선을 찾지 못했습니다.', 'warn', { duration: 6000 }); return; }
+    let pts = [];
+    for (const [x, y] of data.polygon) { const w = T.apply({ x, y }); pts.push(w.x, w.y); }
+    if (AiOpts.regularize) pts = regularizeFootprint(pts);
+    const area = Math.abs(polygonArea(pts));
+    if (pts.length < 6 || area < 4) { toast('너무 작은 영역이 잡혔습니다. 건물을 사각형으로 감싸듯 끌어 보세요.', 'warn'); return; }
+    S.contours = [...S.contours, toContour(pts)];   // 새 배열 (getContourPolys 캐시)
+    changed(); renderModeUI(); updateEmptyState();
+    select({ kind: 'building', idx: S.contours.length - 1 });
+    toast(`외곽선을 땄습니다 — ${fmt(area, 0)} m² · ${fmt((data.ms || 0) / 1000, 1)}초${field === 'point' ? ' (일부만 잡혔으면 Ctrl+Z 후 사각형으로 끌기)' : ''}`, 'success', { duration: 4000 });
+  } catch (err) {
+    console.warn('AI 건물 따기 실패', err);
+    toast(`AI 건물 따기에 실패했습니다: ${err.name === 'TimeoutError' ? '시간 초과' : err.message}`, 'error');
+  } finally {
+    AiPick.busy = false;
+    $('hintText').textContent = (MODES.find(m => m.id === S.mode) || {}).hint || '';
+    canvas.style.cursor = S.mode === 'select' ? 'default' : 'crosshair';
+  }
 }
 
 // ═══════════════════════════════════════════════

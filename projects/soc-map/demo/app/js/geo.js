@@ -5,6 +5,7 @@
  *          x = 동쪽(+), y = 남쪽(+)  ← 화면처럼 아래가 +y (북쪽이 위)
  *  - LocalFrame       : 위경도 ↔ 국소 좌표 (ECEF 경유, 현장 규모에서 cm 이하 오차)
  *  - fitTransform     : 점 쌍으로 2D 닮음/아핀 변환 추정 (도면 픽셀 → 현장 m)
+ *  - solveAlignment   : 도면 정합 — 기준점/검증점 분리, 방식 자동 선택, 정합 오차 추정
  *  - vincentyDistance : 타원체 측지선 거리 (검증용)
  *  - GpsFilter        : 등속 칼만 필터 + 이상치 제거 (휴대폰 GPS 흔들림 완화)
  *  - assessSafety     : 위치 불확실성을 반영한 위험 구역 접근/진입 판정
@@ -93,6 +94,59 @@ function vincentyDistance(lat1, lon1, lat2, lon2) {
 }
 
 /** "35.1234567, 126.1234567" / 도분초 숫자 나열 → {lat, lon} */
+// ═══════════════════════════════════════════════
+//  한국 평면 직각 좌표 (GRS80 횡메르카토르) — 도면의 대지 경계점·기준점 좌표 입력용
+//  Krüger 급수(3차, 중앙 경선에서 수천 km 안 mm 정확도). 좌표 순서는 GIS 와 같이 (동 E, 북 N).
+//  ※ 한국 측량 성과표는 X = 북, Y = 동 으로 적는다 → 입력 화면에서 순서를 확인할 것
+// ═══════════════════════════════════════════════
+
+const KOREA_CRS = {
+  5186: { label: 'TM 중부원점 (EPSG:5186)', lon0: 127, lat0: 38, k0: 1, fe: 200000, fn: 600000 },
+  5185: { label: 'TM 서부원점 (EPSG:5185)', lon0: 125, lat0: 38, k0: 1, fe: 200000, fn: 600000 },
+  5187: { label: 'TM 동부원점 (EPSG:5187)', lon0: 129, lat0: 38, k0: 1, fe: 200000, fn: 600000 },
+  5188: { label: 'TM 동해원점 (EPSG:5188)', lon0: 131, lat0: 38, k0: 1, fe: 200000, fn: 600000 },
+  5179: { label: 'UTM-K (EPSG:5179)', lon0: 127.5, lat0: 38, k0: 0.9996, fe: 1000000, fn: 2000000 },
+};
+const TM_GRS80 = (() => {
+  const a = 6378137, f = 1 / 298.257222101, n = f / (2 - f), n2 = n * n, n3 = n2 * n;
+  return {
+    A: a / (1 + n) * (1 + n2 / 4 + n2 * n2 / 64), e: 2 * Math.sqrt(n) / (1 + n),
+    al: [n / 2 - 2 * n2 / 3 + 5 * n3 / 16, 13 * n2 / 48 - 3 * n3 / 5, 61 * n3 / 240],
+    be: [n / 2 - 2 * n2 / 3 + 37 * n3 / 96, n2 / 48 + n3 / 15, 17 * n3 / 480],
+  };
+})();
+/** 경선 위(λ = λ0)에서 위도 φ 의 정규화 북향 거리 ξ (원점 위도 보정용) */
+function tmXi(phi) {
+  const G = TM_GRS80, t = Math.sinh(Math.atanh(Math.sin(phi)) - G.e * Math.atanh(G.e * Math.sin(phi))), xp = Math.atan(t);
+  return xp + G.al.reduce((s, a, j) => s + a * Math.sin(2 * (j + 1) * xp), 0);
+}
+/** 위경도 → 평면 좌표 {e: 동, n: 북} (m) */
+function tmForward(lat, lon, code = 5186) {
+  const P = KOREA_CRS[code], G = TM_GRS80, phi = lat * D2R, dl = (lon - P.lon0) * D2R;
+  const t = Math.sinh(Math.atanh(Math.sin(phi)) - G.e * Math.atanh(G.e * Math.sin(phi)));
+  const xp = Math.atan(t / Math.cos(dl)), ep = Math.atanh(Math.sin(dl) / Math.sqrt(1 + t * t));
+  let xi = xp, eta = ep;
+  G.al.forEach((a, j) => { const k = 2 * (j + 1); xi += a * Math.sin(k * xp) * Math.cosh(k * ep); eta += a * Math.cos(k * xp) * Math.sinh(k * ep); });
+  return { e: P.fe + P.k0 * G.A * eta, n: P.fn + P.k0 * G.A * (xi - tmXi(P.lat0 * D2R)) };
+}
+/** 평면 좌표(동 e, 북 n) → 위경도 */
+function tmInverse(e, n, code = 5186) {
+  const P = KOREA_CRS[code], G = TM_GRS80;
+  const xi = (n - P.fn) / (P.k0 * G.A) + tmXi(P.lat0 * D2R), eta = (e - P.fe) / (P.k0 * G.A);
+  let xp = xi, ep = eta;
+  G.be.forEach((b, j) => { const k = 2 * (j + 1); xp -= b * Math.sin(k * xi) * Math.cosh(k * eta); ep -= b * Math.cos(k * xi) * Math.sinh(k * eta); });
+  // 등각 위도 χ → 측지 위도 φ: 등장 위도 ψ(φ) = atanh(sinφ) − e·atanh(e·sinφ) 를 뉴턴법으로 맞춘다 (급수보다 정확)
+  const chi = Math.asin(Math.sin(xp) / Math.cosh(ep)), psi = Math.atanh(Math.sin(chi)), e2 = G.e * G.e;
+  let phi = chi;
+  for (let i = 0; i < 6; i++) {
+    const sn = Math.sin(phi), f = Math.atanh(sn) - G.e * Math.atanh(G.e * sn) - psi;
+    phi -= f * Math.cos(phi) * (1 - e2 * sn * sn) / (1 - e2);
+  }
+  return { lat: phi * R2D, lon: P.lon0 + Math.atan2(Math.sinh(ep), Math.cos(xp)) * R2D };
+}
+/** 경도로 알맞은 TM 원점 (서부 < 126° ≤ 중부 < 128° ≤ 동부 < 130° ≤ 동해) */
+function suggestKoreaCrs(lon) { return lon < 126 ? 5185 : lon < 128 ? 5186 : lon < 130 ? 5187 : 5188; }
+
 function parseLatLon(text) {
   const nums = String(text || '').match(/-?\d+(?:\.\d+)?/g);
   if (!nums || nums.length < 2) return null;
@@ -107,13 +161,15 @@ function parseLatLon(text) {
 
 /**
  * pairs: [{src:{x,y}, dst:{x,y}}]  2쌍 = 닮음(회전·축척·이동), 3쌍 이상 = 최소제곱 아핀
+ * method: 'similarity' 면 점이 많아도 닮음만, 'fixedScale' 이면 축척을 fixedScale(m/px)로 고정하고 회전·이동만
+ *         (도면 정합은 solveAlignment 를 쓸 것)
  * matrix [a, b, c, d, e, f] :  X = a·x + b·y + c,  Y = d·x + e·y + f
  */
-function fitTransform(pairs) {
+function fitTransform(pairs, method, fixedScale) {
   const P = (pairs || []).filter(p => [p.src.x, p.src.y, p.dst.x, p.dst.y].every(isFinite));
   if (P.length < 2) return null;
-  let m = null, method;
-  if (P.length >= 3) {
+  let m = null;
+  if (P.length >= 3 && method !== 'similarity' && method !== 'fixedScale') {
     const S = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], bx = [0, 0, 0], by = [0, 0, 0];
     for (const p of P) {
       const v = [p.src.x, p.src.y, 1];
@@ -137,11 +193,145 @@ function fitTransform(pairs) {
       num_r += ux * vx + uy * vy; num_i += ux * vy - uy * vx; den += ux * ux + uy * uy;
     }
     if (den < 1e-12) return null;
-    const ar = num_r / den, ai = num_i / den;
+    let ar = num_r / den, ai = num_i / den;
+    if (method === 'fixedScale' && fixedScale > 0) {   // 회전 방향만 쓰고 크기는 알려진 축척으로
+      const mag = Math.hypot(ar, ai) || 1;
+      ar = ar / mag * fixedScale; ai = ai / mag * fixedScale;
+    } else method = 'similarity';
     m = [ar, -ai, dx - (ar * sx - ai * sy), ai, ar, dy - (ai * sx + ar * sy)];
-    method = 'similarity';
   }
   return makeTransform(m, P, method);
+}
+
+/**
+ * 건물 외곽 매칭으로 도면 → 현장 닮음 변환 추정 (v14.6 — 도면 축척·방향·위치 자동 판단)
+ * AI 가 도면에서 찾은 건물(src: 도면 px)과 실제 건물(dst: 현장 m, 브이월드 GIS건물통합정보)을 중심점·면적으로 짝 짓는다.
+ *  1) 가설: src 큰 건물 두 동 ↔ dst 두 동 → 축척·회전·이동 (두 동 모두 면적 비가 축척²와 맞아야 함)
+ *  2) 점수: 변환한 src 중심이 dst 중심에서 허용 거리(√면적의 25 %, 최소 2.5 m) 안이고 면적 비가 맞는 건물 수 (같으면 오차 작은 쪽)
+ *  3) 가장 좋은 가설의 짝으로 최소제곱 닮음 → 한 번 더 짝 짓기
+ *  4) 짝 중 오차가 중앙값의 2.5배를 넘는 것(오검출이 우연히 걸린 것)을 빼고 다시 맞춤
+ *  5) 우연히 맞는 경우를 걸러냄: 짝 minInliers(기본 5)개 이상 · 도면 건물의 minFrac(기본 40 %) 이상 · RMS ≤ maxRms(기본 3 m)
+ *     — 무작위 배치 시험(실제 40·100동)에서 우연한 짝은 최대 4개였고 참 짝은 5개 이상 (tests/match.test.js)
+ * src/dst: [{x, y, area}] · opts: {scaleRange:[min,max] (m/px), areaTol: 면적 비 허용 배수(기본 1.6), minInliers, minFrac, maxRms}
+ * @returns {{transform, pairs:[{i,j,err}], rms, hypotheses}} | null
+ */
+function matchFootprints(src, dst, opts = {}) {
+  const [smin, smax] = opts.scaleRange || [1e-4, 1e4];
+  const LT = Math.log(opts.areaTol || 1.6), minIn = opts.minInliers || 5, maxRms = opts.maxRms || 3, minFrac = opts.minFrac ?? 0.4;
+  if (src.length < 3 || dst.length < 3) return null;
+  const la = (a) => (a > 0 ? Math.log(a) : null);
+  const sL = src.map(p => la(p.area)), dL = dst.map(q => la(q.area)), tol = dst.map(q => Math.max(2.5, 0.25 * Math.sqrt(q.area > 0 ? q.area : 100)));
+  const areaOk = (ls, lk2, ld) => ls == null || ld == null || Math.abs(ls + lk2 - ld) <= LT;
+  // 실제 건물 격자(칸 = 가장 큰 허용 거리) — 가까운 건물만 확인해 가설 수만큼 반복하는 짝 짓기를 빠르게
+  const cell = Math.max(...tol), grid = new Map(), key = (gx, gy) => gx * 100003 + gy;
+  dst.forEach((q, j) => { const k = key(Math.floor(q.x / cell), Math.floor(q.y / cell)); (grid.get(k) || grid.set(k, []).get(k)).push(j); });
+  function pairUp(a, b, c, d, e, f, lk2) {
+    const used = new Uint8Array(dst.length), pairs = [];
+    let pen = 0;
+    for (let i = 0; i < src.length; i++) {
+      const p = src[i], X = a * p.x + b * p.y + c, Y = d * p.x + e * p.y + f, gx = Math.floor(X / cell), gy = Math.floor(Y / cell);
+      let bj = -1, be = Infinity;
+      for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+        const list = grid.get(key(gx + ox, gy + oy));
+        if (list) for (const j of list) {
+          if (used[j]) continue;
+          const err = Math.hypot(dst[j].x - X, dst[j].y - Y);
+          if (err < be && err <= tol[j] && areaOk(sL[i], lk2, dL[j])) { bj = j; be = err; }
+        }
+      }
+      if (bj >= 0) { used[bj] = 1; pairs.push({ i, j: bj, err: be }); pen += be / tol[bj]; }
+    }
+    return { pairs, pen: pen / Math.max(1, pairs.length), quality: pairs.length - 0.5 * pen / Math.max(1, pairs.length) };
+  }
+  // 가설은 큰 건물부터(AI 가 잘 찾고 면적이 뚜렷함) 최대 6동으로 — 계산량을 줄인다
+  const seeds = src.map((p, i) => i).sort((x, y) => (src[y].area || 0) - (src[x].area || 0)).slice(0, 6);
+  let best = null, hyp = 0;
+  for (let u = 0; u < seeds.length; u++) for (let v = u + 1; v < seeds.length; v++) {
+    const i1 = seeds[u], i2 = seeds[v], s1 = src[i1], s2 = src[i2], sx = s2.x - s1.x, sy = s2.y - s1.y, ls = Math.hypot(sx, sy);
+    if (ls < 1e-9) continue;
+    const as = Math.atan2(sy, sx);
+    for (let j1 = 0; j1 < dst.length; j1++) for (let j2 = 0; j2 < dst.length; j2++) {
+      if (j1 === j2) continue;
+      const d1 = dst[j1], d2 = dst[j2], dx = d2.x - d1.x, dy = d2.y - d1.y, ld = Math.hypot(dx, dy);
+      if (ld < 5) continue;   // 너무 가까운 두 건물은 방향이 불안정
+      const k = ld / ls, lk2 = 2 * Math.log(k);
+      if (k < smin || k > smax || !areaOk(sL[i1], lk2, dL[j1]) || !areaOk(sL[i2], lk2, dL[j2])) continue;
+      hyp++;
+      const th = Math.atan2(dy, dx) - as, co = Math.cos(th) * k, si = Math.sin(th) * k;
+      const c = d1.x - (co * s1.x - si * s1.y), f = d1.y - (si * s1.x + co * s1.y);
+      const r = pairUp(co, -si, c, si, co, f, lk2);
+      if (!best || r.quality > best.quality) best = r;
+    }
+  }
+  if (!best || best.pairs.length < minIn) return null;
+  let T = fitTransform(best.pairs.map(({ i, j }) => ({ src: src[i], dst: dst[j] })), 'similarity');
+  if (!T) return null;
+  const [a, b, c, d, e, f] = T.matrix, again = pairUp(a, b, c, d, e, f, 2 * Math.log(T.scale));
+  if (again.pairs.length >= best.pairs.length) {
+    const T2 = fitTransform(again.pairs.map(({ i, j }) => ({ src: src[i], dst: dst[j] })), 'similarity');
+    if (T2) { T = T2; best = again; }
+  }
+  const measure = (pairs, TT) => pairs.forEach(pr => { const q = TT.apply(src[pr.i]); pr.err = Math.hypot(q.x - dst[pr.j].x, q.y - dst[pr.j].y); });
+  let pairs = best.pairs;
+  measure(pairs, T);
+  const med = pairs.map(pr => pr.err).sort((x, y) => x - y)[Math.floor(pairs.length / 2)];
+  const kept = pairs.filter(pr => pr.err <= Math.max(1, 2.5 * med));
+  if (kept.length < pairs.length && kept.length >= 3) {
+    const T3 = fitTransform(kept.map(({ i, j }) => ({ src: src[i], dst: dst[j] })), 'similarity');
+    if (T3) { T = T3; pairs = kept; measure(pairs, T); }
+  }
+  const rms = Math.sqrt(pairs.reduce((s2, pr) => s2 + pr.err * pr.err, 0) / pairs.length);
+  if (pairs.length < Math.max(minIn, Math.ceil(minFrac * src.length)) || rms > maxRms) return null;   // 우연히 맞은 배치는 버린다
+  return { transform: T, pairs, rms, hypotheses: hyp };
+}
+
+// ═══════════════════════════════════════════════
+//  도면 정합 (기준점 → 변환 · 오차)
+// ═══════════════════════════════════════════════
+
+/** 변환 방식별 매개변수 수 — 축척 고정: 이동 2 + 회전, 닮음: + 축척, 아핀: 6 */
+const ALIGN_PARAMS = { translate: 2, fixedScale: 3, similarity: 4, affine: 6 };
+const ALIGN_AFFINE_MIN = 5;   // 자동 선택일 때 아핀은 기준점 5개 이상부터 (여유 관측 4개 이상)
+
+/**
+ * 정합 품질. refs: [{px, dst, check?}] — check 인 점(검증점)은 변환 계산에 쓰지 않고 오차만 잰다.
+ * error(m): 검증점이 있으면 검증점 RMS, 없으면 여유 관측(2·기준점 수 − 매개변수 수)으로 추정한 2D 오차,
+ *           여유 관측도 없으면(2점 닮음, 3점 아핀) null = 알 수 없음 — 이때 기준점에는 오차 0으로 보인다
+ */
+function alignmentStats(T, refs, params) {
+  const res = refs.map(r => { const q = T.apply(r.px); return Math.hypot(q.x - r.dst.x, q.y - r.dst.y); });
+  const fitR = res.filter((_, i) => !refs[i].check), chkR = res.filter((_, i) => refs[i].check);
+  const ss = (a) => a.reduce((s, v) => s + v * v, 0);
+  const dof = 2 * fitR.length - params;
+  const checkRms = chkR.length ? Math.sqrt(ss(chkR) / chkR.length) : null;
+  const est = dof > 0 ? Math.sqrt(2 * ss(fitR) / dof) : null;   // 축별 σ² = Σr²/dof, 2D 오차 = √2·σ
+  return {
+    residuals: res, dof,
+    fitRms: fitR.length ? Math.sqrt(ss(fitR) / fitR.length) : null, checkRms,
+    error: checkRms ?? est, errorSource: checkRms != null ? 'check' : est != null ? 'redundancy' : null,
+  };
+}
+
+/**
+ * 도면 정합. method: 'auto' | 'fixedScale' | 'similarity' | 'affine'(3점 이상)
+ *   auto: 도면 축척(knownScale, m/px — PDF 1/N 또는 치수 확인)을 알면 기준점 5개 미만에서 축척 고정,
+ *         모르면 닮음, 기준점 5개 이상이면 아핀
+ * 종이 도면·CAD 출력은 축척이 가로세로 같으므로 닮음이 기본이다. 아핀은 스캔 왜곡 보정용.
+ * 휴대폰 GPS 기준점은 오차가 수 m 라 축척까지 GPS 로 정하면 축척이 1~2% 틀어질 수 있다 → 축척을 알면 고정이 유리
+ * @returns {{transform, method, residuals, dof, fitRms, checkRms, error, errorSource}} | null (기준점 2개 미만)
+ */
+function solveAlignment(refs, method = 'auto', knownScale = null) {
+  const fit = refs.filter(r => !r.check);
+  if (fit.length < 2) return null;
+  const k = knownScale > 0 ? knownScale : null;
+  let want;
+  if (method === 'fixedScale') want = k ? 'fixedScale' : 'similarity';
+  else if (method === 'similarity') want = 'similarity';
+  else if (method === 'affine') want = fit.length >= 3 ? 'affine' : 'similarity';
+  else want = fit.length >= ALIGN_AFFINE_MIN ? 'affine' : k ? 'fixedScale' : 'similarity';
+  const T = fitTransform(fit.map(r => ({ src: r.px, dst: r.dst })), want, knownScale);
+  if (!T) return null;
+  return { transform: T, method: T.method, ...alignmentStats(T, refs, ALIGN_PARAMS[T.method] || 4) };
 }
 
 function makeTransform(m, pairs = [], method = 'manual') {
@@ -325,3 +515,59 @@ function compassName(rad) {
 /** 나침반 방위(북=0°, 시계방향) → 국소 좌표계 heading(라디안, x축 기준) */
 function bearingToHeading(deg) { return (deg - 90) * D2R; }
 function headingToBearing(rad) { return ((rad * R2D + 90) % 360 + 360) % 360; }
+
+// ═══════════════════════════════════════════════
+//  v14.7 도면 축척 표기 읽기 — PDF 글자 층(·OCR)의 「축척 1/600」「SCALE 1:500」「A1 1/300 · A3 1/600」
+//  표제란에 용지별 축척을 함께 적는 관례(A1 원도를 A3 로 출력하면 축척 두 배)를 실제 용지 크기로 고른다.
+// ═══════════════════════════════════════════════
+/** 건축 도면에 흔한 축척 분모 — 이 목록 밖의 값은 오인식으로 보고 버림 (설계값) */
+const DRAWING_SCALES = [50, 60, 100, 120, 150, 200, 250, 300, 400, 500, 600, 800, 1000, 1200, 1500, 2000, 2400, 2500, 3000, 5000];
+const PAPER_LONG_MM = { A0: 1189, A1: 841, A2: 594, A3: 420, A4: 297 };
+
+/**
+ * @param {string} text   도면 글자 (여러 조각을 공백으로 이은 것)
+ * @param {string|null} paper  실제 용지(A0~A4, PDF 쪽 크기로 판단) — 모르면 null
+ * @returns {{denom:number, how:string, snippet:string, candidates:number[]} | null}
+ *   how: 'paper'(용지별 표기 중 실제 용지) · 'paper-converted'(다른 용지 표기를 실제 용지로 환산) · 'keyword'(축척/SCALE/S=) · 'bare'(1/N 만)
+ */
+function parseDrawingScale(text, paper = null) {
+  if (!text) return null;
+  const t = String(text).normalize('NFKC').replace(/(\d),(\d{3})(?!\d)/g, '$1$2').replace(/\s+/g, ' ');
+  if (/\b(N\.?\s?T\.?\s?S\.?|NONE\s?SCALE|축척\s*없음)\b/i.test(t) && !/1\s*[\/:]\s*\d{2,5}/.test(t)) return null;
+  const ok = (n) => DRAWING_SCALES.includes(n);
+  const R = String.raw`1\s*[\/:]\s*(\d{2,5})(?!\d)`;
+  const found = [];
+  const add = (denom, how, idx, len, p) => { if (ok(denom)) found.push({ denom, how, p, snippet: t.slice(Math.max(0, idx), idx + len).trim() }); };
+  let m;
+  const rePaper = new RegExp(String.raw`\b(A[0-4])\s*(?:용지)?\s*[:=]?\s*(?:축\s*척|SCALE|S\s*[=:])?\s*[:=]?\s*` + R, 'gi');
+  while ((m = rePaper.exec(t))) add(+m[2], 'paper', m.index, m[0].length, m[1].toUpperCase());
+  const rePaper2 = new RegExp(R + String.raw`\s*\(\s*(A[0-4])\s*\)`, 'gi');
+  while ((m = rePaper2.exec(t))) add(+m[1], 'paper', m.index, m[0].length, m[2].toUpperCase());
+  const reKey = new RegExp(String.raw`(?:축\s*척|SCALE|\bS\s*[=:])\s*[:=]?\s*` + R, 'gi');
+  while ((m = reKey.exec(t))) add(+m[1], 'keyword', m.index, m[0].length);
+  const reBare = new RegExp(String.raw`(?<![\d\/])` + R + String.raw`(?![\/\d])`, 'g');
+  while ((m = reBare.exec(t))) add(+m[1], 'bare', m.index, m[0].length);
+  if (!found.length) return null;
+  const candidates = [...new Set(found.map(f => f.denom))];
+  const byPaper = found.filter(f => f.how === 'paper');
+  if (byPaper.length) {
+    const same = paper && byPaper.find(f => f.p === paper);
+    if (same) return { denom: same.denom, how: 'paper', snippet: same.snippet, candidates };
+    if (paper && PAPER_LONG_MM[paper]) {   // 예: 「A1 1/300」만 적힌 도면을 A3 로 출력 → 841/420 ≈ 2 → 1/600
+      const f = byPaper[0], d = Math.round(f.denom * PAPER_LONG_MM[f.p] / PAPER_LONG_MM[paper]);
+      const near = DRAWING_SCALES.reduce((a, b) => (Math.abs(b - d) < Math.abs(a - d) ? b : a));
+      if (Math.abs(near / d - 1) < 0.03) return { denom: near, how: 'paper-converted', snippet: f.snippet, candidates };
+    }
+  }
+  const pickMost = (list) => {
+    const cnt = new Map(); list.forEach(f => cnt.set(f.denom, (cnt.get(f.denom) || 0) + 1));
+    const best = [...cnt.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
+    return list.find(f => f.denom === best);
+  };
+  const key = found.filter(f => f.how === 'keyword');
+  if (key.length) { const f = pickMost(key); return { denom: f.denom, how: 'keyword', snippet: f.snippet, candidates }; }
+  if (byPaper.length && !paper) { const f = byPaper[0]; return { denom: f.denom, how: 'paper', snippet: f.snippet, candidates }; }
+  const bare = found.filter(f => f.how === 'bare' && f.denom >= 100);
+  if (bare.length) { const f = pickMost(bare); return { denom: f.denom, how: 'bare', snippet: f.snippet, candidates }; }
+  return null;
+}
