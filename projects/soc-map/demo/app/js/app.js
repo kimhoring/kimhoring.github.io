@@ -763,7 +763,7 @@ syncSunUI();
 
 const layerInputs = { layerBg: 'bg', layerHeat: 'heat', layerZones: 'zones', layerShortest: 'shortest' };
 for (const [id, key] of Object.entries(layerInputs)) {
-  $(id).addEventListener('change', e => { S.layers[key] = e.target.checked; syncLayerUI(); requestRender(); if (S.mode === '3d') View3D.rebuild(); });
+  $(id).addEventListener('change', e => { S.layers[key] = e.target.checked; syncLayerUI(); requestRender(); if (S.mode === '3d') View3D.rebuild(); if (S.mode === 'aipick') renderModeUI(); });
 }
 function syncLayerUI() {
   for (const [id, key] of Object.entries(layerInputs)) $(id).checked = S.layers[key];
@@ -808,6 +808,7 @@ document.querySelectorAll('.vb-chip').forEach(b => b.addEventListener('click', (
   else S.layers[k] = !(S.layers[k] !== false);
   syncLayerUI(); requestRender();
   if (S.mode === '3d') View3D.rebuild();
+  if (S.mode === 'aipick') renderModeUI();   // 「배치도」를 끄고 켜면 AI 건물 따기가 도면/위성 중 어디서 따는지 바뀜
 }));
 /** 3D 를 처음 열 때 한 번: 조작법과 레이어 안내 */
 function showCoach3d() {

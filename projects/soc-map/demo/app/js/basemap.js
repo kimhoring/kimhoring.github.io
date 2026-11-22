@@ -131,8 +131,50 @@ const Basemap = (() => {
     }
   }
 
+  /**
+   * 2026-11-22 위성 영상 한 장 만들기 (지도에서 AI 건물 따기용) — 범위의 타일을 모두 받아 캔버스에 그린다.
+   * 지금 배경이 위성이 아니면(일반 지도·끄기) 위성 영상으로 받는다. 화면 지도와 같은 배치(모서리 2점)라 좌표가 그대로 맞는다.
+   * @param view {minX,minY,maxX,maxY} 현장 좌표(m)  @param k 캔버스 px / m
+   * @returns Promise<{canvas, k, view, source, missing}>  canvas px = (x − minX)·k, (y − minY)·k
+   */
+  function capture(view, k, timeoutMs = 12000) {
+    const frame = getFrame();
+    if (!frame) return Promise.reject(new Error('현장 위치가 없습니다.'));
+    let def = basemapDef(S.layers.basemap);
+    if (!def || !/영상|위성/.test(def.label)) def = basemapDef(VWORLD.key ? 'vworld' : 'satellite');
+    const name = Object.keys(BASEMAPS).find(kk => BASEMAPS[kk] === def);
+    const z = Math.max(3, Math.min(def.maxZoom, Math.ceil(Math.log2(156543.034 * Math.cos(frame.lat0 * Math.PI / 180) * k))));
+    const corners = [[view.minX, view.minY], [view.maxX, view.minY], [view.maxX, view.maxY], [view.minX, view.maxY]].map(([x, y]) => frame.toLatLon(x, y));
+    const x0 = Math.floor(Math.min(...corners.map(c => tileX(c.lon, z)))), x1 = Math.floor(Math.max(...corners.map(c => tileX(c.lon, z))));
+    const y0 = Math.floor(Math.min(...corners.map(c => tileY(c.lat, z)))), y1 = Math.floor(Math.max(...corners.map(c => tileY(c.lat, z))));
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) > 64) return Promise.reject(new Error('범위가 너무 넓습니다.'));
+    const tiles = [];
+    for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) tiles.push({ tx, ty, t: get(name, def.url, z, tx, ty) });
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = () => {
+        const waiting = tiles.some(o => !o.t.ok && !o.t.failed);
+        if (waiting && Date.now() - t0 < timeoutMs) { setTimeout(tick, 120); return; }
+        const c = document.createElement('canvas');
+        c.width = Math.round((view.maxX - view.minX) * k); c.height = Math.round((view.maxY - view.minY) * k);
+        const g = c.getContext('2d');
+        g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+        g.setTransform(k, 0, 0, k, -view.minX * k, -view.minY * k);
+        g.imageSmoothingEnabled = true;
+        let missing = 0;
+        for (const o of tiles) {
+          if (!o.t.ok) { missing++; continue; }
+          const nw = frame.toLocal(tileLat(o.ty, z), tileLon(o.tx, z)), se = frame.toLocal(tileLat(o.ty + 1, z), tileLon(o.tx + 1, z));
+          g.drawImage(o.t.img, nw.x, nw.y, se.x - nw.x, se.y - nw.y);
+        }
+        resolve({ canvas: c, k, view, source: def.label, attribution: def.attribution, missing, total: tiles.length, zoom: z });
+      };
+      tick();
+    });
+  }
+
   const self = {
-    draw, drawCadastral,
+    draw, drawCadastral, capture,
     attribution: () => [(basemapDef(S.layers.basemap) || {}).attribution, S.layers.cadastral && VWORLD.key ? '지적도 © 국토교통부' : ''].filter(Boolean).join(' · '),
     onTile: null,   // 타일 하나가 도착할 때마다 (3D 지면 다시 그리기)
   };

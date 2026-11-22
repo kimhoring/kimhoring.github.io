@@ -104,10 +104,11 @@ async function reanalyze() {
 // ═══════════════════════════════════════════════
 const AiPick = { src: null, id: null, busy: false };
 
-/** @param {{point?: {x,y}, box?: [{x,y},{x,y}]}} prompt  현장 m 좌표 */
+/** @param {{point?: {x,y}, box?: [{x,y},{x,y}]}} prompt  현장 m 좌표
+ *  배치도가 보이면 도면에서, 도면이 없거나 「배치도」를 끄면 위성 영상에서 딴다 (2026-11-22) */
 async function aiPick(prompt) {
   if (AiPick.busy) return;
-  if (!S.bgImageSrc) { toast('먼저 배치도(도면 이미지·PDF)를 불러오세요. AI 건물 따기는 도면 위에서만 됩니다.', 'warn'); return; }
+  if (!S.bgImageSrc || S.layers.bg === false) return aiPickMap(prompt);
   if (!S.backendOnline) await checkBackend();
   if (!S.backendOnline) { toast('AI 서버가 꺼져 있어 쓸 수 없습니다. 「🏢 건물」로 직접 그려 주세요.', 'error'); return; }
   const T = planTransform() || makeTransform(defaultPlanTransform(S.plan.width, S.plan.height));
@@ -137,18 +138,109 @@ async function aiPick(prompt) {
     AiPick.src = src; AiPick.id = data.image_id;
     if (S.bgImageSrc !== src) return;   // 기다리는 동안 도면이 바뀜
     if (!data.polygon) { toast(data.reason || '외곽선을 찾지 못했습니다.', 'warn', { duration: 6000 }); return; }
-    let pts = [];
+    const pts = [];
     for (const [x, y] of data.polygon) { const w = T.apply({ x, y }); pts.push(w.x, w.y); }
-    if (AiOpts.regularize) pts = regularizeFootprint(pts);
-    const area = Math.abs(polygonArea(pts));
-    if (pts.length < 6 || area < 4) { toast('너무 작은 영역이 잡혔습니다. 건물을 사각형으로 감싸듯 끌어 보세요.', 'warn'); return; }
-    S.contours = [...S.contours, toContour(pts)];   // 새 배열 (getContourPolys 캐시)
-    changed(); renderModeUI(); updateEmptyState();
-    select({ kind: 'building', idx: S.contours.length - 1 });
-    toast(`외곽선을 땄습니다 — ${fmt(area, 0)} m² · ${fmt((data.ms || 0) / 1000, 1)}초${field === 'point' ? ' (일부만 잡혔으면 Ctrl+Z 후 사각형으로 끌기)' : ''}`, 'success', { duration: 4000 });
+    addPickedOutline(pts, data, field, '');
   } catch (err) {
     console.warn('AI 건물 따기 실패', err);
     toast(`AI 건물 따기에 실패했습니다: ${err.name === 'TimeoutError' ? '시간 초과' : err.message}`, 'error');
+  } finally {
+    AiPick.busy = false;
+    $('hintText').textContent = (MODES.find(m => m.id === S.mode) || {}).hint || '';
+    canvas.style.cursor = S.mode === 'select' ? 'default' : 'crosshair';
+  }
+}
+
+/** 외곽선(현장 m)의 30 % 넘게가 공식 건물 외곽선 안인가 (브이월드 키가 없거나 조회 실패면 false) */
+async function overlapsOfficialBuilding(pts, view) {
+  if (!VWORLD.key || typeof fetchRealBuildings !== 'function') return false;
+  try {
+    const blds = await fetchRealBuildings(getFrame(), view);
+    if (!blds.length) return false;
+    const bb = polygonBBox(pts), st = 0.5;
+    let n = 0, hit = 0;
+    for (let x = bb.minX; x <= bb.maxX; x += st) for (let y = bb.minY; y <= bb.maxY; y += st) {
+      if (!isPointInPolygon(x, y, pts)) continue;
+      n++;
+      if (blds.some(b => isPointInPolygon(x, y, b.poly))) hit++;
+    }
+    return n > 0 && hit / n >= 0.3;
+  } catch (e) { return false; }
+}
+
+/** 딴 외곽선(현장 m) → 건물로 추가. 너무 작으면 버림 */
+function addPickedOutline(pts, data, field, note) {
+  if (AiOpts.regularize) pts = regularizeFootprint(pts);
+  const area = Math.abs(polygonArea(pts));
+  if (pts.length < 6 || area < 4) { toast('너무 작은 영역이 잡혔습니다. 건물을 사각형으로 감싸듯 끌어 보세요.', 'warn'); return false; }
+  S.contours = [...S.contours, toContour(pts)];   // 새 배열 (getContourPolys 캐시)
+  changed(); renderModeUI(); updateEmptyState();
+  select({ kind: 'building', idx: S.contours.length - 1 });
+  toast(`외곽선을 땄습니다${note} — ${fmt(area, 0)} m² · ${fmt((data.ms || 0) / 1000, 1)}초${field === 'point' ? ' (일부만 잡혔으면 Ctrl+Z 후 사각형으로 끌기)' : ''}`, 'success', { duration: 5000 });
+  return true;
+}
+
+// ═══════════════════════════════════════════════
+//  2026-11-22 위성 지도에서 AI 건물 따기 — 도면 없이, 누른 곳 둘레의 위성 영상을 받아 MobileSAM 으로.
+//  영상 px ↔ 현장 m 가 곧바로 대응하므로 도면 정합이 필요 없다. 영상 촬영 뒤 바뀐 건물은 다를 수 있다.
+// ═══════════════════════════════════════════════
+const MAP_PICK = {
+  K: 4,          // 영상 해상도 4 px/m = 0.25 m/px (브이월드·Esri 줌 19 ≈ 0.24 m/px)
+  HALF: 60,      // 점으로 누르면 사방 60 m (120 m 정사각형)
+  PAD: 0.3,      // 사각형으로 끌면 30 % 여유 (최소 8 m)
+  MAX_M: 300,    // 이보다 큰 사각형은 거절 (한 동씩)
+  MAX_PX: 1800,  // 영상 한 변 최대
+};
+async function aiPickMap(prompt) {
+  if (!getFrame()) { toast('현장 위치(📍)를 먼저 지정하세요. 위성 지도에서 따려면 현장 위치가 필요합니다. (프로젝트 메뉴 → 위치 · 주소 검색)', 'warn', { duration: 6000 }); return; }
+  if (!S.backendOnline) await checkBackend();
+  if (!S.backendOnline) { toast('AI 서버가 꺼져 있어 쓸 수 없습니다. 「🏢 건물」로 직접 그려 주세요.', 'error'); return; }
+  let view;
+  if (prompt.point) {
+    const p = prompt.point, h = MAP_PICK.HALF;
+    view = { minX: p.x - h, minY: p.y - h, maxX: p.x + h, maxY: p.y + h };
+  } else {
+    const [a, b] = prompt.box, w = Math.abs(b.x - a.x), hgt = Math.abs(b.y - a.y);
+    if (Math.max(w, hgt) > MAP_PICK.MAX_M) { toast(`사각형이 너무 큽니다(${fmt(Math.max(w, hgt), 0)} m). 건물 한 동씩 감싸 주세요.`, 'warn'); return; }
+    const pad = Math.max(8, MAP_PICK.PAD * Math.max(w, hgt));
+    view = { minX: Math.min(a.x, b.x) - pad, minY: Math.min(a.y, b.y) - pad, maxX: Math.max(a.x, b.x) + pad, maxY: Math.max(a.y, b.y) + pad };
+  }
+  const k = Math.min(MAP_PICK.K, MAP_PICK.MAX_PX / Math.max(view.maxX - view.minX, view.maxY - view.minY));
+  const toPx = (q) => [+((q.x - view.minX) * k).toFixed(1), +((q.y - view.minY) * k).toFixed(1)];
+  const field = prompt.point ? 'point' : 'box';
+  const value = prompt.point ? toPx(prompt.point) : (() => { const [a, b] = prompt.box, p1 = toPx({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) }), p2 = toPx({ x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) }); return [...p1, ...p2]; })();
+  AiPick.busy = true;
+  $('hintText').textContent = '🛰️ 위성 영상을 받는 중…'; canvas.style.cursor = 'progress';
+  try {
+    const cap = await Basemap.capture(view, k);
+    if (cap.missing === cap.total) throw new Error('위성 영상을 받지 못했습니다 (인터넷 연결 확인)');
+    let blob;
+    try { blob = await new Promise((ok, bad) => cap.canvas.toBlob(b => (b ? ok(b) : bad(new Error('영상 만들기 실패'))), 'image/jpeg', 0.92)); }
+    catch (e) { throw new Error('이 배경 지도는 영상 내보내기를 허용하지 않습니다. 배경을 「브이월드 영상」이나 「위성」으로 바꾸세요.'); }
+    $('hintText').textContent = '✨ AI가 위성 영상에서 외곽선을 따는 중…';
+    const form = new FormData();
+    form.append('file', blob, 'satellite.jpg');
+    form.append(field, JSON.stringify(value));
+    form.append('source', 'satellite');   // 지붕 조각 합치기 · 주차장·도로 같은 바닥 판정 (sam_inference.segment_aerial)
+    const res = await fetch(BACKEND_URL + '/api/segment_building', { method: 'POST', body: form, signal: AbortSignal.timeout(90000) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    const toWorld = (poly) => { const pts = []; for (const [x, y] of poly) pts.push(x / k + view.minX, y / k + view.minY); return pts; };
+    const note = ` (${cap.source}${data.parts > 1 ? ` · 지붕 조각 ${data.parts}개를 한 건물로` : ''}${cap.missing ? ` · 영상 ${cap.missing}/${cap.total}칸 못 받음` : ''})`;
+    if (!data.polygon && data.ground && data.fallback) {
+      // 바닥 같다고 봤어도 공식 건물(브이월드 건물통합정보)과 30 % 넘게 겹치면 건물 — 분류기가 새 동네에서 건물을 바닥으로 볼 때가 있음
+      const fb = toWorld(data.fallback);
+      if (await overlapsOfficialBuilding(fb, view)) { addPickedOutline(fb, data, field, `${note} · 공식 건물 정보와 겹쳐 건물로 판단`); return; }
+      // 주차장·도로·잔디처럼 보임 — 바로 넣지 않고 묻는다 (공사 중 바닥판·옥상 주차장일 수도 있음)
+      toast(`${data.reason} 건물이 맞으면 「그래도 추가」를 누르세요.`, 'warn', { duration: 10000,
+        action: { label: '그래도 추가', fn: () => addPickedOutline(toWorld(data.fallback), data, field, `${note} · 바닥 같음 판정을 무시하고 추가`) } });
+      return;
+    }
+    if (!data.polygon) { toast(data.reason || '외곽선을 찾지 못했습니다. 건물을 사각형으로 감싸듯 끌어 보세요.', 'warn', { duration: 6000 }); return; }
+    addPickedOutline(toWorld(data.polygon), data, field, note);
+  } catch (err) {
+    console.warn('위성 AI 건물 따기 실패', err);
+    toast(`AI 건물 따기에 실패했습니다: ${err.name === 'TimeoutError' ? '시간 초과' : err.message}`, 'error', { duration: 6000 });
   } finally {
     AiPick.busy = false;
     $('hintText').textContent = (MODES.find(m => m.id === S.mode) || {}).hint || '';

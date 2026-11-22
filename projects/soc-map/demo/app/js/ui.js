@@ -11,7 +11,7 @@ const fmtLen = (m) => (m >= 1000 ? `${fmt(m / 1000, 2)} km` : `${fmt(m, m < 10 ?
 const MODES = [
   { id: 'select',   group: 'draw',  icon: '🖐️', label: '선택 · 이동', short: '선택', key: '1', desc: '항목 선택, 끌어서 이동', hint: '장비·위험물·건물을 클릭해 선택하고 끌어서 옮깁니다. 빈 곳을 드래그하면 지도가 이동합니다.' },
   { id: 'building', group: 'draw',  icon: '🏢', label: '건물',        key: '6', desc: '외곽을 그려 건물 지정', hint: '드래그로 건물 외곽을 그립니다. AI 인식 없이 건물을 지정할 때 씁니다.' },
-  { id: 'aipick',   group: 'draw',  icon: '✨', label: 'AI 건물 따기', desc: '감싸 끌면 외곽선 자동', hint: '도면 위 건물을 사각형으로 감싸듯 끌면 AI가 외곽선을 땁니다(가장 정확). 건물 안을 한 번 눌러도 됩니다. 틀리면 Ctrl+Z.' },
+  { id: 'aipick',   group: 'draw',  icon: '✨', label: 'AI 건물 따기', desc: '감싸 끌면 외곽선 자동', hint: '건물을 사각형으로 감싸듯 끌면 AI가 외곽선을 땁니다(가장 정확). 건물 안을 한 번 눌러도 됩니다. 도면이 없거나 「배치도」를 끄면 위성 지도에서 땁니다. 틀리면 Ctrl+Z.' },
   { id: 'road',     group: 'draw',  icon: '〰️', label: '도로',        short: '도로', key: '2', desc: '이동 가능한 길', status: true, hint: '드래그해 이동 가능한 도로(우회로)를 그립니다. 보행 구역이 없으면 경로는 도로 위로만 찾습니다.' },
   { id: 'lasso',    group: 'draw',  icon: '🚶', label: '보행 구역',   short: '보행', key: '3', desc: '걸을 수 있는 범위', status: true, hint: '드래그로 보행 가능 구역의 외곽을 그립니다. 경로는 이 안에서만 찾습니다.' },
   { id: 'fence',    group: 'draw',  icon: '🚧', label: '울타리',      short: '울타리', key: '4', desc: '통행 차단선', status: true, hint: '드래그해 통행할 수 없는 안전 울타리를 설치합니다.' },
@@ -145,9 +145,11 @@ function renderModeUI() {
       break;
     case 'aipick':
       h = `<div class="hint">${mode.hint}</div>
-           ${!S.bgImageSrc ? '<div class="hint warn">⚠️ 먼저 배치도(이미지·PDF)를 불러오세요 — 도면 위에서만 됩니다.</div>' : ''}
+           ${S.bgImageSrc && S.layers.bg !== false ? '<div class="hint">📄 지금은 <b>도면</b>에서 땁니다 — 보기 막대의 「배치도」를 끄면 위성 지도에서 땁니다.</div>'
+             : getFrame() ? `<div class="hint">🛰️ 지금은 <b>위성 지도</b>에서 땁니다 (도면 정합 없이 바로 현장 좌표)${S.bgImageSrc ? ' — 「배치도」를 켜면 도면에서' : ''}. <b>사각형으로 감싸기</b>를 권합니다(실제 건물 10동 시험: 겹침 0.82, 한 번 누르기 0.66). 영상 촬영 뒤 새로 지은 건물·가설물은 잡히지 않을 수 있습니다.</div>`
+             : '<div class="hint warn">⚠️ 배치도를 불러오거나 현장 위치(📍)를 정하세요 — 위성 지도에서 따려면 현장 위치가 필요합니다.</div>'}
            ${!S.backendOnline ? '<div class="hint warn">⚠️ AI 서버가 꺼져 있습니다 (노트북 실행 파일로 켜세요).</div>' : ''}
-           <div class="hint">학습 없이 쓰는 범용 분할 모델(MobileSAM)이라 처음 보는 도면 양식에도 씁니다. 한 동에 약 1초(첫 사용은 모델 준비로 더 걸림).</div>
+           <div class="hint">학습 없이 쓰는 범용 분할 모델(MobileSAM)이라 처음 보는 도면 양식·위성 영상에도 씁니다. 한 동에 약 1초(첫 사용은 모델 준비로 더 걸림).</div>
            <div class="row"><span class="label-sm">건물 ${S.contours.length}개</span>${S.contours.length ? '<button class="btn btn-xs" data-act="clearBuildings">모두 지우기</button>' : ''}</div>`;
       break;
     case 'road':
