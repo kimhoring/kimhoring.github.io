@@ -150,7 +150,8 @@ function renderModeUI() {
              : '<div class="hint warn">⚠️ 배치도를 불러오거나 현장 위치(📍)를 정하세요 — 위성 지도에서 따려면 현장 위치가 필요합니다.</div>'}
            ${!S.backendOnline ? '<div class="hint warn">⚠️ AI 서버가 꺼져 있습니다 (노트북 실행 파일로 켜세요).</div>' : ''}
            <div class="hint">학습 없이 쓰는 범용 분할 모델(MobileSAM)이라 처음 보는 도면 양식·위성 영상에도 씁니다. 한 동에 약 1초(첫 사용은 모델 준비로 더 걸림).</div>
-           <div class="row"><span class="label-sm">건물 ${S.contours.length}개</span>${S.contours.length ? '<button class="btn btn-xs" data-act="clearBuildings">모두 지우기</button>' : ''}</div>`;
+           <div class="hint">딴 외곽선이 기존 건물과 <b>겹치거나 1 m 안에 맞닿으면</b> 한 건물로 합칩니다 (지붕 층·난간으로 나뉜 조각).</div>
+           <div class="row"><span class="label-sm">건물 ${S.contours.length}개</span>${S.contours.length > 1 ? '<button class="btn btn-xs" data-act="mergeTouching" title="이미 그려진 건물 가운데 겹치거나 맞닿은 조각을 모두 한 건물로">🔗 붙은 조각 모두 합치기</button>' : ''}${S.contours.length ? '<button class="btn btn-xs" data-act="clearBuildings">모두 지우기</button>' : ''}</div>`;
       break;
     case 'road':
     case 'fence': {
@@ -377,7 +378,7 @@ function buildingInspector(idx) {
             : `<div class="row"><span>기둥</span><b>${lay.columns.length}개 · 경간 ${fmt(lay.spanU, 1)} × ${fmt(lay.spanV, 1)} m</b></div>`}
         </div>
         <div class="label-sm" style="margin-top:6px">기둥·벽 배치는 3D 표현용 추정입니다 (구조 설계 아님).</div>
-        <div class="row-gap" style="margin-top:10px"><button class="btn flex1" data-act="regularizeSel" title="이 건물 외곽선을 직각으로 정리">📐 직각 보정</button>${S.bgImage ? '<button class="btn flex1" data-act="shadowHeight" title="항공 사진의 그림자 길이로 높이 계산">☀️ 그림자로 높이</button>' : ''}</div>
+        <div class="row-gap" style="margin-top:10px"><button class="btn flex1" data-act="regularizeSel" title="이 건물 외곽선을 직각으로 정리">📐 직각 보정</button><button class="btn flex1" data-act="mergeSel" title="이 건물과 겹치거나 1 m 안에 맞닿은 조각을 한 건물로 (Ctrl+Z 되돌리기)">🔗 붙은 조각과 합치기</button>${S.bgImage ? '<button class="btn flex1" data-act="shadowHeight" title="항공 사진의 그림자 길이로 높이 계산">☀️ 그림자로 높이</button>' : ''}</div>
         <div class="card" style="border-color:rgba(239,68,68,.35);margin-top:10px"><div class="row"><div><b>🚫 현관 출입 불가</b><div class="label-sm">타일 작업 등으로 현관이 막힘</div></div>
         <label class="switch danger"><input type="checkbox" data-bd="entranceBlocked" ${bd.entranceBlocked ? 'checked' : ''}><span class="sl"></span></label></div></div>
         ${bd.entranceBlocked ? '<div class="alert info" style="margin-top:8px">이 건물을 도착지로 지정하면 가장 가까운 다른 건물로 진입해 <b>지하 B1</b>을 거쳐 도착하도록 안내합니다.</div>' : ''}

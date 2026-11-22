@@ -484,6 +484,8 @@ document.addEventListener('click', e => {
     clearMeasure: () => { S.measure = null; renderModeUI(); requestRender(); },
     regularizeAll: () => regularizeBuildings(S.contours.map((_, i) => i)),
     regularizeSel: () => { if (S.selection && S.selection.kind === 'building') regularizeBuildings([S.selection.idx]); },
+    mergeSel: () => { if (S.selection && S.selection.kind === 'building') mergeTouchingBuildings(S.selection.idx); },
+    mergeTouching: () => mergeTouchingBuildings(),
     shadowHeight: startShadowMeasure,
     dimCheck: () => startDimCheck(),
     aipickMode: () => setMode('aipick'),

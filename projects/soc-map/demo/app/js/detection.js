@@ -140,7 +140,7 @@ async function aiPick(prompt) {
     if (!data.polygon) { toast(data.reason || '외곽선을 찾지 못했습니다.', 'warn', { duration: 6000 }); return; }
     const pts = [];
     for (const [x, y] of data.polygon) { const w = T.apply({ x, y }); pts.push(w.x, w.y); }
-    addPickedOutline(pts, data, field, '');
+    await addPickedOutline(pts, data, field, '');
   } catch (err) {
     console.warn('AI 건물 따기 실패', err);
     toast(`AI 건물 따기에 실패했습니다: ${err.name === 'TimeoutError' ? '시간 초과' : err.message}`, 'error');
@@ -168,11 +168,120 @@ async function overlapsOfficialBuilding(pts, view) {
   } catch (e) { return false; }
 }
 
-/** 딴 외곽선(현장 m) → 건물로 추가. 너무 작으면 버림 */
-function addPickedOutline(pts, data, field, note) {
+/** 2026-11-22 두 외곽선이 겹치는 넓이(m², 0.25 m 격자로 셈) */
+function overlapArea(a, b) {
+  const A = polygonBBox(a), B = polygonBBox(b);
+  const x0 = Math.max(A.minX, B.minX), x1 = Math.min(A.maxX, B.maxX), y0 = Math.max(A.minY, B.minY), y1 = Math.min(A.maxY, B.maxY);
+  if (x0 >= x1 || y0 >= y1) return 0;
+  const st = 0.25;
+  let n = 0;
+  for (let x = x0 + st / 2; x < x1; x += st) for (let y = y0 + st / 2; y < y1; y += st) if (isPointInPolygon(x, y, a) && isPointInPolygon(x, y, b)) n++;
+  return n * st * st;
+}
+/** 같은 건물로 볼 조건 (설계값): 겹침 0.5 m² 또는 작은 쪽 3 % 이상, 또는 1 m 안 틈으로 2 m 넘게 맞닿음(지붕 난간·줄눈 선) */
+const MERGE = { GAP: 1.0, SHARED: 2.0, CLOSE: 0.6 };
+/** a 둘레 가운데 b 에서 GAP 안에 있는 길이 (m) */
+function sharedLength(a, b) {
+  let L = 0;
+  for (let i = 0, j = a.length - 2; i < a.length; j = i, i += 2) {
+    const x0 = a[j], y0 = a[j + 1], x1 = a[i], y1 = a[i + 1], len = Math.hypot(x1 - x0, y1 - y0), n = Math.max(1, Math.ceil(len / 0.25));
+    for (let k = 0; k < n; k++) { const t = (k + 0.5) / n; if (distanceToPolygon(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, b) <= MERGE.GAP) L += len / n; }
+  }
+  return L;
+}
+function belongTogether(a, b) {
+  const A = polygonBBox(a), B = polygonBBox(b), g = MERGE.GAP;
+  if (A.minX - B.maxX > g || B.minX - A.maxX > g || A.minY - B.maxY > g || B.minY - A.maxY > g) return false;
+  const ov = overlapArea(a, b);
+  if (ov >= 0.5 || ov >= 0.03 * Math.min(Math.abs(polygonArea(a)), Math.abs(polygonArea(b)))) return true;
+  return Math.max(sharedLength(a, b), sharedLength(b, a)) >= MERGE.SHARED;
+}
+/** 새 외곽선과 겹치거나 붙은 기존 건물 번호 */
+function overlappingBuildings(pts) {
+  const out = [];
+  getContourPolys().forEach((p, i) => { if (p && p.length >= 6 && belongTogether(pts, p)) out.push(i); });
+  return out;
+}
+async function unionOnServer(polys) {
+  const res = await fetch(BACKEND_URL + '/api/geom/union', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ polys, close: MERGE.CLOSE }), signal: AbortSignal.timeout(20000) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.polygon || d.polygon.length < 6) throw new Error(d.detail || `HTTP ${res.status}`);
+  let q = d.polygon;
+  if (AiOpts.regularize) { const r = regularizeFootprint(q); if (r.length >= 6) q = r; }
+  return q;
+}
+/** 묶음마다 한 건물로 (extra: 첫 묶음에 더할 새 외곽선). 건물 정보는 가장 작은 번호 것을 두고 빈 칸만 채움, 출입구 점은 지우지 않음.
+ *  서버가 못 합친 묶음은 그대로 둠. 반환: [{idx(새 번호), area, n}] */
+async function mergeGroups(groups, extra) {
+  const polys = getContourPolys(), done = [];
+  for (let g = 0; g < groups.length; g++) {
+    const list = groups[g].map(i => Array.from(polys[i]));
+    if (g === 0 && extra) list.push(extra);
+    if (list.length < 2) continue;
+    try { done.push({ keep: Math.min(...groups[g]), drop: groups[g].filter(i => i !== Math.min(...groups[g])), q: await unionOnServer(list) }); }
+    catch (e) { console.warn('합치지 못함', groups[g], e); if (g === 0 && extra) throw e; }
+  }
+  if (!done.length) return [];
+  const dropAll = new Set(done.flatMap(r => r.drop)), byKeep = new Map(done.map(r => [r.keep, r]));
+  const contours = [], nb = {}, newIdx = {};
+  S.contours.forEach((c, i) => {
+    if (dropAll.has(i)) return;
+    const ni = contours.length; newIdx[i] = ni;
+    const r = byKeep.get(i);
+    if (r) {
+      contours.push(toContour(r.q));
+      const data = { ...(S.buildingData[i] || {}) };
+      for (const j of r.drop) for (const [k, v] of Object.entries(S.buildingData[j] || {})) if (data[k] == null || data[k] === '') data[k] = v;
+      if (Object.keys(data).length) nb[ni] = data;
+    } else { contours.push(c); if (S.buildingData[i]) nb[ni] = S.buildingData[i]; }
+  });
+  S.contours = contours; S.buildingData = nb;
+  return done.map(r => ({ idx: newIdx[r.keep], area: Math.abs(polygonArea(r.q)), n: r.drop.length + 1 }));
+}
+/** 이미 그려진 건물 가운데 겹치거나 붙은 것끼리 묶음 (연결된 것 전부) */
+function touchingGroups(only = null) {
+  const P = getContourPolys(), n = P.length, parent = [...Array(n).keys()];
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    if (P[i] && P[j] && P[i].length >= 6 && P[j].length >= 6 && belongTogether(P[i], P[j])) parent[find(i)] = find(j);
+  }
+  const g = new Map();
+  for (let i = 0; i < n; i++) { const r = find(i); if (!g.has(r)) g.set(r, []); g.get(r).push(i); }
+  return [...g.values()].filter(x => x.length > 1 && (only == null || x.includes(only)));
+}
+/** 「🔗 겹치거나 붙은 조각 합치기」 — only: 그 건물이 낀 묶음만 */
+async function mergeTouchingBuildings(only = null) {
+  if (!S.backendOnline) await checkBackend();
+  if (!S.backendOnline) { toast('서버가 꺼져 있어 합칠 수 없습니다.', 'error'); return; }
+  const groups = touchingGroups(only);
+  if (!groups.length) { toast(only == null ? '겹치거나 붙은 건물 조각이 없습니다.' : '이 건물과 겹치거나 붙은 조각이 없습니다.', 'info'); return; }
+  History.flush();
+  const res = await mergeGroups(groups);
+  if (!res.length) { toast('합치지 못했습니다 (조각 사이가 1 m 넘게 떨어져 있음).', 'warn'); return; }
+  changed(); renderModeUI(); updateEmptyState();
+  select({ kind: 'building', idx: res[0].idx });
+  toast(`조각 ${res.reduce((s, r) => s + r.n, 0)}개를 건물 ${res.length}개로 합쳤습니다 (Ctrl+Z 로 되돌리기)`, 'success', { duration: 5000 });
+}
+
+/** 딴 외곽선(현장 m) → 건물로 추가. 너무 작으면 버림. 기존 건물과 겹치면 한 건물로 합침 (2026-11-22) */
+async function addPickedOutline(pts, data, field, note) {
   if (AiOpts.regularize) pts = regularizeFootprint(pts);
   const area = Math.abs(polygonArea(pts));
   if (pts.length < 6 || area < 4) { toast('너무 작은 영역이 잡혔습니다. 건물을 사각형으로 감싸듯 끌어 보세요.', 'warn'); return false; }
+  const hits = overlappingBuildings(pts);
+  if (hits.length) {
+    try {
+      const [m] = await mergeGroups([hits], pts);
+      changed(); renderModeUI(); updateEmptyState();
+      select({ kind: 'building', idx: m.idx });
+      toast(`겹치거나 붙은 건물${hits.length > 1 ? ` ${hits.length}개` : ''}와 합쳐 한 건물로 만들었습니다${note} — ${fmt(m.area, 0)} m² (Ctrl+Z 로 되돌리기)`, 'success', { duration: 5000 });
+      return true;
+    } catch (e) {
+      console.warn('외곽선 합치기 실패 — 따로 추가', e);
+      note += ' · 겹치는 건물과 합치지 못해 따로 추가';
+    }
+  }
   S.contours = [...S.contours, toContour(pts)];   // 새 배열 (getContourPolys 캐시)
   changed(); renderModeUI(); updateEmptyState();
   select({ kind: 'building', idx: S.contours.length - 1 });
@@ -230,14 +339,14 @@ async function aiPickMap(prompt) {
     if (!data.polygon && data.ground && data.fallback) {
       // 바닥 같다고 봤어도 공식 건물(브이월드 건물통합정보)과 30 % 넘게 겹치면 건물 — 분류기가 새 동네에서 건물을 바닥으로 볼 때가 있음
       const fb = toWorld(data.fallback);
-      if (await overlapsOfficialBuilding(fb, view)) { addPickedOutline(fb, data, field, `${note} · 공식 건물 정보와 겹쳐 건물로 판단`); return; }
+      if (await overlapsOfficialBuilding(fb, view)) { await addPickedOutline(fb, data, field, `${note} · 공식 건물 정보와 겹쳐 건물로 판단`); return; }
       // 주차장·도로·잔디처럼 보임 — 바로 넣지 않고 묻는다 (공사 중 바닥판·옥상 주차장일 수도 있음)
       toast(`${data.reason} 건물이 맞으면 「그래도 추가」를 누르세요.`, 'warn', { duration: 10000,
         action: { label: '그래도 추가', fn: () => addPickedOutline(toWorld(data.fallback), data, field, `${note} · 바닥 같음 판정을 무시하고 추가`) } });
       return;
     }
     if (!data.polygon) { toast(data.reason || '외곽선을 찾지 못했습니다. 건물을 사각형으로 감싸듯 끌어 보세요.', 'warn', { duration: 6000 }); return; }
-    addPickedOutline(toWorld(data.polygon), data, field, note);
+    await addPickedOutline(toWorld(data.polygon), data, field, note);
   } catch (err) {
     console.warn('위성 AI 건물 따기 실패', err);
     toast(`AI 건물 따기에 실패했습니다: ${err.name === 'TimeoutError' ? '시간 초과' : err.message}`, 'error', { duration: 6000 });
