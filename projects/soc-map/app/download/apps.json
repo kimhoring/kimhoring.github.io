@@ -5,8 +5,8 @@
       "file": "SOC-MAP_worker.apk",
       "label": "SOC 근로자",
       "app_id": "kr.ac.jnu.socmap.worker",
-      "version": "14.16",
-      "version_code": 14160,
+      "version": "14.17",
+      "version_code": 14170,
       "size": 132108
     },
     {
@@ -14,9 +14,9 @@
       "file": "SOC-MAP_supervisor.apk",
       "label": "SOC 관리감독",
       "app_id": "kr.ac.jnu.socmap.supervisor",
-      "version": "14.16",
-      "version_code": 14160,
-      "size": 140300
+      "version": "14.17",
+      "version_code": 14170,
+      "size": 144396
     }
   ]
 }

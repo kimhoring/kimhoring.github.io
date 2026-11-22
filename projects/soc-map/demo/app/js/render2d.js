@@ -176,6 +176,13 @@ function render() {
         eq.getZoneShapes().forEach(sh => drawZoneShape(sh, s));
       }
     }
+    // 2026-11-22 장비끼리 간섭: 두 장비를 잇는 점선 + 가운데 「⚠ 간섭」
+    for (const c of equipmentConflicts(field.equipments)) {
+      const col = c.level === 'danger' ? '#ef4444' : '#f97316';
+      ctx.beginPath(); ctx.moveTo(c.a.xc, c.a.yc); ctx.lineTo(c.b.xc, c.b.yc);
+      ctx.strokeStyle = col; ctx.lineWidth = px(3); ctx.setLineDash([px(10), px(6)]); ctx.stroke(); ctx.setLineDash([]);
+      label(c.kind === 'swing' ? '⚠ 선회 간섭' : '⚠ 장비 간섭', (c.a.xc + c.b.xc) / 2, (c.a.yc + c.b.yc) / 2, px(11), col);
+    }
   }
 
   // 도로
@@ -232,8 +239,12 @@ function render() {
   // 단순 위험물 — 통제구역(빨강·흰 띠 + 출입 금지), 고전압(노랑·검정 띠 + 번개), 개구부(어두운 구멍 + 추락 경고) …
   for (const m of markersNow) {
     if (m.isEquipment) continue;
-    const isSel = sel && sel.kind === 'marker' && sel.id === m.id;
+    const isSel = sel && sel.kind === 'marker' && sel.id === m.id, off = !scheduleActive(m.schedule);
+    if (off) { ctx.save(); ctx.globalAlpha = 0.35; }
     hzMarker(ctx, m, px, { sel: isSel, fill: simpleMarkerColor(m) });
+    if (off) ctx.restore();
+    const tags = [scheduleValid(m.schedule) ? `⏰ ${scheduleText(m.schedule)}${off ? ' (꺼짐)' : ''}` : '', m.floor != null ? `🏢 ${floorText(m.floor)}` : '', permitOn(m.permit) ? '🔒 허가자만' : ''].filter(Boolean);
+    if (tags.length) label(tags.join(' · '), m.x, m.y + (m.radius || 3) + px(14), px(10.5), off ? '#94a3b8' : '#fde68a');
   }
 
   // 장비 (운전원 휴대폰과 연동된 장비는 실시간 위치)
@@ -251,6 +262,8 @@ function render() {
     ctx.strokeStyle = isSel ? '#60a5fa' : 'rgba(255,255,255,0.55)'; ctx.lineWidth = px(isSel ? 3 : 1.8); ctx.stroke();
     emoji(m.icon || '⚙️', m.x, m.y, px(17));
     label(m.label, m.x, m.y - px(25), px(11.5), '#fff');
+    const st = effectiveOpState(m);
+    if (st !== 'work' || scheduleValid(m.schedule)) label(`${OP_STATES[st].icon} ${OP_STATES[st].label}${scheduleValid(m.schedule) ? ` · ⏰ ${scheduleText(m.schedule)}` : ''}`, m.x, m.y + px(27), px(10.5), st === 'work' ? '#fde68a' : '#cbd5e1');
     if (isSel) label(`${Math.round(rad2deg(normalizeAngle(h)))}°`, m.x, m.y + px(27), px(11), '#93c5fd');
   }
 
@@ -391,14 +404,14 @@ function drawArrow(x1, y1, x2, y2, head, color, lw) {
 }
 
 function drawZoneShape(sh, s) {
-  const red = sh.zone === 'red';
+  const st = zoneStyle(sh.zone);
   const pts = zoneShapePolygon(sh, 64);
   ctx.beginPath(); ctx.moveTo(pts[0], pts[1]);
   for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1]);
   ctx.closePath();
-  ctx.fillStyle = red ? 'rgba(239,68,68,0.30)' : 'rgba(249,115,22,0.26)'; ctx.fill();
-  ctx.strokeStyle = red ? 'rgba(239,68,68,1)' : 'rgba(249,115,22,0.95)'; ctx.lineWidth = 2.2 / s;
-  if (!red) ctx.setLineDash([8 / s, 5 / s]);
+  ctx.fillStyle = st.fill; ctx.fill();
+  ctx.strokeStyle = st.stroke; ctx.lineWidth = 2.2 / s;
+  if (st.dash) ctx.setLineDash([8 / s, 5 / s]);
   ctx.stroke(); ctx.setLineDash([]);
 }
 

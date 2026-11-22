@@ -237,7 +237,8 @@ const Autosave = {
 function liveMarkers() {
   const live = S.live;
   if (!Object.keys(live).length) return S.markers;
-  return S.markers.map(m => (live[m.id] ? { ...m, x: live[m.id].x, y: live[m.id].y, heading: live[m.id].heading ?? m.heading, _live: live[m.id] } : m));
+  return S.markers.map(m => (live[m.id] ? { ...m, x: live[m.id].x, y: live[m.id].y, heading: live[m.id].heading ?? m.heading, _live: live[m.id],
+    _liveState: live[m.id].online ? live[m.id].opState : undefined, _v: live[m.id].online ? live[m.id].v : undefined } : m));
 }
 
 let _riskVersion = 0, _riskField = null, _riskFieldVersion = -1;

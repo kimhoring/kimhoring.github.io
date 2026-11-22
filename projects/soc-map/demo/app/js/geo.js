@@ -470,11 +470,43 @@ const LEVELS = {
   danger:  { rank: 3, label: '위험 구역 진입', color: '#ef4444' },
 };
 
+// ═══════════════════════════════════════════════
+//  접근 속도 경고 (2026-11-22) — 거리만이 아니라 「서로 다가오는 속도」로 몇 초 뒤 위험 반경에 닿는지
+// ═══════════════════════════════════════════════
+const TTC = {
+  WARN_S: 6,          // 설계값: 위험 반경까지 6초 안이면 접근 경고
+  MIN_CLOSING: 1.0,   // 설계값: 서로 1 m/s 이상으로 다가올 때만 (정지 중 GPS 흔들림 0.2~0.5 m/s 를 거름)
+  MAX_EDGE: 30,       // 위험 반경까지 30 m 넘게 남았으면 보지 않음
+};
+/**
+ * p = 사람(위치·속도), q = 장비 중심(위치·속도), R = 장비의 지금 위험 반경(m)
+ * @returns {{ttc, closing, edge} | null}  다가오지 않거나 멀면 null
+ */
+function closingTime(px, py, pvx, pvy, qx, qy, qvx, qvy, R) {
+  const dx = px - qx, dy = py - qy, d = Math.hypot(dx, dy);
+  if (!(d > 1e-6)) return null;
+  const closing = -(dx * ((pvx || 0) - (qvx || 0)) + dy * ((pvy || 0) - (qvy || 0))) / d;
+  const edge = Math.max(0, d - (R || 0));
+  if (!(closing >= TTC.MIN_CLOSING) || edge > TTC.MAX_EDGE) return null;
+  return { ttc: edge / closing, closing, edge };
+}
+/** 현장의 장비 가운데 가장 빨리 닿는 것 (장비 속도는 marker._v = {vx, vy}, 운전원 휴대폰이 보냄) */
+function closestThreat(field, x, y, vx, vy) {
+  let best = null;
+  for (const eq of field.equipments || []) {
+    const v = eq.marker._v || {};
+    const t = closingTime(x, y, vx, vy, eq.xc, eq.yc, v.vx, v.vy, eq.getMaxRadius());
+    if (t && t.ttc <= TTC.WARN_S && (!best || t.ttc < best.ttc)) best = { ...t, eq, bearing: Math.atan2(eq.yc - y, eq.xc - x) };
+  }
+  return best;
+}
+
 /**
  * @param field RiskField (m 단위)  @param sigma 위치 표준오차(m)
- * @returns {{risk, level, nearestDangerM, bearing, source, warnRadius}}
+ * @param vel {vx, vy} 사람의 속도(m/s, 칼만 필터) — 주면 다가오는 장비도 본다 (2026-11-22)
+ * @returns {{risk, level, nearestDangerM, bearing, source, warnRadius, ttc}}
  */
-function assessSafety(field, x, y, sigma = 0) {
+function assessSafety(field, x, y, sigma = 0, vel = null) {
   const risk = field.at(x, y);
   const warnRadius = SAFETY.WARN_M + Math.min(SAFETY.MAX_UNCERT_M, sigma || 0);
   let nearest = Infinity, nearPt = null, bearing = null;
@@ -492,7 +524,74 @@ function assessSafety(field, x, y, sigma = 0) {
     : nearest <= warnRadius ? 'warning'
     : risk >= SAFETY.CAUTION_R ? 'caution' : 'safe';
   const why = (level === 'warning' && nearPt ? field.explain(nearPt.x, nearPt.y) : risk > 0 ? field.explain(x, y) : [])[0];
-  return { risk: Math.round(risk), level, nearestDangerM: isFinite(nearest) ? nearest : null, bearing, source: why ? why.text : '', warnRadius };
+  const out = { risk: Math.round(risk), level, nearestDangerM: isFinite(nearest) ? nearest : null, bearing, source: why ? why.text : '', warnRadius, ttc: null };
+  if (vel && LEVELS[level].rank < LEVELS.warning.rank) {
+    const t = closestThreat(field, x, y, vel.vx, vel.vy);
+    if (t) {
+      out.level = 'warning'; out.ttc = Math.max(0, Math.round(t.ttc));
+      out.nearestDangerM = Math.round(t.edge * 10) / 10; out.bearing = t.bearing;
+      out.source = `${t.eq.marker.label} 다가옴 · 약 ${out.ttc}초`;
+    }
+  }
+  return out;
+}
+
+// ═══════════════════════════════════════════════
+//  쓰러짐 감지 (2026-11-22) — 큰 충격 뒤 10초 동안 거의 움직임이 없으면 「쓰러짐 의심」.
+//  휴대폰을 떨어뜨린 경우도 같아 보이므로, 앱은 바로 SOS 하지 않고 「괜찮으세요?」를 묻고 응답이 없을 때만 보낸다.
+// ═══════════════════════════════════════════════
+const FALL = {
+  G: 9.81,
+  IMPACT_G: 2.5,      // 설계값: 중력 포함 가속도 2.5 g 이상 = 충격 (보행·뛰기 1.2~2 g)
+  STILL_S: 10,        // 충격 뒤 이 시간 동안
+  STILL_STD: 0.6,     // 가속도 흔들림(표준편차, m/s²)이 이보다 작고
+  STILL_MEAN_TOL: 1.5, // 평균이 중력(9.81)에서 이 안이면 「누워 있음·놓여 있음」
+  RESPOND_S: 30,      // 「괜찮으세요?」에 응답할 시간
+  SETTLE_S: 1.5,      // 충격 직후 튕김은 빼고 본다
+};
+class FallDetector {
+  constructor() { this.impactAt = null; this.win = []; }
+  /** a = |가속도(중력 포함)| m/s², t = ms. 쓰러짐 의심이면 true 를 한 번 돌려준다 */
+  push(a, t) {
+    if (!(a >= 0) || !isFinite(t)) return false;
+    if (a >= FALL.IMPACT_G * FALL.G) { this.impactAt = t; this.win = []; return false; }
+    if (this.impactAt == null) return false;
+    const since = (t - this.impactAt) / 1000;
+    if (since < FALL.SETTLE_S) return false;
+    this.win.push(a);
+    if (since < FALL.SETTLE_S + FALL.STILL_S) {
+      // 중간에 크게 움직이면(일어남·걸음) 바로 취소
+      if (Math.abs(a - FALL.G) > 3 * FALL.STILL_STD + FALL.STILL_MEAN_TOL) { this.impactAt = null; this.win = []; }
+      return false;
+    }
+    const n = this.win.length, mean = this.win.reduce((s, v) => s + v, 0) / n;
+    const std = Math.sqrt(this.win.reduce((s, v) => s + (v - mean) ** 2, 0) / n);
+    this.impactAt = null; this.win = [];
+    return n >= 10 && std < FALL.STILL_STD && Math.abs(mean - FALL.G) < FALL.STILL_MEAN_TOL;
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  기압으로 층 추정 (2026-11-22) — 휴대폰 기압 센서(안드로이드 앱)
+//  날씨로 기압이 바뀌므로(몇 시간에 1~3 hPa = 8~25 m) 절대값이 아니라, 건물 밖(지상)에 있을 때의 기압을
+//  기준으로 계속 다시 맞추고 건물 안에서는 그 기준과의 차이로 층을 낸다.
+// ═══════════════════════════════════════════════
+const BARO = { FLOOR_H: 3.3, SMOOTH: 0.2, MAX_REF_AGE_S: 2 * 3600 };   // 설계값: 층고 3.3 m, 기준은 2시간까지
+function pressureToHeight(p, p0) { return 44330 * (1 - Math.pow(p / p0, 1 / 5.255)); }
+class BaroFloor {
+  constructor(floorH = BARO.FLOOR_H) { this.floorH = floorH; this.p = null; this.p0 = null; this.refAt = null; }
+  /** p = hPa, outside = 지금 건물 밖(지상)인지, t = ms → 추정 층(null = 기준 없음) */
+  update(p, outside, t) {
+    if (!(p > 300 && p < 1100)) return this.floor(t);
+    this.p = this.p == null ? p : this.p + BARO.SMOOTH * (p - this.p);
+    if (outside) { this.p0 = this.p; this.refAt = t; }
+    return this.floor(t);
+  }
+  height() { return this.p == null || this.p0 == null ? null : pressureToHeight(this.p, this.p0); }
+  floor(t) {
+    if (this.p0 == null || (t != null && this.refAt != null && (t - this.refAt) / 1000 > BARO.MAX_REF_AGE_S)) return null;
+    return Math.round(this.height() / this.floorH);
+  }
 }
 
 class SafetyTracker {

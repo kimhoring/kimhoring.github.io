@@ -237,7 +237,8 @@ $('prjInfoBtn').addEventListener('click', () => {
     ${S.project.id && key ? `<label class="row" style="cursor:pointer"><span>📍 GPS 위치로 합류 허용<br><small style="color:var(--muted)">현장 근처(배치 범위에서 50 m + 위치 오차) 휴대폰이 참여 코드 없이 현장을 찾아 합류</small></span><input type="checkbox" id="prjGpsJoin" ${PRJ.gpsJoin ? 'checked' : ''}></label>` : ''}
     ${S.project.id && key ? `<div class="label-sm" style="margin-top:6px">근로자 앱 정책 — 근로자는 바꿀 수 없습니다</div>
     <label class="row" style="cursor:pointer"><span>🔒 경보음·진동 잠금<br><small style="color:var(--muted)">근로자가 경보 소리·진동을 끌 수 없음</small></span><input type="checkbox" data-policy="alarm_locked" ${PRJ.policy.alarm_locked !== false ? 'checked' : ''}></label>
-    <label class="row" style="cursor:pointer"><span>🎓 시연 모드 허용<br><small style="color:var(--muted)">GPS 대신 지도를 눌러 위치를 정하는 교육·발표용</small></span><input type="checkbox" data-policy="allow_sim" ${PRJ.policy.allow_sim ? 'checked' : ''}></label>` : ''}
+    <label class="row" style="cursor:pointer"><span>🎓 시연 모드 허용<br><small style="color:var(--muted)">GPS 대신 지도를 눌러 위치를 정하는 교육·발표용</small></span><input type="checkbox" data-policy="allow_sim" ${PRJ.policy.allow_sim ? 'checked' : ''}></label>
+    <label class="row" style="cursor:pointer"><span>📡 기준점 보정 사용<br><small style="color:var(--muted)">기준점에 둔 관리감독자 휴대폰이 잰 GPS 오차를 근로자 휴대폰이 빼서 씀 (기준 휴대폰이 켜져 있을 때만)</small></span><input type="checkbox" data-policy="ref_corr" ${PRJ.policy.ref_corr !== false ? 'checked' : ''}></label>` : ''}
     ${S.project.id && key ? '<button class="btn" id="prjNewCode">참여 코드 새로 발급 (기존 코드 무효화)</button>' : ''}`;
   openModal('prjInfoModal');
   const gj = $('prjGpsJoin');
@@ -403,6 +404,7 @@ function onServerMessage(msg) {
       PRJ.events = msg.events.slice().reverse();
       PRJ.survey = msg.survey || [];
       PRJ.places = msg.places || []; PRJ.policy = msg.policy || PRJ.policy;
+      PRJ.evac = msg.evac || null; PRJ.corr = msg.corr || null;
       PRJ.clients.forEach(updateLive);
       if (msg.weather) wxFromServer(msg.weather);
       break;
@@ -417,6 +419,8 @@ function onServerMessage(msg) {
     case 'survey': PRJ.survey = msg.survey; if (S.mode === 'align') renderModeUI(); break;
     case 'places': PRJ.places = msg.places || []; break;
     case 'policy': PRJ.policy = msg.policy || PRJ.policy; break;
+    case 'evac': PRJ.evac = msg.evac || null; break;
+    case 'corr': PRJ.corr = msg.corr || null; break;
   }
   renderMonitor(); requestRender();
 }
@@ -428,7 +432,8 @@ function updateLive(c) {
   const prev = S.live[c.equipment], online = c.online !== false;
   // 같은 장비에 연결된 다른 운전원이 접속 중이면, 끊긴 쪽 정보로 덮어쓰지 않는다
   if (prev && prev.cid !== c.id && prev.online && !online) return;
-  S.live[c.equipment] = { cid: c.id, x: c.x, y: c.y, heading: c.heading != null ? bearingToHeading(c.heading) : undefined, ts: c.last_seen, online, by: c.name };
+  S.live[c.equipment] = { cid: c.id, x: c.x, y: c.y, heading: c.heading != null ? bearingToHeading(c.heading) : undefined, ts: c.last_seen, online, by: c.name,
+    opState: OP_STATES[c.op_state] ? c.op_state : undefined, v: { vx: +c.vx || 0, vy: +c.vy || 0 } };
   invalidateRisk();
 }
 
@@ -683,7 +688,8 @@ function renderMonitor() {
   $('monStatus').innerHTML = !S.project.id ? '<div class="alert info">서버 프로젝트를 열면 현장 앱으로 합류한 인원이 여기에 표시됩니다.</div>'
     : !PRJ.connected ? '<div class="alert warn">현장 서버에 연결하는 중입니다…</div>'
     : `<div class="kpis"><div><b>${online.length - ops}</b><span>작업자</span></div><div><b>${ops}</b><span>운전 장비</span></div>
-       <div class="${warn ? 'kpi-warn' : ''}"><b>${warn}</b><span>접근 경고</span></div><div class="${danger ? 'kpi-danger' : ''}"><b>${danger}</b><span>위험 진입</span></div></div>`;
+       <div class="${warn ? 'kpi-warn' : ''}"><b>${warn}</b><span>접근 경고</span></div><div class="${danger ? 'kpi-danger' : ''}"><b>${danger}</b><span>위험 진입</span></div></div>`
+      + evacHTML() + corrHTML();
   const badge = $('monBadge');
   badge.textContent = danger ? danger : online.length ? online.length : '';
   badge.className = 'rail-badge' + (danger ? ' danger' : '');
@@ -694,8 +700,8 @@ function renderMonitor() {
     const eqName = c.role === 'operator' ? (S.markers.find(m => m.id === c.equipment) || {}).label || '장비 미지정' : '';
     const detail = off ? `신호 끊김 · ${ago(c.last_seen)}`
       : c.role === 'operator'
-        ? `🚜 ${eqName}${(c.intrusions || []).length ? ` · <b style="color:#fca5a5">반경 내 ${(c.intrusions || []).length}명</b>` : ''}${c.speed ? ` · ${(c.speed * 3.6).toFixed(1)}km/h` : ''}`
-        : `${c.inside_site === false ? '현장 밖' : lv.label}${c.risk ? ` · R${c.risk}` : ''}${c.nearest_m != null && c.level !== 'danger' ? ` · 위험구역 ${c.nearest_m}m` : ''}`;
+        ? `🚜 ${eqName}${OP_STATES[c.op_state] ? ` · ${OP_STATES[c.op_state].icon} ${OP_STATES[c.op_state].label}` : ''}${(c.intrusions || []).length ? ` · <b style="color:#fca5a5">반경 내 ${(c.intrusions || []).length}명</b>` : ''}${c.speed ? ` · ${(c.speed * 3.6).toFixed(1)}km/h` : ''}`
+        : `${c.inside_site === false ? '현장 밖' : lv.label}${c.floor != null ? ` · 🏢 ${floorText(c.floor)}` : ''}${c.nearest_m != null && c.level !== 'danger' ? ` · 위험구역 ${c.nearest_m}m` : ''}`;
     const acc = c.sigma != null ? ` · ±${c.sigma.toFixed(1)}m` : c.acc ? ` · ±${Math.round(c.acc)}m` : '';
     return `<div class="worker-item ${off ? 'off' : ''} lv-${c.level || 'safe'}" style="--c:${off ? '#64748b' : c.role === 'operator' ? '#f59e0b' : lv.color}" data-wid="${esc(c.id)}">
       <span class="wdot"></span>
@@ -714,18 +720,19 @@ function renderMonitor() {
       ${ev.severity === 'critical' && !ev.acked ? '<button class="btn btn-xs" data-evack>확인</button>' : ''}
     </div>`).join('') || '<div class="hint">이벤트 없음</div>';
   $('simWorkersBtn').textContent = PRJ.sims.length ? `🧪 가상 인원 종료 (${PRJ.sims.length})` : '🧪 가상 인원 투입';
-  $('placeList').innerHTML = PRJ.places.length ? PRJ.places.map(pl => `<div class="list-item" style="--c:${pl.kind === 'assembly' ? '#10b981' : '#8b5cf6'}" data-place="${esc(pl.id)}">
-      <span>${pl.kind === 'assembly' ? '🟢' : '📍'} ${esc(pl.name)} <span class="label-sm">${pl.kind === 'assembly' ? '대피 장소' : '목적지'}</span></span>
-      <button class="icon-btn" data-place-del title="삭제">✕</button></div>`).join('')
+  const PK = { assembly: ['🟢', '대피 장소', '#10b981'], dest: ['📍', '목적지', '#8b5cf6'], ref: ['📡', '기준점', '#38bdf8'] };
+  $('placeList').innerHTML = PRJ.places.length ? PRJ.places.map(pl => { const k = PK[pl.kind] || PK.dest; return `<div class="list-item" style="--c:${k[2]}" data-place="${esc(pl.id)}">
+      <span>${k[0]} ${esc(pl.name)} <span class="label-sm">${k[1]}</span></span>
+      <button class="icon-btn" data-place-del title="삭제">✕</button></div>`; }).join('')
     : `<div class="hint">${S.project.id ? '등록된 장소가 없습니다.' : '서버 프로젝트에서 쓸 수 있습니다.'}</div>`;
 }
 $('placeAddBtn').addEventListener('click', () => {
   if (!S.project.id || !managerKey() || !PRJ.connected) { toast('대피 장소는 서버 프로젝트에 연결된 상태에서 추가할 수 있습니다.', 'warn'); return; }
   pickOnMap('대피 장소(집결지)·목적지로 쓸 지점을 지도에서 클릭하세요', async ip => {
-    const name = prompt('장소 이름 (예: 정문 집결지)\n목적지(대피 장소가 아님)로 등록하려면 이름 앞에 # 을 붙이세요.', '');
+    const name = prompt('장소 이름 (예: 정문 집결지)\n목적지(대피 장소가 아님)는 이름 앞에 # · 기준점(위치 보정용, 위치를 정확히 아는 점)은 이름 앞에 @ 를 붙이세요.', '');
     if (name === null) return;
-    const dest = name.trim().startsWith('#');
-    try { await api(`/api/projects/${S.project.id}/places`, { method: 'POST', body: { kind: dest ? 'dest' : 'assembly', name: name.trim().replace(/^#\s*/, ''), x: ip.x, y: ip.y } }); toast('장소를 추가했습니다. 근로자·관리감독자 앱에 바로 표시됩니다.', 'success'); }
+    const t = name.trim(), kind = t.startsWith('#') ? 'dest' : t.startsWith('@') ? 'ref' : 'assembly';
+    try { await api(`/api/projects/${S.project.id}/places`, { method: 'POST', body: { kind, name: t.replace(/^[#@]\s*/, ''), x: ip.x, y: ip.y } }); toast(kind === 'ref' ? '기준점을 추가했습니다. 관리감독자 앱 → 더보기 → 「기준점 보정」에서 이 점에 휴대폰을 두고 켜세요.' : '장소를 추가했습니다. 근로자·관리감독자 앱에 바로 표시됩니다.', 'success'); }
     catch (e) { toast('장소를 추가하지 못했습니다: ' + e.message, 'error'); }
   });
 });
@@ -1421,3 +1428,220 @@ async function autoAlignWithBuildings() {
 }
 $('realBldgBtn').addEventListener('click', importRealBuildings);
 $('autoAlignBtn').addEventListener('click', autoAlignWithBuildings);
+
+// ═══════════════════════════════════════════════
+//  하루 안전 기록 (2026-11-22) — 출입 명부 · 경보 기록 · 관리자 확인을 날짜별로.
+//  서버 GET /api/projects/{id}/report(report.py) → 미리 보기 · 인쇄(PDF) · CSV(엑셀)
+// ═══════════════════════════════════════════════
+const RPT = { data: null };
+const RPT_SEV = { critical: '긴급', warning: '경고', info: '알림' };
+const RPT_WEEK = ['일', '월', '화', '수', '목', '금', '토'];
+function rptToday() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function rptDay(s) { const [y, m, d] = s.split('-').map(Number); return `${y}년 ${m}월 ${d}일 (${RPT_WEEK[new Date(y, m - 1, d).getDay()]})`; }
+function rptTime(ts) { return ts ? new Date(ts * 1000).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false }) : ''; }
+function rptDur(min) { return min >= 60 ? `${Math.floor(min / 60)}시간 ${min % 60}분` : `${min}분`; }
+/** 경보 글 앞의 그림 글자(🚨 ⚠️ …)는 인쇄·엑셀에서 깨지므로 뺀다 */
+function rptText(t) { return String(t || '').replace(/^[^\p{L}\p{N}]+/u, ''); }
+function rptOut(p) { return p.online_now ? '접속 중' : rptTime(p.last_out); }
+
+async function openReport() {
+  if (!S.project.id || !managerKey()) {
+    toast('하루 안전 기록은 서버 현장에 남습니다. 「현장 합류」로 서버 현장을 만들거나 여세요.', 'warn', { duration: 6000 });
+    return;
+  }
+  openModal('reportModal');
+  await loadReport('');
+}
+
+async function loadReport(date) {
+  $('reportBody').innerHTML = '<div class="hint">불러오는 중…</div>';
+  try {
+    const d = await api(`/api/projects/${S.project.id}/report${date ? '?date=' + encodeURIComponent(date) : ''}`);
+    RPT.data = d;
+    const today = rptToday(), dates = d.dates.includes(d.date) ? d.dates : [d.date, ...d.dates];
+    $('reportDate').innerHTML = dates.map(x => `<option value="${x}"${x === d.date ? ' selected' : ''}>${rptDay(x)}${x === today ? ' · 오늘' : ''}</option>`).join('');
+    $('reportBody').innerHTML = reportPreview(d);
+  } catch (e) {
+    RPT.data = null;
+    $('reportBody').innerHTML = `<div class="alert warn">기록을 불러오지 못했습니다: ${esc(e.message)}</div>`;
+  }
+}
+
+function reportPreview(d) {
+  const s = d.summary, people = d.attendance;
+  if (!people.length && !d.events.length) return '<div class="alert info">이 날은 남은 기록이 없습니다. 근로자가 앱으로 합류하면 출입과 경보가 저절로 남습니다.</div>';
+  const kpi = (n, label, cls) => `<div class="${n && cls ? cls : ''}"><b>${n}</b><span>${label}</span></div>`;
+  const list = (rows, empty) => rows.length ? rows.join('') : `<div class="rp-empty">${empty}</div>`;
+  return `
+    <div class="kpis rp-kpis">
+      ${kpi(s.people, '출입 인원')}${kpi(s.enter, '위험 진입', 'kpi-danger')}${kpi(s.approach, '접근 경고', 'kpi-warn')}
+      ${kpi(s.sos, 'SOS', 'kpi-danger')}${kpi(s.offline, '신호 끊김', 'kpi-warn')}${kpi(s.unacked, '확인 안 함', 'kpi-danger')}
+    </div>
+    ${s.has_sim ? '<div class="hint">🧪 가상 인원(시연용) 기록이 섞여 있습니다 — 표에 「가상」으로 표시됩니다.</div>' : ''}
+    <div class="rp-sec"><b>출입 명부</b> <small>${people.length}명</small></div>
+    <div class="rp-list">${list(people.slice(0, 8).map(p => `<div class="rp-row"><span>${p.role === 'operator' ? '🚜' : '👷'} ${esc(p.name)}${p.sim ? ' <em>가상</em>' : ''}</span><span>${rptTime(p.first_in)} ~ ${rptOut(p)}</span><span class="muted">${rptDur(p.minutes)}</span></div>`), '출입 기록 없음')}
+      ${people.length > 8 ? `<div class="rp-empty">외 ${people.length - 8}명 — 인쇄·엑셀에 모두 들어갑니다</div>` : ''}</div>
+    <div class="rp-cols">
+      <div><div class="rp-sec"><b>주의가 필요한 인원</b></div>
+        <div class="rp-list">${list(d.risk_people.map(p => `<div class="rp-row"><span>${esc(p.name)}</span><span>${p.enter ? `<b class="t-danger">진입 ${p.enter}</b> ` : ''}접근 ${p.approach}</span></div>`), '없음')}</div></div>
+      <div><div class="rp-sec"><b>경보가 자주 난 곳</b></div>
+        <div class="rp-list">${list(d.risk_sources.map(r => `<div class="rp-row"><span>${esc(r.source)}</span><span>${r.count}회</span></div>`), '없음')}</div></div>
+    </div>
+    <div class="hint">경보 ${d.events.length}건 · SOS 평균 확인 ${s.sos_avg_response_s == null ? '-' : s.sos_avg_response_s + '초'} · 출입 시간은 앱 연결 기준입니다.</div>`;
+}
+
+function reportHTML(d) {
+  const s = d.summary, T = (x) => esc(x == null ? '' : String(x));
+  const rows = (arr, cols) => arr.length ? arr.map(r => `<tr>${cols.map(c => `<td>${c(r)}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${cols.length}" class="empty">기록 없음</td></tr>`;
+  const sevCls = (e) => e.severity === 'critical' ? 'crit' : e.severity === 'warning' ? 'warn' : '';
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>안전 기록 ${T(d.project.name)} ${T(d.date)}</title><style>
+    @page { size: A4; margin: 14mm 12mm; }
+    * { box-sizing: border-box; } body { font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color: #111; font-size: 10.5pt; margin: 0; }
+    h1 { font-size: 17pt; margin: 0 0 2mm; } h2 { font-size: 12pt; margin: 6mm 0 2mm; padding-bottom: 1mm; border-bottom: 1.5px solid #111; }
+    .meta { color: #444; font-size: 9.5pt; display: flex; justify-content: space-between; }
+    table { width: 100%; border-collapse: collapse; } th, td { border: 1px solid #999; padding: 1.6mm 2mm; text-align: left; vertical-align: top; }
+    th { background: #eef1f5; font-weight: 700; white-space: nowrap; } td.empty { color: #777; text-align: center; }
+    .kpi td { text-align: center; } .kpi b { display: block; font-size: 15pt; } .kpi .bad b { color: #c00; }
+    tr.crit td:nth-child(2) { color: #c00; font-weight: 700; } tr.warn td:nth-child(2) { color: #b45309; font-weight: 700; }
+    .two { display: flex; gap: 5mm; } .two > div { flex: 1; } .sim { color: #666; font-size: 8.5pt; }
+    .sign { margin-top: 8mm; } .sign td { height: 16mm; width: 33%; } .sign th { text-align: center; }
+    .note { margin-top: 4mm; color: #555; font-size: 8.5pt; line-height: 1.5; }
+    tr { page-break-inside: avoid; }
+    @media screen { body { max-width: 210mm; margin: 0 auto; padding: 10mm 8mm; } }
+  </style></head><body>
+    <h1>안전관리 일일 기록</h1>
+    <div class="meta"><span><b>${T(d.project.name)}</b> · ${T(rptDay(d.date))}</span><span>작성 ${T(new Date(d.generated_at * 1000).toLocaleString('ko-KR', { hour12: false }))} · SOC-MAP 자동 기록</span></div>
+    <h2>1. 요약</h2>
+    <table class="kpi"><tr>
+      <td><b>${s.people}</b>출입 인원${s.sim_people ? ` <span class="sim">(+가상 ${s.sim_people})</span>` : ''}</td><td><b>${s.operators}</b>장비 운전원</td>
+      <td class="${s.enter ? 'bad' : ''}"><b>${s.enter}</b>위험 구역 진입</td><td><b>${s.approach}</b>위험 구역 접근</td>
+      <td class="${s.sos ? 'bad' : ''}"><b>${s.sos}</b>SOS</td><td><b>${s.offline}</b>신호 끊김</td>
+      <td class="${s.unacked ? 'bad' : ''}"><b>${s.unacked}</b>확인 안 한 경보</td>
+    </tr></table>
+    <h2>2. 출입 명부</h2>
+    <table><tr><th>번호</th><th>이름</th><th>구분</th><th>장비</th><th>처음 들어옴</th><th>마지막 나감</th><th>머문 시간</th></tr>
+      ${rows(d.attendance.map((p, i) => ({ ...p, i: i + 1 })), [r => r.i, r => T(r.name) + (r.sim ? ' <span class="sim">가상</span>' : ''), r => T(r.role_label), r => T(r.equipment || ''), r => rptTime(r.first_in), r => T(rptOut(r)), r => rptDur(r.minutes)])}
+    </table>
+    <div class="two">
+      <div><h2>3. 주의가 필요한 인원</h2><table><tr><th>이름</th><th>진입</th><th>접근</th></tr>
+        ${rows(d.risk_people, [r => T(r.name), r => r.enter, r => r.approach])}</table></div>
+      <div><h2>4. 경보가 자주 난 곳</h2><table><tr><th>원인</th><th>횟수</th></tr>
+        ${rows(d.risk_sources, [r => T(r.source), r => r.count])}</table></div>
+    </div>
+    <h2>5. 경보 · 조치 기록 (${d.events.length}건)</h2>
+    <table><tr><th>시각</th><th>구분</th><th>내용</th><th>관리자 확인</th></tr>
+      ${d.events.length ? d.events.map(e => `<tr class="${sevCls(e)}"><td>${rptTime(e.ts)}</td><td>${T(e.kind_label)}</td><td>${T(rptText(e.text))}${e.sim ? ' <span class="sim">가상</span>' : ''}</td><td>${e.needs_ack ? (e.acked ? (e.ack_ts ? '확인 ' + rptTime(e.ack_ts) : '확인') : '<b>미확인</b>') : ''}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">기록 없음</td></tr>'}
+    </table>
+    <table class="sign"><tr><th>작성자</th><th>관리감독자</th><th>안전관리자</th></tr><tr><td></td><td></td><td></td></tr></table>
+    <div class="note">· 출입 시간은 현장 앱 연결 기준입니다(앱을 끄거나 신호가 끊긴 시간은 빠질 수 있음). · 위치는 휴대폰 GPS로 약 3~10 m 오차가 있습니다.
+      · 「위험 구역 진입·SOS·신호 끊김」은 관리자 화면에서 확인을 누른 시각이 남습니다.</div>
+  </body></html>`;
+}
+
+function reportPrint() {
+  if (!RPT.data) return;
+  const f = document.createElement('iframe');
+  f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+  document.body.appendChild(f);
+  f.contentDocument.open(); f.contentDocument.write(reportHTML(RPT.data)); f.contentDocument.close();
+  setTimeout(() => { f.contentWindow.focus(); f.contentWindow.print(); setTimeout(() => f.remove(), 60000); }, 300);
+}
+
+function reportCsv(kind) {
+  const d = RPT.data;
+  if (!d) return;
+  const q = (v) => { const s = v == null ? '' : String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  let head, body;
+  if (kind === 'events') {
+    head = ['날짜', '시각', '구분', '심각도', '이름', '역할', '원인', '내용', '관리자 확인', '확인 시각', '가상 인원'];
+    body = d.events.map(e => [d.date, rptTime(e.ts), e.kind_label, RPT_SEV[e.severity] || e.severity, e.name || '', e.role === 'operator' ? '운전원' : e.role ? '작업자' : '',
+      e.source || '', rptText(e.text), e.needs_ack ? (e.acked ? '확인' : '미확인') : '', rptTime(e.ack_ts), e.sim ? '가상' : '']);
+  } else {
+    head = ['날짜', '이름', '구분', '장비', '처음 들어옴', '마지막 나감', '머문 시간(분)', '접속 횟수', '가상 인원'];
+    body = d.attendance.map(p => [d.date, p.name, p.role_label, p.equipment || '', rptTime(p.first_in), rptOut(p), p.minutes, p.sessions, p.sim ? '가상' : '']);
+  }
+  const csv = '﻿' + [head, ...body].map(r => r.map(q).join(',')).join('\r\n') + '\r\n';   // BOM: 엑셀이 한글을 바로 읽음
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = `안전기록_${(d.project.name || '현장').replace(/[\\/:*?"<>|]/g, '_')}_${d.date}_${kind === 'events' ? '경보' : '출입'}.csv`;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+$('reportBtn').addEventListener('click', openReport);
+$('reportDate').addEventListener('change', () => loadReport($('reportDate').value));
+$('reportPrint').addEventListener('click', reportPrint);
+$('reportCsvEvents').addEventListener('click', () => reportCsv('events'));
+$('reportCsvPeople').addEventListener('click', () => reportCsv('people'));
+
+
+// ═══════════════════════════════════════════════
+//  2026-11-22 대피 점호 · 기준점 보정 · 작업 일정 (관리자 화면)
+// ═══════════════════════════════════════════════
+function evacPeople(ev) {
+  return (ev.people || []).map(p => { const c = PRJ.clients.get(p.id); return { ...p, online: !!c && c.online !== false }; });
+}
+function mmss(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+function evacHTML() {
+  const ev = PRJ.evac;
+  if (!ev || PRJ.evacHidden === ev.id) return '';
+  const ps = evacPeople(ev), arrived = ps.filter(p => p.state === 'arrived');
+  const lost = ps.filter(p => p.state !== 'arrived' && !p.online), moving = ps.filter(p => p.state !== 'arrived' && p.online);
+  const pct = ps.length ? Math.round(arrived.length / ps.length * 100) : 0;
+  const row = (p, cls) => `<div class="ec-row ${cls}"><span class="flex1">${p.role === 'operator' ? '🚜' : '👷'} ${esc(p.name)}${p.sim ? ' <span class="label-sm">가상</span>' : ''}</span>
+      <span class="label-sm">${cls === 'lost' ? '연락 없음' : '이동 중'}</span>
+      <button class="icon-btn" data-evac-focus="${esc(p.id)}" title="지도에서 보기">📍</button>
+      ${ev.ended ? '' : `<button class="btn btn-xs" data-evac-ok="${esc(p.id)}" title="무전·대면으로 확인했으면">확인</button>`}</div>`;
+  return `<div class="evac-card${ev.ended ? ' ended' : ''}">
+    <div class="ec-head"><b>${ev.ended ? '🏁 대피 종료' : '🚨 대피 점호'}</b>
+      <span class="label-sm">${ev.ended ? `${mmss(ev.ended - ev.start)} 걸림` : `<span data-evac-clock="${ev.start}">${mmss(Date.now() / 1000 - ev.start)}</span> 경과`}</span></div>
+    <div class="ec-bar"><span style="width:${pct}%"></span></div>
+    <div class="ec-nums"><span class="ok">도착 <b>${arrived.length}</b></span><span>이동 중 <b>${moving.length}</b></span><span class="bad">연락 없음 <b>${lost.length}</b></span><span class="label-sm">/ ${ps.length}명</span></div>
+    ${[...lost.map(p => row(p, 'lost')), ...moving.map(p => row(p, 'moving'))].join('')}
+    ${ev.ended ? '<button class="btn btn-xs" data-evac-close>닫기</button>'
+      : `<button class="btn btn-danger" data-evac-end>${moving.length + lost.length ? '대피 종료 (확인 안 된 인원을 기록에 남김)' : '✅ 전원 도착 — 대피 종료'}</button>`}
+  </div>`;
+}
+function corrHTML() {
+  const k = PRJ.corr;
+  if (!k || Date.now() / 1000 - k.at > 15) return '';
+  const pl = PRJ.places.find(p => p.id === k.place);
+  return `<div class="hint corr-hint">📡 기준점 보정 중${pl ? ` (${esc(pl.name)})` : ''} — GPS 오차 동 ${k.dx >= 0 ? '+' : ''}${k.dx.toFixed(1)} m · 남 ${k.dy >= 0 ? '+' : ''}${k.dy.toFixed(1)} m${PRJ.policy.ref_corr === false ? ' · <b>근로자 앱 적용 꺼짐</b>' : ''}</div>`;
+}
+$('monStatus').addEventListener('click', e => {
+  const t = e.target;
+  if (t.closest('[data-evac-end]')) {
+    const ps = PRJ.evac ? evacPeople(PRJ.evac).filter(p => p.state !== 'arrived') : [];
+    if (ps.length && !confirm(`아직 확인되지 않은 인원이 ${ps.length}명 있습니다 (${ps.map(p => p.name).join(', ')}).\n대피를 끝내고 기록에 남길까요?`)) return;
+    monSend({ type: 'evac_end' });
+  } else if (t.closest('[data-evac-ok]')) {
+    const id = t.closest('[data-evac-ok]').dataset.evacOk, p = PRJ.evac && PRJ.evac.people.find(q => q.id === id);
+    if (p && confirm(`${p.name} — 무전·대면으로 안전을 확인했나요?`)) monSend({ type: 'evac_safe', id });
+  } else if (t.closest('[data-evac-focus]')) {
+    const c = PRJ.clients.get(t.closest('[data-evac-focus]').dataset.evacFocus);
+    if (c && c.x != null) { setWorkspace('monitor'); centerOn(c.x, c.y); } else toast('이 사람의 위치 정보가 없습니다.', 'warn');
+  } else if (t.closest('[data-evac-close]')) { PRJ.evacHidden = PRJ.evac && PRJ.evac.id; renderMonitor(); }
+});
+setInterval(() => {
+  document.querySelectorAll('[data-evac-clock]').forEach(el => { el.textContent = mmss(Date.now() / 1000 - +el.dataset.evacClock); });
+}, 1000);
+
+/** 작업 일정이 켜지고 꺼지면 위험도·지도를 다시 그리고 알린다 (20초마다 확인) */
+let _schedSig = null;
+function scheduleWatch(force) {
+  const objs = [...S.markers, ...(S.siteEnvironment.envZones || [])].filter(o => scheduleValid(o.schedule));
+  const sig = objs.map(o => (scheduleActive(o.schedule) ? 1 : 0)).join('');
+  if (force || (_schedSig !== null && sig !== _schedSig)) {
+    if (!force && _schedSig !== null && _schedSig.length === sig.length) {
+      objs.forEach((o, i) => {
+        if (+_schedSig[i] === +sig[i]) return;
+        const name = o.label || (ENV_ZONE_TYPES[o.type] || {}).label || '구역';
+        toast(`⏰ ${name} ${+sig[i] ? (o.isEquipment ? '작업 시간 시작' : '켜짐') : (o.isEquipment ? '작업 시간 끝 → 정지·대기' : '꺼짐')} (${scheduleText(o.schedule)})`, +sig[i] ? 'warn' : 'info', { duration: 8000 });
+      });
+    }
+    invalidateRisk(); requestRender();
+    if (!force && S.selection && S.selection.kind === 'marker') renderInspector();   // 편집 중(force)에는 다시 그리지 않음 — 입력이 사라짐
+  }
+  _schedSig = sig;
+}
+setInterval(() => scheduleWatch(false), 20000);

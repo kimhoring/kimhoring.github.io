@@ -160,6 +160,69 @@ function computeHMitigation(mit, eqType) {
 }
 
 // ═══════════════════════════════════════════════
+//  2026-11-22 현장 운영: 장비 작업 상태 · 작업 일정 · 층 · 출입 허가
+//  모두 이 파일에서 판정해 관리자·근로자·운전원·관리감독자 화면이 같은 결과를 본다.
+// ═══════════════════════════════════════════════
+const OP_STATES = {
+  work:   { label: '작업 중',   icon: '⚙️' },
+  idle:   { label: '정지·대기', icon: '⏸️' },
+  travel: { label: '이동 중',   icon: '➡️' },
+};
+const IDLE_RISK = 50;        // 설계값: 멈춘 장비 본체 둘레 = 「주의」(30~69) — 작업 반경 전체를 위험으로 두면 오경보가 많음
+const TRAVEL_MARGIN = 2;     // 설계값: 이동 중 장비 본체 + 2 m = 위험
+const TRAVEL_AHEAD = 8;      // 설계값: 진행 방향 앞 8 m = 경고
+const PERMIT_RISK = 50;      // 설계값: 출입 허가를 받은 사람은 그 구역에서 「주의」로 낮춤
+
+/** 시험·재현용 현장 시계 (기본은 이 기기 시각) */
+let _siteClock = () => new Date();
+function setSiteClock(fn) { _siteClock = fn || (() => new Date()); }
+function siteNow() { return _siteClock(); }
+
+function parseHM(s) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s == null ? '' : s).trim());
+  if (!m) return null;
+  const h = +m[1], mi = +m[2];
+  return h <= 24 && mi < 60 && h * 60 + mi <= 1440 ? h * 60 + mi : null;
+}
+/** 작업 일정 {from:'14:00', to:'16:00'} — 매일 그 시간에만 켜짐. to 가 from 보다 이르면 자정을 넘김. 없거나 잘못되면 늘 켜짐 */
+function scheduleValid(sch) { return !!sch && parseHM(sch.from) != null && parseHM(sch.to) != null && parseHM(sch.from) !== parseHM(sch.to); }
+function scheduleActive(sch, now = siteNow()) {
+  if (!scheduleValid(sch)) return true;
+  const a = parseHM(sch.from), b = parseHM(sch.to), t = now.getHours() * 60 + now.getMinutes();
+  return a < b ? t >= a && t < b : t >= a || t < b;
+}
+function scheduleText(sch) { return scheduleValid(sch) ? `${sch.from}~${sch.to}` : ''; }
+
+/** 장비의 지금 상태: 운전원 휴대폰이 알린 값 > 작업 일정 밖이면 대기 > 관리자가 정한 값 > 작업 중 */
+function effectiveOpState(m, now = siteNow()) {
+  if (m._liveState && OP_STATES[m._liveState]) return m._liveState;
+  if (m.schedule && !scheduleActive(m.schedule, now)) return 'idle';
+  return OP_STATES[m.opState] ? m.opState : 'work';
+}
+
+/**
+ * 층: 사람의 층 wf (null = 모름 → 모든 위험 적용, 0 = 지상, 1 이상 = 건물 위층, 음수 = 지하)
+ *     위험물의 층 of (null = 지상 위험 → 지상·지하·모름에 적용, 숫자 = 그 층에만)
+ * 지상 장비는 지상·지하(굴착 바닥) 사람에게만, 크레인(인양물)은 모든 층에 적용한다.
+ */
+function floorMatch(of, wf) {
+  if (wf == null || wf === '') return true;
+  if (of == null || of === '') return wf <= 0;
+  return +of === +wf;
+}
+const ALL_FLOOR_EQUIPMENT = ['towerCrane', 'mobileCrane'];
+function equipmentFloorMatch(type, wf) { return wf == null || wf === '' || ALL_FLOOR_EQUIPMENT.includes(type) || wf <= 0; }
+function floorText(f) { return f == null || f === '' ? '' : +f === 0 ? '지상' : +f > 0 ? `${+f}층` : `지하 ${-f}층`; }
+
+/** 출입 허가 {on: true, names: ['김철수', …]} — 이름이 목록에 있으면 허가된 사람 */
+function permitOn(p) { return !!(p && p.on); }
+function permitAllows(p, person) {
+  if (!permitOn(p) || !person) return false;
+  const n = String(person).trim();
+  return (p.names || []).some(x => String(x).trim() === n);
+}
+
+// ═══════════════════════════════════════════════
 //  Equipment 클래스 계층
 // ═══════════════════════════════════════════════
 
@@ -172,6 +235,8 @@ class Equipment {
     this.mitigation = marker.mitigation || {};
     this.env = env || {};
     this.equipmentType = type;
+    this.state = effectiveOpState(marker);
+    if (type === 'towerCrane' && this.state === 'travel') this.state = 'work';   // 고정식 — 이동 상태 없음
     // 사고 빈도 가중치 — 설계값 (2026-10-05 결정). 통계로 산출한 값이 아니다.
     //  사망자 수 순위(고용노동부 2019~2021: 굴착기 63 > 이동식크레인 33)와는 맞지만,
     //  등록대수로 나눈 대당 위험률은 이동식크레인이 약 7.9배 높고, 나머지 기종은 통계가 없다.
@@ -226,8 +291,33 @@ class Equipment {
 
   computeScoreRed() { return 0; }
   computeScoreOrange() { return 0; }
-  getMaxRadius() { return 100; }
-  getZoneShapes() { return []; }
+  /** 작업 중일 때의 영향 반경·구역 모양 (장비마다 다시 정의) */
+  workRadius() { return 100; }
+  workShapes() { return []; }
+  /** 장비 본체 반경 — 정지·이동 중 위험 범위의 기준 (설계값) */
+  bodyRadius() { return 3; }
+  /** 지금 상태의 영향 반경. 전면 통제(강풍·침수·고압선)는 상태와 상관없이 작업 반경 전체 */
+  getMaxRadius() {
+    if (this.state === 'work' || this.isFullControl()) return this.workRadius();
+    if (this.state === 'idle') return this.bodyRadius();
+    return this.bodyRadius() + Math.max(TRAVEL_MARGIN, TRAVEL_AHEAD);
+  }
+  /** 진행 방향 앞쪽 띠 (이동 중) */
+  aheadSegment() {
+    const L = this.bodyRadius() + TRAVEL_AHEAD, c = Math.cos(this.heading), s = Math.sin(this.heading);
+    return { x1: this.xc, y1: this.yc, x2: this.xc + L * c, y2: this.yc + L * s };
+  }
+  getZoneShapes() {
+    if (this.state === 'idle') return [{ type: 'circle', zone: 'idle', cx: this.xc, cy: this.yc, radius: this.bodyRadius() }];
+    if (this.state === 'travel') {
+      const a = this.aheadSegment();
+      return [
+        { type: 'capsule', zone: 'orange', ...a, radius: this.bodyRadius() },
+        { type: 'circle', zone: 'red', cx: this.xc, cy: this.yc, radius: this.bodyRadius() + TRAVEL_MARGIN },
+      ];
+    }
+    return this.workShapes();
+  }
 
   orangeRisk() { return clampRisk((this.orangeBase + this.sPenalty) * this.w_freq - this.hMitigation); }
   normalRisk() { return this.sPenalty > 0 ? clampRisk(this.sPenalty * this.w_freq - this.hMitigation) : 0; }
@@ -236,6 +326,12 @@ class Equipment {
     const d = Math.hypot(x - this.xc, y - this.yc);
     if (d > this.getMaxRadius()) return 0;
     if (this.isFullControl()) return 100;
+    if (this.state === 'idle') return d <= this.bodyRadius() ? IDLE_RISK : 0;
+    if (this.state === 'travel') {
+      if (d <= this.bodyRadius() + TRAVEL_MARGIN) return 100;
+      const a = this.aheadSegment();
+      return pointToSegmentDistance(x, y, a.x1, a.y1, a.x2, a.y2) <= this.bodyRadius() ? this.orangeRisk() : 0;
+    }
     if (this.computeScoreRed(x, y, d) > 0) return 100;
     if (this.computeScoreOrange(x, y, d) > 0) return this.orangeRisk();
     return this.normalRisk();
@@ -246,6 +342,12 @@ class Equipment {
     const d = Math.hypot(x - this.xc, y - this.yc);
     if (d > this.getMaxRadius()) return 'none';
     if (this.isFullControl()) return 'full';
+    if (this.state === 'idle') return d <= this.bodyRadius() ? 'idle' : 'none';
+    if (this.state === 'travel') {
+      if (d <= this.bodyRadius() + TRAVEL_MARGIN) return 'red';
+      const a = this.aheadSegment();
+      return pointToSegmentDistance(x, y, a.x1, a.y1, a.x2, a.y2) <= this.bodyRadius() ? 'orange' : 'none';
+    }
     if (this.computeScoreRed(x, y, d) > 0) return 'red';
     if (this.computeScoreOrange(x, y, d) > 0) return 'orange';
     return 'normal';
@@ -266,9 +368,10 @@ class Excavator extends Equipment {
     if (d > this.rBlind) return 0;
     return angleDifference(Math.atan2(y - this.yc, x - this.xc), this.rearDir) <= this.thetaBlind / 2 ? this.orangeBase : 0;
   }
-  getMaxRadius() { return Math.max(this.rMax, this.rBlind); }
+  workRadius() { return Math.max(this.rMax, this.rBlind); }
+  bodyRadius() { return 3; }   // 0.6~1.0㎥급 차체 길이 약 6 m
   reach() { return this.rMax; }
-  getZoneShapes() {
+  workShapes() {
     return [
       { type: 'circle', zone: 'red', cx: this.xc, cy: this.yc, radius: this.rMax },
       { type: 'arc', zone: 'orange', cx: this.xc, cy: this.yc, radius: this.rBlind,
@@ -288,9 +391,10 @@ class MobileCrane extends Equipment {
   }
   computeScoreRed(x, y) { return pointToSegmentDistance(x, y, this.xc, this.yc, this.boomEnd.x, this.boomEnd.y) <= this.rLoad ? 100 : 0; }
   computeScoreOrange(x, y, d) { return d <= this.rOutrigger ? this.orangeBase : 0; }
-  getMaxRadius() { return Math.max(this.lBoom + this.rLoad, this.rOutrigger); }
+  workRadius() { return Math.max(this.lBoom + this.rLoad, this.rOutrigger); }
+  bodyRadius() { return this.rOutrigger; }
   reach() { return this.lBoom; }
-  getZoneShapes() {
+  workShapes() {
     return [
       { type: 'capsule', zone: 'red', x1: this.xc, y1: this.yc, x2: this.boomEnd.x, y2: this.boomEnd.y, radius: this.rLoad },
       { type: 'circle', zone: 'orange', cx: this.xc, cy: this.yc, radius: this.rOutrigger },
@@ -316,8 +420,9 @@ class TowerCrane extends Equipment {
     return Math.hypot(x - this.load.x, y - this.load.y) <= this.rLoad ? 100 : 0;
   }
   computeScoreOrange(x, y) { return pointToSegmentDistance(x, y, this.xc, this.yc, this.jibEnd.x, this.jibEnd.y) <= this.rShadow ? this.orangeBase : 0; }
-  getMaxRadius() { return Math.max(this.lJib + this.rShadow, this.dTrolley + this.rLoad, this.rMast); }
-  getZoneShapes() {
+  workRadius() { return Math.max(this.lJib + this.rShadow, this.dTrolley + this.rLoad, this.rMast); }
+  bodyRadius() { return Math.max(this.rMast, 2); }
+  workShapes() {
     return [
       { type: 'capsule', zone: 'orange', x1: this.xc, y1: this.yc, x2: this.jibEnd.x, y2: this.jibEnd.y, radius: this.rShadow },
       { type: 'circle', zone: 'red', cx: this.xc, cy: this.yc, radius: this.rMast },
@@ -338,8 +443,9 @@ class PileDriver extends Equipment {
   }
   computeScoreRed(x, y, d) { return d <= this.rFall ? 100 : 0; }
   computeScoreOrange(x, y, d) { return d > this.rFall && d <= this.rFall + this.rBuffer ? this.orangeBase : 0; }
-  getMaxRadius() { return this.rFall + this.rBuffer; }
-  getZoneShapes() {
+  workRadius() { return this.rFall + this.rBuffer; }
+  bodyRadius() { return this.lBase / 2 + 2; }
+  workShapes() {
     return [
       { type: 'circle', zone: 'orange', cx: this.xc, cy: this.yc, radius: this.rFall + this.rBuffer },
       { type: 'circle', zone: 'red', cx: this.xc, cy: this.yc, radius: this.rFall },
@@ -361,9 +467,10 @@ class ConcretePumpCar extends Equipment {
   }
   computeScoreRed(x, y, d) { return d <= this.rBoom ? 100 : 0; }
   computeScoreOrange(x, y) { return pointToSegmentDistance(x, y, this.front.x, this.front.y, this.rear.x, this.rear.y) <= this.wCar / 2 ? this.orangeBase : 0; }
-  getMaxRadius() { return Math.max(this.rBoom, this.lCar / 2 + this.dSign + this.wCar / 2); }
+  workRadius() { return Math.max(this.rBoom, this.lCar / 2 + this.dSign + this.wCar / 2); }
+  bodyRadius() { return this.lCar / 2 + 1; }
   reach() { return this.rBoom; }
-  getZoneShapes() {
+  workShapes() {
     return [
       { type: 'circle', zone: 'red', cx: this.xc, cy: this.yc, radius: this.rBoom },
       { type: 'capsule', zone: 'orange', x1: this.front.x, y1: this.front.y, x2: this.rear.x, y2: this.rear.y, radius: this.wCar / 2 },
@@ -434,21 +541,39 @@ function createEquipment(marker, env) {
 // ═══════════════════════════════════════════════
 
 class RiskField {
-  constructor(markers, env) {
+  /**
+   * @param opts {floor, person} — 이 사람에게 맞춘 위험도 (2026-11-22). floor: 사람의 층(null = 모름),
+   *        person: 이름(출입 허가 판정). 둘 다 없으면 관리자 화면처럼 모든 위험을 본다.
+   *        작업 일정 밖의 위험물·구역은 빠지고(this.inactive 에 남김), 일정 밖의 장비는 「정지·대기」.
+   */
+  constructor(markers, env, opts = {}) {
     this.env = env || { windSpeed: 0, envZones: [] };
+    this.opts = opts || {};
+    const now = siteNow(), wf = this.opts.floor;
     this.equipments = [];
     this.simple = [];
+    this.inactive = [];
     for (const m of markers || []) {
       if (m.isEquipment) {
+        if (!equipmentFloorMatch(m.type, wf)) continue;
         const eq = createEquipment(m, this.env);
         if (eq) { eq._r = eq.getMaxRadius(); this.equipments.push(eq); }
-      } else {
+      } else if (!scheduleActive(m.schedule, now)) {
+        this.inactive.push(m);
+      } else if (floorMatch(m.floor, wf)) {
         this.simple.push(m);
       }
     }
-    this.zones = (this.env.envZones || []).filter(z => z.polygon && z.polygon.length >= 6)
-      .map(z => ({ z, bb: polygonBBox(z.polygon), pen: (ENV_ZONE_TYPES[z.type] || {}).pedestrian || 0 }));
+    this.zones = [];
+    for (const z of this.env.envZones || []) {
+      if (!z.polygon || z.polygon.length < 6) continue;
+      if (!scheduleActive(z.schedule, now)) { this.inactive.push(z); continue; }
+      if (!floorMatch(z.floor, wf)) continue;
+      this.zones.push({ z, bb: polygonBBox(z.polygon), pen: (ENV_ZONE_TYPES[z.type] || {}).pedestrian || 0 });
+    }
   }
+  /** 출입 허가를 받은 사람이면 위험도를 「주의」로 낮춘다 */
+  _permit(obj, v) { return permitOn(obj.permit) && permitAllows(obj.permit, this.opts.person) ? Math.min(v, PERMIT_RISK) : v; }
 
   /** 0~100 위험도 */
   at(x, y) {
@@ -459,12 +584,12 @@ class RiskField {
       if (v > r) { r = v; if (r >= 100) return 100; }
     }
     for (const m of this.simple) {
-      if (Math.hypot(x - m.x, y - m.y) <= m.radius) r = Math.max(r, (m.riskLevel || 3) * 20);
+      if (Math.hypot(x - m.x, y - m.y) <= m.radius) r = Math.max(r, this._permit(m, (m.riskLevel || 3) * 20));
     }
     for (const { z, bb, pen } of this.zones) {
       if (pen <= r) continue;
       if (x < bb.minX || x > bb.maxX || y < bb.minY || y > bb.maxY) continue;
-      if (isPointInPolygon(x, y, z.polygon)) r = pen;
+      if (isPointInPolygon(x, y, z.polygon)) r = Math.max(r, this._permit(z, pen));
     }
     return clampRisk(r);
   }
@@ -474,13 +599,15 @@ class RiskField {
     const out = [];
     for (const eq of this.equipments) {
       const v = eq.calculate_risk(x, y);
-      if (v > 0) out.push({ risk: v, text: `${eq.marker.label} · ${({ full: '전면 통제', red: 'Red', orange: 'Orange', normal: '영향권' })[eq.zoneAt(x, y)]}` });
+      const st = eq.state !== 'work' && !eq.isFullControl() ? `(${OP_STATES[eq.state].label})` : '';
+      if (v > 0) out.push({ risk: v, text: `${eq.marker.label}${st} · ${({ full: '전면 통제', red: '위험 반경', orange: '주의 반경', normal: '영향권', idle: '장비 본체' })[eq.zoneAt(x, y)] || '영향권'}` });
     }
+    const permitNote = (o) => !permitOn(o.permit) ? '' : permitAllows(o.permit, this.opts.person) ? ' · 출입 허가됨' : ' · 허가자 외 출입 금지';
     for (const m of this.simple) {
-      if (Math.hypot(x - m.x, y - m.y) <= m.radius) out.push({ risk: (m.riskLevel || 3) * 20, text: `${m.label} · 등급 ${m.riskLevel || 3}` });
+      if (Math.hypot(x - m.x, y - m.y) <= m.radius) out.push({ risk: this._permit(m, (m.riskLevel || 3) * 20), text: m.label + permitNote(m) });
     }
     for (const { z, pen } of this.zones) {
-      if (isPointInPolygon(x, y, z.polygon)) out.push({ risk: pen, text: `${ENV_ZONE_TYPES[z.type].label} (보행)` });
+      if (isPointInPolygon(x, y, z.polygon)) out.push({ risk: this._permit(z, pen), text: `${ENV_ZONE_TYPES[z.type].label} (보행)${permitNote(z)}` });
     }
     return out.sort((a, b) => b.risk - a.risk);
   }
@@ -500,4 +627,56 @@ function riskColor(r) {
   // 노랑(낮음) → 주황 → 빨강(높음)
   const g = Math.round(220 * (1 - t));
   return [239 + Math.round(16 * (1 - t)), g, 40, Math.round(60 + 120 * t)];
+}
+
+/** 구역 모양 색 (2D·휴대폰·3D 공용) — idle = 멈춘 장비 본체 (2026-11-22) */
+const ZONE_STYLE = {
+  red:    { fill: 'rgba(239,68,68,0.30)', stroke: 'rgba(239,68,68,1)',    dash: false, hex: 0xef4444, opacity: 0.6 },
+  orange: { fill: 'rgba(249,115,22,0.26)', stroke: 'rgba(249,115,22,0.95)', dash: true,  hex: 0xf97316, opacity: 0.5 },
+  idle:   { fill: 'rgba(148,163,184,0.22)', stroke: 'rgba(203,213,225,0.9)', dash: true,  hex: 0x94a3b8, opacity: 0.35 },
+};
+function zoneStyle(zone) { return ZONE_STYLE[zone] || ZONE_STYLE.orange; }
+
+// ═══════════════════════════════════════════════
+//  장비끼리 간섭 (2026-11-22)
+//  크레인끼리: 지브·붐이 닿는 범위(작업 반경)가 겹치면 선회 간섭 → 작업 순서·신호 협의
+//  지상 장비끼리: 부딪칠 수 있는 반경이 겹치면 경고, 한 장비가 다른 장비 반경 안이면 위험
+//  타워크레인과 지상 장비는 높이가 달라 보지 않는다. 둘 다 멈춰 있으면 보지 않는다.
+// ═══════════════════════════════════════════════
+const CRANE_TYPES = ['towerCrane', 'mobileCrane'];
+/** 지상에서 다른 장비와 부딪칠 수 있는 반경 (설계값) */
+function groundReach(eq) {
+  if (eq.state === 'idle') return eq.bodyRadius();
+  if (eq.state === 'travel') return eq.bodyRadius() + TRAVEL_MARGIN;
+  switch (eq.equipmentType) {
+    case 'excavator': return eq.rMax;                       // 붐·암 선회
+    case 'mobileCrane': return eq.rOutrigger;               // 아웃트리거·차체 회전
+    case 'pileDriver': return eq.rFall;                     // 전도 반경
+    case 'concretePumpCar': return eq.lCar / 2 + eq.dSign;  // 차체 + 전후방 표지
+    default: return eq.bodyRadius();
+  }
+}
+function equipmentConflicts(equipments) {
+  const out = [], list = equipments || [];
+  const crane = (e) => CRANE_TYPES.includes(e.equipmentType);
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i], b = list[j];
+      if (a.state === 'idle' && b.state === 'idle') continue;
+      const d = Math.hypot(a.xc - b.xc, a.yc - b.yc);
+      if (crane(a) && crane(b) && a.state !== 'idle' && b.state !== 'idle') {
+        if (d < a.workRadius() + b.workRadius()) {
+          out.push({ a, b, kind: 'swing', level: 'warning', d, text: `${a.marker.label} · ${b.marker.label} 선회 반경 겹침 — 작업 순서·신호 협의` });
+        }
+        continue;
+      }
+      if (a.equipmentType === 'towerCrane' || b.equipmentType === 'towerCrane') continue;
+      const ra = groundReach(a), rb = groundReach(b);
+      if (d >= ra + rb) continue;
+      const inside = d < Math.max(ra, rb);
+      out.push({ a, b, kind: 'ground', level: inside ? 'danger' : 'warning', d,
+        text: `${a.marker.label} · ${b.marker.label} ${inside ? '작업 반경 안에 다른 장비' : '작업 반경 겹침'} — 장비끼리 부딪칠 수 있음` });
+    }
+  }
+  return out;
 }

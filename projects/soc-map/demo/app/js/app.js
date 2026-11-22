@@ -427,12 +427,30 @@ $('inspector').addEventListener('input', e => {
   changed();
   refreshEquipmentFormula();
 });
+/** 2026-11-22 인스펙터 「운영」 칸 → 문서 (선택 필드: 없으면 예전과 같게 동작) */
+function applyOps(m, t) {
+  const k = t.dataset.ops, box = $('inspector');
+  const val = (name) => (box.querySelector(`[data-ops="${name}"]`) || {}).value;
+  if (k === 'opState') { if (t.value === 'work') delete m.opState; else m.opState = t.value; }
+  else if (k === 'schedOn') { if (t.checked) m.schedule = { from: val('from') || '14:00', to: val('to') || '16:00' }; else delete m.schedule; }
+  else if (k === 'from' || k === 'to') { if (!m.schedule) return; m.schedule = { ...m.schedule, [k]: t.value }; }
+  else if (k === 'floor') { if (t.value === '') delete m.floor; else m.floor = +t.value; }
+  else if (k === 'permitOn') { m.permit = { on: t.checked, names: (m.permit && m.permit.names) || [] }; if (!t.checked && !m.permit.names.length) delete m.permit; }
+  else if (k === 'permitNames') { m.permit = { on: true, names: t.value.split(/[,，\n]/).map(s => s.trim()).filter(Boolean).slice(0, 50) }; }
+  else return;
+  changed();
+  // 시간·이름 칸은 다시 그리지 않는다 — 다시 그리면 다음 칸으로 옮긴 입력(포커스)이 사라짐
+  if (!['from', 'to', 'permitNames'].includes(k)) renderInspector();
+  else if (k !== 'permitNames') { const n = box.querySelector('[data-ops-label="schedNow"]'); if (n) n.textContent = scheduleActive(m.schedule) ? '켜짐' : '꺼짐'; }
+  if (k === 'schedOn' || k === 'from' || k === 'to') scheduleWatch(true);
+}
 function setParamLabel(k, v, info = PARAM_LABELS[k] || { unit: '' }) {
   const l = document.querySelector(`[data-param-label="${k}"]`);
   if (l) l.textContent = `${v} ${info.unit}`;
 }
 $('inspector').addEventListener('change', e => {
   const t = e.target, m = selectedMarker();
+  if (t.dataset.ops && m) { applyOps(m, t); return; }
   if (t.dataset.mit && m) { m.mitigation = { ...m.mitigation, [t.dataset.mit]: t.checked }; changed(); refreshEquipmentFormula(); }
   if (t.dataset.eqflag && m) { m[t.dataset.eqflag] = t.checked; changed(); refreshEquipmentFormula(); renderEnvControls(); }
   if (t.dataset.bd === 'entranceBlocked' && S.selection) {

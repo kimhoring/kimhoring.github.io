@@ -53,17 +53,24 @@ const HAZARD_ITEMS = [
 ];
 
 // ── 토스트 ──
+const TOAST_MAX = 3;   // 지도를 가리지 않게 — 한 번에 3개까지, 같은 글은 하나로
 function toast(msg, type = 'info', opts = {}) {
+  const box = $('toasts');
+  for (const t of box.querySelectorAll('.toast')) if (t.dataset.msg === String(msg)) t.remove();
   const el = document.createElement('div');
   el.className = `toast ${type}`;
-  el.innerHTML = `<span>${esc(msg)}</span>`;
+  el.dataset.msg = String(msg);
+  el.innerHTML = `<span>${esc(msg)}</span><button class="toast-x" title="닫기" aria-label="닫기">✕</button>`;
+  el.querySelector('.toast-x').onclick = () => el.remove();
   if (opts.action) {
     const b = document.createElement('button');
     b.className = 'btn btn-xs'; b.textContent = opts.action.label;
     b.onclick = () => { el.remove(); opts.action.fn(); };
-    el.appendChild(b);
+    el.insertBefore(b, el.querySelector('.toast-x'));
   }
-  $('toasts').appendChild(el);
+  box.appendChild(el);
+  const all = box.querySelectorAll('.toast');
+  for (let i = 0; i < all.length - TOAST_MAX; i++) all[i].remove();
   setTimeout(() => el.remove(), opts.duration || (type === 'error' ? 7000 : 4000));
 }
 
@@ -185,12 +192,12 @@ function renderModeUI() {
 function buildItemGrids() {
   $('equipmentGrid').innerHTML = Object.entries(EQUIPMENT_TYPES).map(([k, v]) =>
     `<div class="drag-item eq" draggable="true" data-item='${esc(JSON.stringify({ type: k, isEquipment: true }))}' title="누른 뒤 지도에서 놓을 곳을 누르세요 (끌어다 놓아도 됨)">
-       <span class="ico">${v.icon}</span><span class="lbl">${v.label}</span><span class="sub" title="사고 빈도 가중치 — 설계값 (통계 산출값 아님)">W ×${new v.cls({ x: 0, y: 0 }, {}).w_freq}</span></div>`).join('');
+       <span class="ico">${v.icon}</span><span class="lbl">${v.label}</span></div>`).join('');
   const items = [...HAZARD_ITEMS, ...S.customItems];
   $('hazardGrid').innerHTML = items.map(it =>
     `<div class="drag-item" draggable="true" data-item='${esc(JSON.stringify(it))}' title="누른 뒤 지도에서 놓을 곳을 누르세요 (끌어다 놓아도 됨)">
        ${it.type.startsWith('custom-') ? `<button class="icon-btn del" data-del-custom="${esc(it.type)}" title="삭제">✕</button>` : ''}
-       <span class="ico">${hzIconHTML(hzMarkerSign(it.type), esc(it.icon || '⚠️'))}</span><span class="lbl">${esc(it.label)}</span><span class="sub">등급 ${it.riskLevel}</span></div>`).join('');
+       <span class="ico">${hzIconHTML(hzMarkerSign(it.type), esc(it.icon || '⚠️'))}</span><span class="lbl">${esc(it.label)}</span><span class="sub lvdots" title="위험 등급 ${it.riskLevel} / 5">${'●'.repeat(it.riskLevel || 3)}${'○'.repeat(5 - (it.riskLevel || 3))}</span></div>`).join('');
 }
 
 function renderEnvZoneList() {
@@ -277,6 +284,7 @@ function equipmentInspector(m) {
             <label class="switch"><input type="checkbox" data-mit="${k}" ${m.mitigation && m.mitigation[k] ? 'checked' : ''}><span class="sl"></span></label></div>`;
     }
   }
+  h += opsSection(m);
   h += `<h4>위험도 산출</h4><div id="insFormula">${equipmentFormula(eq)}</div>`;
   h += `<div class="row-gap" style="margin-top:14px"><button class="btn flex1" data-act="duplicate">복제 <kbd>Ctrl+D</kbd></button><button class="btn btn-danger flex1" data-act="deleteSel">삭제 <kbd>Del</kbd></button></div>`;
   return h;
@@ -296,9 +304,9 @@ function equipmentFormula(eq) {
     <div class="row"><span>🌍 S_penalty (장비 위치 지반)</span><b style="color:${sp ? 'var(--warn)' : 'var(--ok)'}">+${sp}</b></div>
     ${zoneFlags ? `<div class="label-sm" style="margin-top:-2px">↳ ${zoneFlags}</div>` : ''}
     <div class="row"><span>🛡️ H_mitigation (통제 완화)</span><b style="color:${hm ? 'var(--ok)' : 'var(--muted)'}">−${hm}</b></div>
-    <div class="row total"><span>🔴 Red Zone</span>${chip(fc ? 100 : 100)}</div>
-    <div class="row"><span>🟠 Orange Zone</span>${chip(fc ? 100 : eq.orangeRisk())}</div>
-    <div class="row"><span>⚪ 영향권 기타</span>${chip(fc ? 100 : eq.normalRisk())}</div>
+    <div class="row total"><span>🔴 위험 반경 (Red)</span>${chip(fc ? 100 : 100)}</div>
+    <div class="row"><span>🟠 주의 반경 (Orange)</span>${chip(fc ? 100 : eq.orangeRisk())}</div>
+    <div class="row"><span>⚪ 영향권</span>${chip(fc ? 100 : eq.normalRisk())}</div>
     <code>Orange = clamp((${eq.orangeBase} + S) × W − H) = clamp((${eq.orangeBase} + ${sp}) × ${wf} − ${hm})</code>
   </div>`;
 }
@@ -308,10 +316,40 @@ function hazardInspector(m) {
   h += `<div class="field"><div class="row"><span>위험 반경</span><span class="value" id="insRadius">${m.radius} m</span></div>
         <input type="range" min="0.5" max="30" step="0.5" value="${m.radius}" data-hz="radius"></div>
         <div class="field"><div class="row"><span>위험 등급</span><span class="value" id="insLevel">${m.riskLevel || 3} → R=${(m.riskLevel || 3) * 20}</span></div>
-        <input type="range" min="1" max="5" value="${m.riskLevel || 3}" data-hz="riskLevel"></div>
-        <div class="row-gap" style="margin-top:14px"><button class="btn flex1" data-act="duplicate">복제</button><button class="btn btn-danger flex1" data-act="deleteSel">삭제</button></div>`;
+        <input type="range" min="1" max="5" value="${m.riskLevel || 3}" data-hz="riskLevel"></div>`;
+  h += opsSection(m);
+  h += `<div class="row-gap" style="margin-top:14px"><button class="btn flex1" data-act="duplicate">복제</button><button class="btn btn-danger flex1" data-act="deleteSel">삭제</button></div>`;
   return h;
 }
+
+/** 2026-11-22 운영: 작업 상태(장비) · 작업 일정 · 층 · 출입 허가(위험물) */
+function opsSection(m) {
+  const sch = m.schedule || {}, on = scheduleValid(m.schedule), now = on ? scheduleActive(m.schedule) : true;
+  let h = '<h4>운영</h4>';
+  if (m.isEquipment) {
+    const st = m._live || (S.live && S.live[m.id]);
+    h += `<div class="field"><div class="row"><span style="white-space:nowrap">⚙️ 작업 상태</span><select class="input input-sm" data-ops="opState" style="max-width:150px">${Object.entries(OP_STATES).map(([k, v]) =>
+      `<option value="${k}"${(m.opState || 'work') === k ? ' selected' : ''}>${v.icon} ${v.label}</option>`).join('')}</select></div>
+      <div class="label-sm">${st && st.opState ? `지금 운전원 휴대폰: <b>${OP_STATES[st.opState] ? OP_STATES[st.opState].label : '-'}</b> (휴대폰 값이 우선)` : '정지·대기면 작업 반경 대신 본체 둘레만 「주의」입니다. 운전원 휴대폰이 연결되면 휴대폰 값이 우선합니다.'}</div></div>`;
+  }
+  h += `<div class="field"><div class="row"><span>⏰ ${m.isEquipment ? '작업 시간 지정' : '시간 지정 (그 시간에만 위험)'}</span>
+      <label class="switch"><input type="checkbox" data-ops="schedOn"${on ? ' checked' : ''}><span class="sl"></span></label></div>
+    <div class="row-gap"${on ? '' : ' hidden'}><input type="time" class="input" data-ops="from" value="${esc(sch.from || '14:00')}"><span style="align-self:center">~</span><input type="time" class="input" data-ops="to" value="${esc(sch.to || '16:00')}"></div>
+    <div class="label-sm">${on ? `매일 이 시간 · 지금 <b data-ops-label="schedNow" style="color:${now ? 'var(--danger)' : 'var(--muted)'}">${now ? '켜짐' : '꺼짐'}</b>` : ''}
+      ${m.isEquipment ? (on ? ' — 이 시간 밖에는 「정지·대기」' : '') : (on ? '' : '예: 크레인 양중 시간에만 인양 경로 아래 통행 금지')}</div></div>`;
+  if (!m.isEquipment) {
+    const fl = m.floor == null ? '' : String(m.floor), pm = m.permit || {};
+    h += `<div class="field"><div class="row"><span>🏢 층</span><select class="input input-sm" data-ops="floor">
+        <option value=""${fl === '' ? ' selected' : ''}>지상 (기본)</option>
+        ${[-2, -1, ...Array.from({ length: 30 }, (_, i) => i + 1)].map(f => `<option value="${f}"${fl === String(f) ? ' selected' : ''}>${floorText(f)}</option>`).join('')}
+      </select></div><div class="label-sm">위층 개구부처럼 그 층 사람에게만 알릴 때. 층을 모르는 휴대폰에는 모두 알립니다.</div></div>
+      <div class="field"><div class="row"><span>🔒 허가자만 출입</span><label class="switch"><input type="checkbox" data-ops="permitOn"${permitOn(pm) ? ' checked' : ''}><span class="sl"></span></label></div>
+      <div${permitOn(pm) ? '' : ' hidden'}><input type="text" class="input" data-ops="permitNames" placeholder="허가자 이름 (쉼표로 구분) 예: 김철수, 이영희" value="${esc((pm.names || []).join(', '))}">
+      <div class="label-sm">허가자는 「주의」로만, 그 밖의 사람은 「위험 · 허가자 외 출입 금지」로 알립니다. 이름은 근로자 앱에 넣은 이름과 같아야 합니다.</div></div></div>`;
+  }
+  return h;
+}
+
 
 function buildingInspector(idx) {
   const bd = S.buildingData[idx] || {};

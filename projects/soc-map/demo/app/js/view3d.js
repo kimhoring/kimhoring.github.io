@@ -36,7 +36,7 @@ const View3D = (() => {
   let groundTex = null, groundCanvas = null, groundView = null, groundTimer = null, groundOn = false;
   let peopleGroup = null, peopleAt = 0, origin3d = null;
   const peopleMap = new Map();
-  const PERSON_S = 4;   // 4배로 키워 현장 전체를 볼 때도 사람이 잘 보이게 (장비는 3배)
+  const PERSON_S = 2.5;   // 위치 핀 크기 (실제 사람의 약 2.5배 — 현장 전체에서도 점으로 보이고 건물·장비를 가리지 않게)
   let pickables = [], sunInfo = null;
   const K = 10, B1_Y = -4 * K;   // 지하 1층 4m (보행 구역 아래 주차장 표현)
 
@@ -160,26 +160,45 @@ const View3D = (() => {
     uv.needsUpdate = true;
   }
 
-  // ── 현장 인원: 근로자(위험 단계 색) · 운전원(주황), 위험 진입이면 바닥 고리가 퍼진다 ──
+  // ── 현장 인원: 위치 핀(원통 머리 + 뒤집힌 원뿔 몸, 끝이 서 있는 곳). 근로자는 위험 단계 색 · 운전원은 주황,
+  //    위험 진입이면 바닥 고리가 퍼진다. 이름은 머리 위 작은 글자 판 ──
   function personModel(color) {
     const g = new THREE.Group(), s = PERSON_S * K;
-    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, emissive: color, emissiveIntensity: 0.3 });
-    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.3 * s, 0.36 * s, 1.15 * s, 14), mat); torso.position.y = 0.58 * s; torso.castShadow = true;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.25 * s, 16, 12), mat); head.position.y = 1.42 * s; head.castShadow = true;
-    const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.28 * s, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.4 }));
-    helmet.position.y = 1.5 * s;
-    const ring = new THREE.Mesh(new THREE.RingGeometry(0.85 * s, 1.15 * s, 32), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, emissive: color, emissiveIntensity: 0.35 });
+    const body = new THREE.Mesh(new THREE.ConeGeometry(0.5 * s, 1.5 * s, 20), mat);
+    body.rotation.x = Math.PI; body.position.y = 0.75 * s; body.castShadow = true;            // 뒤집힌 원뿔: 끝이 바닥(위치)
+    const head = new THREE.Mesh(new THREE.CylinderGeometry(0.36 * s, 0.36 * s, 0.42 * s, 20), mat);
+    head.position.y = 1.5 * s + 0.12 * s + 0.21 * s; head.castShadow = true;                   // 몸 위에 조금 띄워 머리로 읽히게
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.55 * s, 0.75 * s, 32), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
     ring.rotation.x = -Math.PI / 2; ring.position.y = 1.5;
-    g.add(torso, head, helmet, ring);
-    g.userData = { mat, ring };
+    g.add(body, head, ring);
+    g.userData = { mat, ring, top: 1.5 * s + 0.12 * s + 0.42 * s };
     return g;
+  }
+  /** 이름 글자 판 (둥근 사각형, 왼쪽 색 점) — 글 길이에 맞춰 폭이 정해진다 */
+  function nameTag(text, color, h = 30) {
+    const fs = 44, padX = 22, dot = 16;
+    const c = document.createElement('canvas'), g0 = c.getContext('2d');
+    g0.font = `bold ${fs}px "Malgun Gothic",sans-serif`;
+    const tw = Math.ceil(g0.measureText(text).width);
+    c.width = padX * 2 + dot * 2 + 12 + tw; c.height = 72;
+    const g = c.getContext('2d'), r = 20;
+    g.fillStyle = 'rgba(11,17,32,0.88)';
+    g.beginPath(); g.moveTo(r, 0); g.arcTo(c.width, 0, c.width, c.height, r); g.arcTo(c.width, c.height, 0, c.height, r); g.arcTo(0, c.height, 0, 0, r); g.arcTo(0, 0, c.width, 0, r); g.closePath(); g.fill();
+    g.fillStyle = color; g.beginPath(); g.arc(padX + dot, c.height / 2, dot, 0, Math.PI * 2); g.fill();
+    g.font = `bold ${fs}px "Malgun Gothic",sans-serif`; g.fillStyle = '#fff'; g.textBaseline = 'middle';
+    g.fillText(text, padX + dot * 2 + 12, c.height / 2 + 2);
+    const tex = new THREE.CanvasTexture(c); tex.minFilter = THREE.LinearFilter;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+    sp.scale.set(h * c.width / c.height, h, 1); sp.renderOrder = 11;
+    return sp;
   }
   function lookPerson(p, c) {
     const col = new THREE.Color(c.color);
     p.obj.userData.mat.color.copy(col); p.obj.userData.mat.emissive.copy(col); p.obj.userData.ring.material.color.copy(col);
     if (p.label) { p.obj.remove(p.label); dispose(p.label); }
-    p.label = sprite(c.role === 'operator' ? '🚜' : '👷', `${c.name}${c.online === false ? ' (끊김)' : ''}`, c.color, 70);
-    p.label.position.y = 2.6 * PERSON_S * K;
+    p.label = nameTag(`${c.name}${c.online === false ? ' (끊김)' : ''}`, c.color);
+    p.label.position.y = p.obj.userData.top + 16;
     p.obj.add(p.label);
   }
   function syncPeople() {
@@ -227,18 +246,35 @@ const View3D = (() => {
     return m;
   }
   /** 떠 있는 표지. icon = 이모지 글자 또는 { sign: 'noEntry' | 'voltage' | … } (hazardviz.js 안전표지 그림) */
+  /** 표지(아이콘 원) + 그 아래 글자 판을 한 장으로 — 글자를 원 안에 넣으면 너무 작아 읽히지 않아 밖으로 뺐다.
+   *  size = 아이콘 원의 크기(월드 단위). 글자 판 높이는 아이콘과 상관없이 TAG_H(인원 이름표와 같은 크기) */
+  const TAG_H = 30;
   function sprite(emojiText, text, color, size = 46) {
-    const c = document.createElement('canvas'); c.width = c.height = 256;
-    const g = c.getContext('2d');
-    g.fillStyle = 'rgba(11,17,32,0.92)'; g.beginPath(); g.arc(128, 128, 100, 0, Math.PI * 2); g.fill();
-    g.lineWidth = 10; g.strokeStyle = color; g.stroke();
+    size *= 1.2;
+    const R = 128, tagH = Math.round(TAG_H * 2 * R / size), fs = Math.round(tagH * 0.62), gap = Math.round(tagH * 0.12);
+    const g0 = document.createElement('canvas').getContext('2d');
+    g0.font = `bold ${fs}px "Malgun Gothic",sans-serif`;
+    const tw = text ? Math.ceil(g0.measureText(text).width) : 0;
+    const W = Math.max(2 * R, tw + fs + 8), H = 2 * R + (text ? gap + tagH : 0);
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const g = c.getContext('2d'), cx = W / 2;
+    g.fillStyle = 'rgba(11,17,32,0.92)'; g.beginPath(); g.arc(cx, R, R - 12, 0, Math.PI * 2); g.fill();
+    g.lineWidth = 12; g.strokeStyle = color; g.stroke();
     g.textAlign = 'center'; g.textBaseline = 'middle';
-    if (emojiText && typeof emojiText === 'object' && typeof hzSign === 'function') hzSign(g, emojiText.sign, 128, 98, 112);
-    else { g.font = '80px "Segoe UI Emoji",sans-serif'; g.fillText(emojiText, 128, 108); }
-    g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.font = `bold ${text.length > 6 ? 22 : 28}px "Malgun Gothic",sans-serif`; g.fillStyle = '#fff'; g.fillText(text, 128, 184);
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }));
-    sp.scale.set(size, size, 1); sp.renderOrder = 10;
+    if (emojiText && typeof emojiText === 'object' && typeof hzSign === 'function') hzSign(g, emojiText.sign, cx, R, 150);
+    else { g.font = '120px "Segoe UI Emoji",sans-serif'; g.fillText(emojiText, cx, R + 6); }
+    if (text) {
+      const y0 = 2 * R + gap, w = tw + fs, x0 = cx - w / 2, r = tagH * 0.3;
+      g.fillStyle = 'rgba(11,17,32,0.9)';
+      g.beginPath(); g.moveTo(x0 + r, y0); g.arcTo(x0 + w, y0, x0 + w, y0 + tagH, r); g.arcTo(x0 + w, y0 + tagH, x0, y0 + tagH, r); g.arcTo(x0, y0 + tagH, x0, y0, r); g.arcTo(x0, y0, x0 + w, y0, r); g.closePath(); g.fill();
+      g.lineWidth = Math.max(3, tagH * 0.05); g.strokeStyle = color; g.stroke();
+      g.font = `bold ${fs}px "Malgun Gothic",sans-serif`; g.fillStyle = '#fff'; g.fillText(text, cx, y0 + tagH / 2 + 2);
+    }
+    const tex = new THREE.CanvasTexture(c); tex.minFilter = THREE.LinearFilter;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+    const k = size / (2 * R);
+    sp.scale.set(W * k, H * k, 1); sp.center.set(0.5, 1 - R / H);   // 기준점 = 아이콘 원의 가운데 (예전과 같은 자리)
+    sp.renderOrder = 10;
     return sp;
   }
 
@@ -654,7 +690,8 @@ const View3D = (() => {
         ? [{ type: 'circle', zone: 'red', cx: eq.xc, cy: eq.yc, radius: eq.getMaxRadius() }]
         : eq.getZoneShapes();
       if (S.layers.zones !== false) shapes.forEach((sh, j) => {
-        const mat = new THREE.MeshBasicMaterial({ color: sh.zone === 'red' ? 0xef4444 : 0xf97316, transparent: true, opacity: sh.zone === 'red' ? 0.6 : 0.5, depthWrite: false, side: THREE.DoubleSide });
+        const zs = zoneStyle(sh.zone);
+        const mat = new THREE.MeshBasicMaterial({ color: zs.hex, transparent: true, opacity: zs.opacity, depthWrite: false, side: THREE.DoubleSide });
         add(flatMesh(zoneShapePolygon(sh, 48), ox, oy, mat, 0.8 + k * 0.03 + j * 0.01));
       });
       const model = equipmentModel(m.type, (EQUIPMENT_TYPES[m.type] || {}).color || '#f59e0b');
