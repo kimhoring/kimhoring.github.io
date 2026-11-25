@@ -1,2 +1,4 @@
 # SOC-MAP 화면 패치(앱이 SHA-256 으로 확인)는 줄 끝을 바꾸지 않는다
 projects/soc-map/app/download/shell/** -text
+# SOC-MAP PC 배포판 자동 업데이트(서명 + 파일마다 SHA-256 확인)도 줄 끝을 바꾸지 않는다
+projects/soc-map/app/pc/** -text
