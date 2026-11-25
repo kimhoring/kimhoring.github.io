@@ -1,0 +1,217 @@
+"""DXF(CAD 원본) 배치도 읽기 (v14.7) — ezdxf(MIT) + shapely(BSD)
+
+학습한 AI 가 도면 그림에서 건물을 「추측」하는 대신, CAD 파일에 들어 있는 도형을 그대로 읽는다.
+  - 단위: 헤더 $INSUNITS(4 = mm, 6 = m …) → m. 0(단위 없음)이면 한국 건축 CAD 관례인 mm 로 가정하고 알림.
+    → DXF 는 1/N 축척 계산이 필요 없다 (모델 공간이 실제 크기).
+  - 건물 후보: 닫힌 폴리선·해치 경계·(블록 안 도형) 중 면적 15 m² ~ 3만 m². 레이어 이름으로 순위
+    (건물·BLDG·WALL·외곽 가점, 도로·주차·조경·치수·대지경계 감점 — KS F 1542 레이어 규칙은 현장마다 달라 이름은 참고만).
+    겹치는 것(같은 외곽의 폴리선 + 해치)과 큰 건물 안의 작은 도형(실·중정)은 하나로.
+  - 「101동」 같은 글자가 건물 안에 있으면 이름으로.
+  - 좌표가 한국 TM 범위(EPSG:5185~5188 / 5179)이면 알려 줌 → 앱이 현장 위치로 원점을 골라 자동 정합.
+DWG 는 읽지 않는다 (CAD 에서 DXF 로 저장하거나 무료 ODA File Converter 로 변환).
+"""
+import io
+import math
+import re
+
+import numpy as np
+
+UNIT_NAMES = {0: "단위 없음", 1: "inch", 2: "feet", 3: "mile", 4: "mm", 5: "cm", 6: "m", 7: "km", 14: "dm"}
+POS = re.compile(r"(건물|건축|BLDG|BUILD|외곽|외벽|WALL|벽체|아파트|APT|주동|동\s*외곽|^A-?B)", re.I)
+NEG = re.compile(r"(대지|경계|^PL$|P\.?L|도로|ROAD|주차|PARK|조경|LAND|TREE|수목|식재|DIM|치수|TEXT|문자|GRASS|잔디|^CL$|중심|GRID|그리드|"
+                 r"TITLE|표제|BORDER|도곽|FRAME|지적|등고|CONT|SYMBOL|기호|HATCH-?PAT|포장|PAVE|보도|SIDEWALK|담장|FENCE)", re.I)
+NAME_RE = re.compile(r"^\s*(?:[A-Z가-힣]{0,6}\s*)?\d{1,4}\s*-?\s*\d{0,2}\s*동\s*$|^\s*(?:주동|부속동|관리동|상가|근린생활시설|경로당|어린이집|커뮤니티|주민공동시설)\s*\d*\s*$")
+MIN_AREA, MAX_AREA = 15.0, 30000.0
+MAX_LINE_VERTS = 400_000
+
+
+def _unit_factor(code):
+    from ezdxf import units
+    return units.conversion_factor(code, units.M)
+
+
+def _walk(entities, parent_layer=None, depth=0):
+    """블록 참조(INSERT)를 풀어 모든 도형을 돈다. 블록 안 0 레이어 도형은 블록을 놓은 레이어를 따름"""
+    for e in entities:
+        layer = e.dxf.get("layer", "0")
+        if layer == "0" and parent_layer:
+            layer = parent_layer
+        if e.dxftype() == "INSERT":
+            if depth < 4:
+                try:
+                    yield from _walk(e.virtual_entities(), layer, depth + 1)
+                except Exception:
+                    continue
+            continue
+        yield e, layer
+
+
+def _paths(e):
+    """도형 → (닫힘 여부, 경로들). 곡선은 잘게 펴서"""
+    from ezdxf import path
+    t = e.dxftype()
+    try:
+        if t == "HATCH":
+            return True, list(path.from_hatch(e))
+        if t in ("LWPOLYLINE", "POLYLINE", "LINE", "ARC", "CIRCLE", "ELLIPSE", "SPLINE", "SOLID", "TRACE", "3DFACE"):
+            if t == "POLYLINE" and (e.is_poly_face_mesh or e.is_polygon_mesh):
+                return False, []
+            p = path.make_path(e)
+            closed = (t in ("CIRCLE", "SOLID", "TRACE", "3DFACE")) or bool(getattr(e, "closed", False)) or \
+                (t == "POLYLINE" and e.is_closed) or (len(p) > 0 and p.start.isclose(p.end, abs_tol=1e-6) and t != "LINE")
+            return closed, [p]
+    except Exception:
+        return False, []
+    return False, []
+
+
+def _flat(p, tol):
+    try:
+        return np.array([(v.x, v.y) for v in p.flattening(distance=tol)], float)
+    except Exception:
+        return np.zeros((0, 2))
+
+
+def read_dxf(data: bytes, layers=None):
+    """layers: 건물로 쓸 레이어 이름 목록 (None 이면 자동으로 고름)"""
+    from ezdxf import recover
+    from shapely.geometry import Point, Polygon
+    from shapely.strtree import STRtree
+    from shapely.validation import make_valid
+
+    if data[:4] == b"AC10" and b"SECTION" not in data[:2000]:
+        raise ValueError("DWG 파일입니다. CAD 에서 「다른 이름으로 저장 → DXF」로 바꾸거나 무료 ODA File Converter 로 변환해 올려 주세요.")
+    try:
+        doc, auditor = recover.read(io.BytesIO(data))
+    except Exception as e:
+        raise ValueError(f"DXF 파일을 읽을 수 없습니다: {e}")
+    code = int(doc.header.get("$INSUNITS", 0) or 0)
+    assumed = code == 0 or code not in UNIT_NAMES
+    f = _unit_factor(4 if assumed else code)
+    tol = 0.02 / f                                  # 곡선 펴기 허용 오차 2 cm (도면 단위로)
+
+    lines, texts, cands, layer_stat = [], [], [], {}
+    nverts = 0
+    for e, layer in _walk(doc.modelspace()):
+        t = e.dxftype()
+        st = layer_stat.setdefault(layer, {"name": layer, "entities": 0, "closed": 0, "buildings": 0})
+        st["entities"] += 1
+        if t in ("TEXT", "MTEXT", "ATTRIB"):
+            try:
+                s = e.plain_text() if t == "MTEXT" else e.dxf.text
+                ins = e.dxf.insert
+                if s and len(texts) < 5000:
+                    texts.append({"text": s.strip()[:60], "x": ins.x * f, "y": ins.y * f, "layer": layer})
+            except Exception:
+                pass
+            continue
+        closed, paths = _paths(e)
+        for p in paths:
+            pts = _flat(p, tol)
+            if len(pts) < 2:
+                continue
+            pts *= f
+            if nverts < MAX_LINE_VERTS:
+                lines.append(np.round(pts, 3).ravel().tolist()); nverts += len(pts)
+            if closed and len(pts) >= 3:
+                st["closed"] += 1
+                try:
+                    poly = make_valid(Polygon(pts))
+                except Exception:
+                    continue
+                if poly.geom_type != "Polygon":
+                    parts = [g for g in getattr(poly, "geoms", []) if g.geom_type == "Polygon"]
+                    if not parts:
+                        continue
+                    poly = max(parts, key=lambda g: g.area)
+                if MIN_AREA <= poly.area <= MAX_AREA:
+                    cands.append({"poly": poly, "layer": layer, "hatch": t == "HATCH"})
+
+    if not lines:
+        raise ValueError("DXF 모델 공간에 그릴 도형이 없습니다.")
+
+    # 레이어 점수 → 기본 선택: 이름이 건물다운 레이어, 없으면 감점 아닌 레이어 중 직사각형에 가까운 닫힌 도형이 많은 레이어
+    for c in cands:
+        c["rect"] = c["poly"].area / max(1e-9, c["poly"].minimum_rotated_rectangle.area)
+    by_layer = {}
+    for c in cands:
+        by_layer.setdefault(c["layer"], []).append(c)
+    for name, cs in by_layer.items():
+        st = layer_stat[name]
+        st["pos"], st["neg"] = bool(POS.search(name)), bool(NEG.search(name))
+        st["candidates"] = len(cs)
+        st["rect"] = round(float(np.median([c["rect"] for c in cs])), 2)
+    chosen = [n for n in by_layer if layer_stat[n]["pos"] and not layer_stat[n]["neg"]]
+    how = "layer-name"
+    if layers is not None:                                            # 사용자가 레이어를 직접 고름
+        chosen, how = [n for n in layers if n in by_layer], "user"
+    elif not chosen:
+        ok = [n for n in by_layer if not layer_stat[n]["neg"] and layer_stat[n]["rect"] >= 0.75]
+        if ok:
+            best = max(ok, key=lambda n: len(by_layer[n]))
+            chosen, how = [best], "shape"
+        else:
+            how = "none"
+
+    def pick(layers):
+        cs = [c for c in cands if c["layer"] in layers]
+        cs.sort(key=lambda c: (-c["poly"].area, c["hatch"]))          # 큰 것 먼저, 같은 외곽이면 폴리선 우선
+        keep = []
+        tree_polys = []
+        for c in cs:
+            p = c["poly"]
+            dup = False
+            for q in tree_polys:
+                if not p.intersects(q):
+                    continue
+                inter = p.intersection(q).area
+                if inter / p.area > 0.9:                              # 같은 외곽(폴리선+해치) 또는 큰 건물 안의 실·중정
+                    dup = True
+                    break
+            if not dup:
+                keep.append(c); tree_polys.append(p)
+        return keep
+
+    picked = pick(set(chosen))
+    # 동 이름: 건물 안(또는 2 m 이내)에 있는 「101동」 같은 글자
+    names = [t for t in texts if NAME_RE.match(t["text"])]
+    if names and picked:
+        tree = STRtree([c["poly"] for c in picked])
+        for t in names:
+            pt = Point(t["x"], t["y"])
+            for i in tree.query(pt.buffer(2.0)):
+                c = picked[int(i)]
+                if c["poly"].buffer(2.0).contains(pt) and "name" not in c:
+                    c["name"] = re.sub(r"\s+", "", t["text"]); break
+    for name in by_layer:
+        layer_stat[name]["buildings"] = sum(1 for c in picked if c["layer"] == name)
+
+    def out(c):
+        x, y = c["poly"].exterior.coords.xy
+        pts = [[round(a, 3), round(b, 3)] for a, b in zip(list(x)[:-1], list(y)[:-1])]
+        o = {"layer": c["layer"], "pts": pts, "area": round(c["poly"].area, 1)}
+        if c.get("name"):
+            o["name"] = c["name"]
+        return o
+
+    allv = np.concatenate([np.array(l, float).reshape(-1, 2) for l in lines])
+    lo, hi = np.percentile(allv, 0.5, axis=0), np.percentile(allv, 99.5, axis=0)   # 멀리 떨어진 잡도형에 범위가 끌려가지 않게
+    pad = (hi - lo) * 0.04 + 1.0
+    lo, hi = lo - pad, hi + pad
+    cx, cy = float((lo[0] + hi[0]) / 2), float((lo[1] + hi[1]) / 2)
+    tm = None
+    if 100_000 <= cx <= 450_000 and 100_000 <= cy <= 800_000:
+        tm = {"kind": "tm", "codes": [5186, 5185, 5187, 5188]}       # 원점(중부·서부·동부·동해)은 현장 위치로 고름
+    elif 800_000 <= cx <= 1_400_000 and 1_300_000 <= cy <= 2_300_000:
+        tm = {"kind": "utmk", "codes": [5179]}
+
+    return {
+        "units": UNIT_NAMES.get(4 if assumed else code, str(code)), "unit_code": code, "units_assumed": assumed,
+        "factor": f, "bbox": [round(float(lo[0]), 3), round(float(lo[1]), 3), round(float(hi[0]), 3), round(float(hi[1]), 3)],
+        "lines": lines, "line_vertices": int(nverts), "truncated": nverts >= MAX_LINE_VERTS,
+        "texts": [t for t in texts if NAME_RE.match(t["text"])][:500],
+        "layers": sorted(layer_stat.values(), key=lambda s: (-s.get("buildings", 0), -s.get("candidates", 0), s["name"])),
+        "chosen_layers": chosen, "choose_how": how,
+        "buildings": [out(c) for c in picked],
+        "tm": tm, "dxf_version": doc.dxfversion, "audit_errors": len(auditor.errors),
+    }

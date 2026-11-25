@@ -1,0 +1,454 @@
+/* ═══════════════════════════════════════════════════════════════
+ *  SOC-MAP v13 — 사이드바 · 인스펙터 · 경로 카드 · 토스트 · 모달
+ * ═══════════════════════════════════════════════════════════════ */
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (n, d = 0) => Number(n).toLocaleString('ko-KR', { maximumFractionDigits: d, minimumFractionDigits: d });
+const fmtLen = (m) => (m >= 1000 ? `${fmt(m / 1000, 2)} km` : `${fmt(m, m < 10 ? 1 : 0)} m`);   // 모든 좌표가 m 단위
+
+const MODES = [
+  { id: 'select',   group: 'draw',  icon: '🖐️', label: '선택 · 이동', short: '선택', key: '1', desc: '항목 선택, 끌어서 이동', hint: '장비·위험물·건물을 클릭해 선택하고 끌어서 옮깁니다. 빈 곳을 드래그하면 지도가 이동합니다.' },
+  { id: 'building', group: 'draw',  icon: '🏢', label: '건물',        key: '6', desc: '외곽을 그려 건물 지정', hint: '드래그로 건물 외곽을 그립니다. AI 인식 없이 건물을 지정할 때 씁니다.' },
+  { id: 'aipick',   group: 'draw',  icon: '✨', label: 'AI 건물 따기', desc: '감싸 끌면 외곽선 자동', hint: '건물을 사각형으로 감싸듯 끌면 AI가 외곽선을 땁니다(가장 정확). 건물 안을 한 번 눌러도 됩니다. 도면이 없거나 「배치도」를 끄면 위성 지도에서 땁니다. 틀리면 Ctrl+Z.' },
+  { id: 'site',     group: 'draw',  icon: '🏗️', label: '현장 경계',   short: '현장', key: '2', desc: '공사 현장 = 보행 구역', status: true, hint: '드래그로 공사 현장의 테두리를 그립니다. 이 안이 걸어 다닐 수 있는 구역(안전 경로)이고, 위험도 계산·주변 건물·근로자 위치 추적도 이 안(+30 m)에서만 합니다.' },
+  { id: 'fence',    group: 'draw',  icon: '🚧', label: '울타리',      short: '울타리', key: '4', desc: '통행 차단선', status: true, hint: '드래그해 통행할 수 없는 안전 울타리를 설치합니다.' },
+  { id: 'zone',     group: 'draw',  icon: '🌧️', label: '환경 구역',  key: '7', desc: '연약지반·고압선·침수', hint: '구역 종류를 고른 뒤 드래그로 영역을 그립니다.' },
+  { id: 'route',    group: 'route', icon: '🧭', label: '안전 경로 탐색', short: '경로 탐색', key: '5', hint: '출발지 → 도착지를 차례로 클릭하세요. 핀을 끌면 위치를 바꿔 다시 찾습니다.' },
+  { id: 'align',    group: 'plan',  icon: '📍', label: '도면 정합',  key: '9', hint: '도면 위 지점을 클릭하고 실제 위치(현장 측량점·좌표·위성 지도)를 지정하세요. 기준점 3~4개 + 정합에 쓰지 않는 검증점 2개를 권장합니다.' },
+  { id: 'measure',  group: 'map',   icon: '📏', label: '거리 측정',  key: '0', hint: '클릭해 점을 이으면 거리를, 첫 점을 다시 누르면 면적을 잽니다. Esc: 초기화' },
+  { id: '3d',       group: 'map',   icon: '🧊', label: '3D 보기',    key: '8', hint: '드래그 회전 · 우클릭 드래그 이동 · 휠 확대/축소', cls: 'mode-3d' },
+];
+
+/** 도구가 속한 작업 화면 */
+const MODE_WS = { building: 'layout', aipick: 'layout', site: 'layout', fence: 'layout', zone: 'layout', route: 'route', align: 'plan' };
+const WORKSPACES = ['layout', 'route', 'monitor', 'plan', 'site'];
+
+function setWorkspace(ws, { fromMode = false, toggle = false } = {}) {
+  const app = $('app');
+  if (toggle && S.ws === ws && !app.classList.contains('collapsed')) { app.classList.add('collapsed'); resizeCanvas(); return; }
+  S.ws = ws;
+  try { localStorage.setItem('socmap.v13.ws', ws); } catch (e) { /* noop */ }
+  app.classList.remove('collapsed');
+  document.querySelectorAll('.rail-btn').forEach(b => b.classList.toggle('active', b.dataset.ws === ws));
+  document.querySelectorAll('.ws').forEach(sec => { sec.hidden = sec.dataset.ws !== ws; });
+  if (!fromMode) {
+    // 화면에 맞는 도구로 전환 (경로 화면 = 경로 탐색 모드)
+    if (ws === 'route' && S.mode !== 'route') setMode('route');
+    else if (ws !== 'route' && S.mode === 'route') setMode('select');
+    else if (ws !== 'plan' && S.mode === 'align') setMode('select');
+    else if (ws !== 'layout' && MODE_WS[S.mode] === 'layout') setMode('select');
+  }
+  renderModeUI();
+  resizeCanvas();   // 패널이 열리고 닫히면 지도 크기가 바뀐다 (화면 중심 유지)
+}
+
+const HAZARD_ITEMS = [
+  { type: 'barricade',    icon: '🚧', label: '통제구역',    defaultRadius: 3, riskLevel: 5 },
+  { type: 'high_voltage', icon: '⚡', label: '고전압/전기', defaultRadius: 2, riskLevel: 5 },
+  { type: 'hole',         icon: '🕳️', label: '개구부/낙하', defaultRadius: 2.5, riskLevel: 4 },
+  { type: 'warning',      icon: '⚠️', label: '일반 위험',   defaultRadius: 3, riskLevel: 2 },
+];
+
+// ── 토스트 ──
+const TOAST_MAX = 3;   // 지도를 가리지 않게 — 한 번에 3개까지, 같은 글은 하나로
+function toast(msg, type = 'info', opts = {}) {
+  const box = $('toasts');
+  for (const t of box.querySelectorAll('.toast')) if (t.dataset.msg === String(msg)) t.remove();
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.dataset.msg = String(msg);
+  el.innerHTML = `<span>${esc(msg)}</span><button class="toast-x" title="닫기" aria-label="닫기">✕</button>`;
+  el.querySelector('.toast-x').onclick = () => el.remove();
+  if (opts.action) {
+    const b = document.createElement('button');
+    b.className = 'btn btn-xs'; b.textContent = opts.action.label;
+    b.onclick = () => { el.remove(); opts.action.fn(); };
+    el.insertBefore(b, el.querySelector('.toast-x'));
+  }
+  box.appendChild(el);
+  const all = box.querySelectorAll('.toast');
+  for (let i = 0; i < all.length - TOAST_MAX; i++) all[i].remove();
+  setTimeout(() => el.remove(), opts.duration || (type === 'error' ? 7000 : 4000));
+}
+
+function openModal(id) { $(id).hidden = false; }
+function closeModal(id) { $(id).hidden = true; }
+document.querySelectorAll('.modal').forEach(m => {
+  m.addEventListener('click', e => { if (e.target === m || e.target.hasAttribute('data-close')) m.hidden = true; });
+});
+
+function setLoading(text) {
+  $('loading').hidden = !text;
+  if (text) $('loadingText').textContent = text;
+}
+
+// ═══════════════════════════════════════════════
+//  사이드바
+// ═══════════════════════════════════════════════
+
+function buildModeGrid() {
+  $('modeGrid').innerHTML = MODES.filter(m => m.group === 'draw').map(m =>
+    `<button class="tool tool-${m.id}" data-mode="${m.id}" title="${esc(m.hint)}">
+       <span class="ti">${m.icon}</span>
+       <span class="tt"><b>${m.label}</b><small>${m.desc}</small></span>
+       ${m.status ? `<span class="chip" data-status="${m.id}"></span>` : ''}
+       ${m.key ? `<kbd>${m.key}</kbd>` : ''}</button>`).join('');
+  // 지도 하단 빠른 도구: 선택 + 동선 도구 + 경로 탐색
+  const dockModes = ['select', 'site', 'fence'].map(id => MODES.find(m => m.id === id));
+  $('dock').innerHTML = dockModes.map(m =>
+    `<button class="dock-btn" data-mode="${m.id}" title="${esc(m.label)} (${m.key})"><span class="ico">${m.icon}</span><span class="lbl">${m.short}</span></button>`).join('')
+    + '<span class="dock-sep"></span><button class="dock-route" data-mode="route" title="안전 경로 탐색 (5)"><span class="ico">🧭</span><span class="lbl">경로 탐색</span></button>';
+}
+
+/** 도구 버튼의 상태 표시(개수, 지정 여부, 경로 결과) */
+function renderToolStatus() {
+  const chip = (id, text, on) => document.querySelectorAll(`[data-status="${id}"]`).forEach(el => { el.textContent = text; el.classList.toggle('on', on); });
+  chip('site', hasSiteBoundary() ? '지정됨' : '없음', hasSiteBoundary());
+  chip('fence', S.fences.length ? `${S.fences.length}개` : '없음', S.fences.length > 0);
+  const R = S.route, sub = $('routeMainSub');
+  if (R && R.result) {
+    const g = riskGrade(R.result.metrics.maxRisk);
+    sub.innerHTML = `최근 결과 <b>${fmtLen(R.result.metrics.length)}</b> · <span style="color:${g.color === '#10b981' ? '#a7f3d0' : g.color}">${g.label}</span>`;
+  } else if (R && R.points.length === 1) sub.textContent = '② 도착지를 클릭하세요';
+  else sub.textContent = S.mode === 'route' ? '① 출발지를 클릭하세요' : '출발지 → 도착지를 클릭';
+
+  const guide = $('routeGuide');
+  if (S.mode === 'route' && (!R || R.points.length < 2 || !R.result)) {
+    const step = R && R.points.length === 1 ? 2 : 1;
+    guide.innerHTML = `<span class="step ${step === 1 ? 'now' : 'done'}">① 출발지 클릭</span><span class="arrow">→</span><span class="step ${step === 2 ? 'now' : ''}">② 도착지 클릭</span>`;
+    guide.hidden = false;
+  } else guide.hidden = true;
+}
+
+function renderModeUI() {
+  document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === S.mode));
+  renderToolStatus();
+  const slotWs = MODE_WS[S.mode] || S.ws || 'layout';
+  const slot = document.querySelector(`.mode-slot[data-slot="${slotWs}"]`) || document.querySelector('.mode-slot[data-slot="layout"]');
+  if ($('modeOptions').parentElement !== slot) slot.appendChild($('modeOptions'));
+  const mode = MODES.find(m => m.id === S.mode);
+  $('hintText').textContent = mode ? mode.hint : '';
+  const box = $('modeOptions');
+  let h = '';
+  const st = S.settings;
+  switch (S.mode) {
+    case 'select':
+      h = S.ws === 'layout' ? `<div class="kpis"><div><b>${S.contours.length}</b><span>건물</span></div><div><b>${S.markers.filter(m => m.isEquipment).length}</b><span>장비</span></div><div><b>${S.markers.filter(m => !m.isEquipment).length}</b><span>위험물</span></div><div><b>${S.siteEnvironment.envZones.length}</b><span>환경 구역</span></div></div>` : '';
+      break;
+    case 'building':
+      h = `<div class="hint">${mode.hint}</div>
+           <div class="row"><span class="label-sm">건물 ${S.contours.length}개</span>${S.contours.length ? '<button class="btn btn-xs" data-act="clearBuildings">모두 지우기</button>' : ''}</div>`;
+      break;
+    case 'aipick':
+      h = `<div class="hint">${mode.hint}</div>
+           ${S.bgImageSrc && S.layers.bg !== false ? '<div class="hint">📄 지금은 <b>도면</b>에서 땁니다 — 보기 막대의 「배치도」를 끄면 위성 지도에서 땁니다.</div>'
+             : getFrame() ? `<div class="hint">🛰️ 지금은 <b>위성 지도</b>에서 땁니다 (도면 정합 없이 바로 현장 좌표)${S.bgImageSrc ? ' — 「배치도」를 켜면 도면에서' : ''}. <b>사각형으로 감싸기</b>를 권합니다(실제 건물 10동 시험: 겹침 0.82, 한 번 누르기 0.66). 영상 촬영 뒤 새로 지은 건물·가설물은 잡히지 않을 수 있습니다.</div>`
+             : '<div class="hint warn">⚠️ 배치도를 불러오거나 현장 위치(📍)를 정하세요 — 위성 지도에서 따려면 현장 위치가 필요합니다.</div>'}
+           ${!S.backendOnline ? '<div class="hint warn">⚠️ AI 서버가 꺼져 있습니다 (노트북 실행 파일로 켜세요).</div>' : ''}
+           <div class="hint">학습 없이 쓰는 범용 분할 모델(MobileSAM)이라 처음 보는 도면 양식·위성 영상에도 씁니다. 한 동에 약 1초(첫 사용은 모델 준비로 더 걸림).</div>
+           <div class="hint">딴 외곽선이 기존 건물과 <b>겹치거나 1 m 안에 맞닿으면</b> 한 건물로 합칩니다 (지붕 층·난간으로 나뉜 조각).</div>
+           <div class="row"><span class="label-sm">건물 ${S.contours.length}개</span>${S.contours.length > 1 ? '<button class="btn btn-xs" data-act="mergeTouching" title="이미 그려진 건물 가운데 겹치거나 맞닿은 조각을 모두 한 건물로">🔗 붙은 조각 모두 합치기</button>' : ''}${S.contours.length ? '<button class="btn btn-xs" data-act="clearBuildings">모두 지우기</button>' : ''}</div>`;
+      break;
+    case 'fence': {
+      h = `<div class="row label-sm"><span>울타리 두께</span><span class="value" id="thickLabel">${st.fenceWidth} m</span></div>
+           <input type="range" min="0.1" max="2" step="0.1" value="${st.fenceWidth}" data-setting="fenceWidth">
+           <div class="hint warn">⚠️ 울타리 구간은 경로 탐색 시 통과할 수 없습니다.</div>
+           <div class="row"><span class="label-sm">${S.fences.length}개 그려짐</span>${S.fences.length ? '<button class="btn btn-xs" data-act="clearFences">모두 지우기</button>' : ''}</div>`;
+      break;
+    }
+    case 'site': {
+      const E = docExtent();
+      h = `<div class="hint">${mode.hint}</div>
+           <div class="row"><span class="label-sm">${hasSiteBoundary() ? `✅ 현장 경계 지정됨 · 계산 범위 ${fmt(E.w, 0)} × ${fmt(E.h, 0)} m` : '⚠️ 지정 안 됨 — 그린 것 전체(불러온 주변 건물 포함)가 계산 범위'}</span>
+           ${hasSiteBoundary() ? '<button class="btn btn-xs" data-act="clearSite">해제</button>' : ''}</div>`;
+      break;
+    }
+    case 'zone':
+      h = `<div class="zone-picker">${Object.entries(ENV_ZONE_TYPES).map(([k, z]) =>
+        `<button class="zone-opt ${S.envZoneType === k ? 'active' : ''}" data-zone="${k}" style="--zc:${z.color}">${hzIconHTML(hzZoneSign(k), z.icon)} ${z.label.split(' ')[0]}<small>보행 ${z.pedestrian}점${k === 'floodedArea' || k === 'powerLine' ? ' · 장비 통제' : ''}</small></button>`).join('')}</div>`;
+      break;
+    case 'route': {
+      const method = hasSiteBoundary() ? '현장 경계 안에서' : '현장 전체에서 (건물·울타리 회피)';
+      h = `<div class="field-row"><span>탐색 범위</span><b>${method}</b></div>
+           <div class="hint">현장 경계는 「배치」 화면의 🏗️ 현장 도구로 그립니다 (경계 안 = 걸어 다닐 수 있는 구역).</div>`;
+      break;
+    }
+    case 'align':
+      h = alignModeOptions();
+      break;
+    case 'measure':
+      h = `<div class="hint">${mode.hint}</div>${S.measure && S.measure.points.length >= 4 ? `<div class="alert info">${measureSummary()}</div><button class="btn btn-xs" data-act="clearMeasure">측정 초기화</button>` : ''}`;
+      break;
+    case '3d':
+      h = View3D.available() ? `<div class="hint">${mode.hint}</div>` : '<div class="alert warn">3D 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인하세요.</div>';
+      break;
+  }
+  box.innerHTML = h;
+  box.hidden = !h;
+}
+
+function buildItemGrids() {
+  $('equipmentGrid').innerHTML = Object.entries(EQUIPMENT_TYPES).map(([k, v]) =>
+    `<div class="drag-item eq" draggable="true" data-item='${esc(JSON.stringify({ type: k, isEquipment: true }))}' title="누른 뒤 지도에서 놓을 곳을 누르세요 (끌어다 놓아도 됨)">
+       <span class="ico">${v.icon}</span><span class="lbl">${v.label}</span></div>`).join('');
+  const items = [...HAZARD_ITEMS, ...S.customItems];
+  $('hazardGrid').innerHTML = items.map(it =>
+    `<div class="drag-item" draggable="true" data-item='${esc(JSON.stringify(it))}' title="누른 뒤 지도에서 놓을 곳을 누르세요 (끌어다 놓아도 됨)">
+       ${it.type.startsWith('custom-') ? `<button class="icon-btn del" data-del-custom="${esc(it.type)}" title="삭제">✕</button>` : ''}
+       <span class="ico">${hzIconHTML(hzMarkerSign(it.type), esc(it.icon || '⚠️'))}</span><span class="lbl">${esc(it.label)}</span><span class="sub lvdots" title="위험 등급 ${it.riskLevel} / 5">${'●'.repeat(it.riskLevel || 3)}${'○'.repeat(5 - (it.riskLevel || 3))}</span></div>`).join('');
+}
+
+function renderEnvZoneList() {
+  const zones = S.siteEnvironment.envZones;
+  $('envZoneListWrap').hidden = !zones.length;
+  $('envZoneList').innerHTML = zones.map(z => {
+    const info = ENV_ZONE_TYPES[z.type] || { label: z.type, icon: '⚠️', color: '#fff' };
+    const kv = z.type === 'powerLine'
+      ? `<label class="label-sm" title="장비 이격거리 ${powerLineClearance(z.kV)} m (안전보건규칙 제322조)"><input type="number" class="input input-num" min="1" max="765" step="0.1" value="${+z.kV > 0 ? +z.kV : DEFAULT_POWERLINE_KV}" data-zone-kv="${esc(z.id)}"> kV · 이격 ${powerLineClearance(z.kV)} m</label>` : '';
+    return `<div class="list-item" style="--c:${info.color}"><span>${hzIconHTML(hzZoneSign(z.type), info.icon)} ${info.label}</span>${kv}<button class="icon-btn" data-del-zone="${esc(z.id)}" title="삭제">✕</button></div>`;
+  }).join('');
+}
+
+function renderEnvControls() {
+  const w = S.siteEnvironment.windSpeed;
+  // 현장에 놓인 장비 중 이 풍속에서 작업 중지 대상 수 (장비별 허용 풍속 반영)
+  const stopped = S.markers.filter(m => m.isEquipment).map(m => createEquipment(m, S.siteEnvironment))
+    .filter(eq => eq && eq.windLimit() != null && w > eq.windLimit()).length;
+  $('windSlider').value = w;
+  $('windLabel').textContent = `순간 ${w} m/s${stopped ? ` ⛔ 장비 ${stopped}대 중지` : w > 10 ? ' ⚠️ 양중 주의' : ''}`;
+  $('windLabel').style.color = stopped ? 'var(--danger)' : w > 10 ? 'var(--warn)' : '';
+  $('safetySlider').value = S.settings.safetyLevel;
+  $('safetyLabel').textContent = S.settings.safetyLevel;
+  $('basemapSelect').value = S.layers.basemap;
+  $('planOpacity').value = S.plan.opacity ?? 0.85;
+  if (typeof syncQuickLayers === 'function') syncQuickLayers();
+  $('bldgHeightSlider').value = S.settings.buildingHeight;
+  $('bldgHeightLabel').textContent = S.settings.buildingHeight;
+  $('showUnderground').checked = S.settings.showUnderground;
+}
+
+// ═══════════════════════════════════════════════
+//  인스펙터 (선택 항목 편집)
+// ═══════════════════════════════════════════════
+
+function selectedMarker() {
+  const sel = S.selection;
+  return sel && sel.kind === 'marker' ? S.markers.find(m => m.id === sel.id) : null;
+}
+
+function renderInspector() {
+  const el = $('inspector');
+  const sel = S.selection;
+  if (!sel || (S.mode === '3d' && sel.kind !== 'building')) { el.hidden = true; return; }   // 3D 에서는 건물만 (누르면 선택)
+  if (sel.kind === 'marker') {
+    const m = selectedMarker();
+    if (!m) { S.selection = null; el.hidden = true; return; }
+    el.innerHTML = m.isEquipment ? equipmentInspector(m) : hazardInspector(m);
+  } else if (sel.kind === 'building') {
+    if (sel.idx >= S.contours.length) { S.selection = null; el.hidden = true; return; }
+    el.innerHTML = buildingInspector(sel.idx);
+  }
+  el.hidden = false;
+}
+
+function inspectorHeader(title) {
+  return `<div class="row" style="margin-bottom:10px"><h3>${title}</h3><button class="btn btn-ghost btn-xs" data-act="deselect" title="닫기 (Esc)">✕</button></div>`;
+}
+
+function equipmentInspector(m) {
+  const eq = createEquipment(m, S.siteEnvironment);
+  const hd = Math.round(rad2deg(normalizeAngle(m.heading || 0)));
+  let h = inspectorHeader(`${m.icon} ${esc(m.label)}`);
+  h += `<div class="field"><div class="row"><span>🧭 방향 (heading)</span><span class="value" id="insHeading">${hd}°</span></div>
+        <input type="range" min="0" max="355" step="5" value="${hd}" data-eq="heading"></div>`;
+  h += '<h4>장비 제원</h4>';
+  for (const [k, v] of Object.entries(m.equipmentParams || {})) {
+    const info = PARAM_LABELS[k] || { label: k, unit: '', min: 0, max: 200 };
+    const max = k === 'd_trolley' ? (m.equipmentParams.L_jib ?? info.max)
+      : k === 'v_wind' && m.type === 'towerCrane' ? WIND_LIMITS.towerCrane : info.max;   // 법정 상한
+
+    h += `<div class="field"><div class="row"><span>${info.label}</span><span class="value" data-param-label="${k}">${v} ${info.unit}</span></div>
+          <input type="range" min="${info.min}" max="${max}" step="${info.step || 1}" value="${Math.min(v, max)}" data-param="${k}"></div>`;
+  }
+  if (m.type === 'towerCrane') {
+    h += `<div class="row field"><span>🔧 설치·해체·점검 중 <span class="label-sm">(순간풍속 ${TOWER_ERECTION_WIND} m/s 초과 중지)</span></span>
+          <label class="switch"><input type="checkbox" data-eqflag="erecting" ${m.erecting ? 'checked' : ''}><span class="sl"></span></label></div>`;
+  }
+  const mits = Object.entries(MITIGATIONS).filter(([, info]) => info.appliesTo.includes(m.type));
+  if (mits.length) {
+    h += '<h4>통제 완화 (H_mitigation)</h4>';
+    for (const [k, info] of mits) {
+      h += `<div class="row field"><span>${info.icon} ${info.label} <span class="label-sm">(−${info.value}${info.required ? ' · 법정 의무' : ''})</span></span>
+            <label class="switch"><input type="checkbox" data-mit="${k}" ${m.mitigation && m.mitigation[k] ? 'checked' : ''}><span class="sl"></span></label></div>`;
+    }
+  }
+  h += opsSection(m);
+  h += `<h4>위험도 산출</h4><div id="insFormula">${equipmentFormula(eq)}</div>`;
+  h += `<div class="row-gap" style="margin-top:14px"><button class="btn flex1" data-act="duplicate">복제 <kbd>Ctrl+D</kbd></button><button class="btn btn-danger flex1" data-act="deleteSel">삭제 <kbd>Del</kbd></button></div>`;
+  return h;
+}
+
+function equipmentFormula(eq) {
+  if (!eq) return '';
+  const fc = eq.fullControlReason();
+  const wf = eq.w_freq, sp = eq.sPenalty, hm = eq.hMitigation;
+  const zoneFlags = Object.keys(eq.flags).map(k => ENV_ZONE_TYPES[k] ? hzIconHTML(hzZoneSign(k), esc(ENV_ZONE_TYPES[k].icon)) + esc(ENV_ZONE_TYPES[k].label) : esc(k)).join(', ');   // 이미 esc 됨
+  const chip = (v) => { const g = riskGrade(v); return `<span class="badge" style="background:${g.color}22;color:${g.color}">${fmt(v, 1)}</span>`; };
+  const missing = Object.entries(MITIGATIONS).filter(([k, info]) => info.required && info.appliesTo.includes(eq.equipmentType) && !eq.mitigation[k]);
+  return `${fc ? `<div class="alert danger" style="margin-bottom:8px">⛔ <b>전면 통제</b> — ${esc(fc)}<br>영향 반경(${fmt(eq.getMaxRadius())} m) 전체가 100점</div>` : ''}
+  ${missing.map(([, info]) => `<div class="alert warn" style="margin-bottom:8px">⚠️ ${info.icon} ${info.label} 미설치 — ${info.required}</div>`).join('')}
+  <div class="formula">
+    <div class="row" title="설계값: 사망자 수 순위를 참고해 정한 값이며 통계로 산출한 값이 아닙니다"><span>📊 W_freq (사고 빈도 가중치 · 설계값)</span><b style="color:#a78bfa">×${wf}</b></div>
+    <div class="row"><span>🌍 S_penalty (장비 위치 지반)</span><b style="color:${sp ? 'var(--warn)' : 'var(--ok)'}">+${sp}</b></div>
+    ${zoneFlags ? `<div class="label-sm" style="margin-top:-2px">↳ ${zoneFlags}</div>` : ''}
+    <div class="row"><span>🛡️ H_mitigation (통제 완화)</span><b style="color:${hm ? 'var(--ok)' : 'var(--muted)'}">−${hm}</b></div>
+    <div class="row total"><span>🔴 위험 반경 (Red)</span>${chip(fc ? 100 : 100)}</div>
+    <div class="row"><span>🟠 주의 반경 (Orange)</span>${chip(fc ? 100 : eq.orangeRisk())}</div>
+    <div class="row"><span>⚪ 영향권</span>${chip(fc ? 100 : eq.normalRisk())}</div>
+    <code>Orange = clamp((${eq.orangeBase} + S) × W − H) = clamp((${eq.orangeBase} + ${sp}) × ${wf} − ${hm})</code>
+  </div>`;
+}
+
+function hazardInspector(m) {
+  let h = inspectorHeader(`${hzIconHTML(hzMarkerSign(m.type), esc(m.icon || '⚠️'))} ${esc(m.label)}`);
+  h += `<div class="field"><div class="row"><span>위험 반경</span><span class="value" id="insRadius">${m.radius} m</span></div>
+        <input type="range" min="0.5" max="30" step="0.5" value="${m.radius}" data-hz="radius"></div>
+        <div class="field"><div class="row"><span>위험 등급</span><span class="value" id="insLevel">${m.riskLevel || 3} → R=${(m.riskLevel || 3) * 20}</span></div>
+        <input type="range" min="1" max="5" value="${m.riskLevel || 3}" data-hz="riskLevel"></div>`;
+  h += opsSection(m);
+  h += `<div class="row-gap" style="margin-top:14px"><button class="btn flex1" data-act="duplicate">복제</button><button class="btn btn-danger flex1" data-act="deleteSel">삭제</button></div>`;
+  return h;
+}
+
+/** 2026-11-22 운영: 작업 상태(장비) · 작업 일정 · 층 · 출입 허가(위험물) */
+function opsSection(m) {
+  const sch = m.schedule || {}, on = scheduleValid(m.schedule), now = on ? scheduleActive(m.schedule) : true;
+  let h = '<h4>운영</h4>';
+  if (m.isEquipment) {
+    const st = m._live || (S.live && S.live[m.id]);
+    h += `<div class="field"><div class="row"><span style="white-space:nowrap">⚙️ 작업 상태</span><select class="input input-sm" data-ops="opState" style="max-width:150px">${EQUIP_STATES.map(k =>
+      `<option value="${k}"${(m.opState || 'work') === k ? ' selected' : ''}>${OP_STATES[k].icon} ${OP_STATES[k].label}</option>`).join('')}</select></div>
+      <div class="label-sm">${st && st.opState ? `지금 운전원 휴대폰: <b>${OP_STATES[st.opState] ? OP_STATES[st.opState].label : '-'}</b> (휴대폰 값이 우선${st.opState === 'walk' ? ' — 운전원이 내려 걷는 중이라 장비는 그 자리에 정지, 운전원은 작업자로 봅니다' : ''})` : '정지·대기면 작업 반경 대신 본체 둘레만 「주의」입니다. 운전원 휴대폰이 연결되면 휴대폰 값이 우선합니다.'}</div></div>`;
+    // 2026-11-25 작업 구역: 작업 중 위험 반경은 배치한 자리(또는 운전원이 정한 자리)에 고정 = 출입 금지
+    const zr = createEquipment({ ...m, opState: 'work', _liveState: undefined, schedule: undefined }, S.siteEnvironment), wa = st && st.workAt;
+    h += `<div class="field"><div class="row"><span style="white-space:nowrap">🚧 작업 구역 여유</span><span class="row-gap" style="align-items:center"><input type="number" class="input input-sm" data-ops="workPad" min="0" max="${WORK_PAD_MAX}" step="1" value="${workPadOf(m)}" style="max-width:72px"> m</span></div>
+      <div class="label-sm">작업 중에는 위험 반경이 장비를 따라 움직이지 않고 <b>이 장비를 놓은 자리</b>에 고정됩니다 — 작업 구역 반경 <b>${zr ? zr.getMaxRadius().toFixed(1) : '-'} m</b> = 출입 금지.
+        여유 = 작업하며 장비가 옮겨 다니는 거리(설계값, 굴착기 기본 ${WORK_PAD.excavator} m). 장비가 작업 구역을 벗어나면 운전원 앱이 「이동 중」으로 바꿉니다.
+        ${wa ? `<br><b style="color:var(--warn)">지금은 운전원이 정한 자리</b>(배치에서 ${Math.round(Math.hypot(wa.x - m.x, wa.y - m.y))} m)에서 작업 중입니다.` : ''}</div></div>`;
+  }
+  h += `<div class="field"><div class="row"><span>⏰ ${m.isEquipment ? '작업 시간 지정' : '시간 지정 (그 시간에만 위험)'}</span>
+      <label class="switch"><input type="checkbox" data-ops="schedOn"${on ? ' checked' : ''}><span class="sl"></span></label></div>
+    <div class="row-gap"${on ? '' : ' hidden'}><input type="time" class="input" data-ops="from" value="${esc(sch.from || '14:00')}"><span style="align-self:center">~</span><input type="time" class="input" data-ops="to" value="${esc(sch.to || '16:00')}"></div>
+    <div class="label-sm">${on ? `매일 이 시간 · 지금 <b data-ops-label="schedNow" style="color:${now ? 'var(--danger)' : 'var(--muted)'}">${now ? '켜짐' : '꺼짐'}</b>` : ''}
+      ${m.isEquipment ? (on ? ' — 이 시간 밖에는 「정지·대기」' : '') : (on ? '' : '예: 크레인 양중 시간에만 인양 경로 아래 통행 금지')}</div></div>`;
+  if (!m.isEquipment) {
+    const fl = m.floor == null ? '' : String(m.floor), pm = m.permit || {};
+    h += `<div class="field"><div class="row"><span>🏢 층</span><select class="input input-sm" data-ops="floor">
+        <option value=""${fl === '' ? ' selected' : ''}>지상 (기본)</option>
+        ${[-2, -1, ...Array.from({ length: 30 }, (_, i) => i + 1)].map(f => `<option value="${f}"${fl === String(f) ? ' selected' : ''}>${floorText(f)}</option>`).join('')}
+      </select></div><div class="label-sm">위층 개구부처럼 그 층 사람에게만 알릴 때. 층을 모르는 휴대폰에는 모두 알립니다.</div></div>
+      <div class="field"><div class="row"><span>🔒 허가자만 출입</span><label class="switch"><input type="checkbox" data-ops="permitOn"${permitOn(pm) ? ' checked' : ''}><span class="sl"></span></label></div>
+      <div${permitOn(pm) ? '' : ' hidden'}><input type="text" class="input" data-ops="permitNames" placeholder="허가자 이름 (쉼표로 구분) 예: 김철수, 이영희" value="${esc((pm.names || []).join(', '))}">
+      <div class="label-sm">허가자는 「주의」로만, 그 밖의 사람은 「위험 · 허가자 외 출입 금지」로 알립니다. 이름은 근로자 앱에 넣은 이름과 같아야 합니다.</div></div></div>`;
+  }
+  return h;
+}
+
+
+function buildingInspector(idx) {
+  const bd = S.buildingData[idx] || {};
+  const sp = buildingSpec(idx), lay = structuralLayout(getContourPolys()[idx] || [], sp.type);
+  const opts = (obj, cur) => Object.entries(obj).map(([k, v]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${v.label}</option>`).join('');
+  let h = inspectorHeader(`🏢 ${esc(bd.name || `건물 #${idx + 1}`)}`);
+  h += `<div class="field"><div class="label-sm" style="margin-bottom:4px">건물 이름 (동 번호)</div><input type="text" class="input" maxlength="20" placeholder="예: 101동" value="${esc(bd.name || '')}" data-bd="name"></div>
+        ${bd.realNote ? `<div class="alert warn" style="margin:-4px 0 8px;font-size:12px">⚠️ ${esc(bd.realNote)}</div>` : ''}
+        <div class="field row"><span>층수 <span class="label-sm">(비우면 기본 높이 ${S.settings.buildingHeight} m)</span></span><input type="number" class="input input-num" min="1" max="80" value="${bd.floors || ''}" placeholder="${sp.floors}" data-bd="floors"></div>
+        <h4>구조 · 공정</h4>
+        <div class="field row"><span>구조 형식</span><select class="input input-sel" data-bd="structure">
+          <option value="" ${sp.auto ? 'selected' : ''}>자동 추정 (${STRUCTURE_TYPES[suggestStructure(getContourPolys()[idx] || []).type].label})</option>${opts(STRUCTURE_TYPES, sp.auto ? '' : sp.type)}</select></div>
+        <div class="label-sm" style="margin:-4px 0 8px">${sp.auto ? `↳ ${esc(sp.reason)}` : esc(sp.T.desc)}</div>
+        <div class="field row"><span>공정 단계</span><select class="input input-sel" data-bd="stage">${opts(CONSTRUCTION_STAGES, sp.stage)}</select></div>
+        ${sp.stage === 'frame' ? `<div class="field"><div class="row"><span>골조 진행</span><span class="value" id="insBuilt">${sp.built} / ${sp.floors}층</span></div>
+          <input type="range" min="0" max="${sp.floors}" value="${sp.built}" data-bd="builtFloors"></div>` : ''}
+        <div class="field row"><span>층고 (m) <span class="label-sm">설계값 · 기본 ${sp.T.floorH}</span></span><input type="number" class="input input-num" min="2.4" max="8" step="0.1" value="${bd.floorHeight || ''}" placeholder="${sp.T.floorH}" data-bd="floorHeight"></div>
+        <div class="field row"><span>지하층 수 <span class="label-sm">(터파기 깊이)</span></span><input type="number" class="input input-num" min="0" max="8" value="${bd.basements || ''}" placeholder="0" data-bd="basements"></div>
+        <div class="formula">
+          <div class="row"><span>바닥 면적</span><b>${fmt(lay.area)} ㎡</b></div>
+          <div class="row"><span>높이</span><b>${fmt(sp.height, 1)} m <span class="label-sm">(${sp.floors}층 × ${sp.floorH} m)</span></b></div>
+          <div class="row"><span>연면적 (추정)</span><b>${fmt(lay.area * sp.floors)} ㎡</b></div>
+          ${sp.type === 'wall' ? `<div class="row"><span>세대 경계벽</span><b>${lay.walls.length}개 · 간격 ${fmt(lay.spanU, 1)} m</b></div>`
+            : `<div class="row"><span>기둥</span><b>${lay.columns.length}개 · 경간 ${fmt(lay.spanU, 1)} × ${fmt(lay.spanV, 1)} m</b></div>`}
+        </div>
+        <div class="label-sm" style="margin-top:6px">기둥·벽 배치는 3D 표현용 추정입니다 (구조 설계 아님).</div>
+        <div class="row-gap" style="margin-top:10px"><button class="btn flex1" data-act="regularizeSel" title="이 건물 외곽선을 직각으로 정리">📐 직각 보정</button><button class="btn flex1" data-act="mergeSel" title="이 건물과 겹치거나 1 m 안에 맞닿은 조각을 한 건물로 (Ctrl+Z 되돌리기)">🔗 붙은 조각과 합치기</button>${S.bgImage ? '<button class="btn flex1" data-act="shadowHeight" title="항공 사진의 그림자 길이로 높이 계산">☀️ 그림자로 높이</button>' : ''}</div>
+        <div class="card" style="border-color:rgba(239,68,68,.35);margin-top:10px"><div class="row"><div><b>🚫 현관 출입 불가</b><div class="label-sm">타일 작업 등으로 현관이 막힘</div></div>
+        <label class="switch danger"><input type="checkbox" data-bd="entranceBlocked" ${bd.entranceBlocked ? 'checked' : ''}><span class="sl"></span></label></div></div>
+        ${bd.entranceBlocked ? '<div class="alert info" style="margin-top:8px">이 건물을 도착지로 지정하면 가장 가까운 다른 건물로 진입해 <b>지하 B1</b>을 거쳐 도착하도록 안내합니다.</div>' : ''}
+        <button class="btn btn-danger" style="width:100%;margin-top:14px" data-act="deleteBuilding">건물 삭제</button>`;
+  return h;
+}
+
+/** 슬라이더 조작 중에는 인스펙터 전체를 다시 그리지 않고 수치만 갱신 */
+function refreshEquipmentFormula() {
+  const m = selectedMarker();
+  const f = $('insFormula');
+  if (m && m.isEquipment && f) f.innerHTML = equipmentFormula(createEquipment(m, S.siteEnvironment));
+}
+
+// ═══════════════════════════════════════════════
+//  경로 결과 카드
+// ═══════════════════════════════════════════════
+
+function renderRouteCard() {
+  renderToolStatus();
+  const el = $('routeCard'), R = S.route;
+  el.hidden = false;
+  if (!R || !R.result) {
+    el.innerHTML = R && R.points.length === 1 ? '<div class="empty-mini">도착지를 클릭하세요.</div>'
+      : R && R.points.length === 2 ? '<div class="empty-mini">경로를 찾지 못했습니다. 출발·도착 위치나 울타리를 확인하세요.</div>'
+      : '<div class="empty-mini">🧭 지도에서 <b>출발지</b>와 <b>도착지</b>를 차례로 클릭하면<br>위험을 피하는 경로와 지표가 여기에 표시됩니다.</div>';
+    return;
+  }
+  const r = R.result, m = r.metrics, g = riskGrade(m.maxRisk);
+  const pct = (v) => m.length > 0 ? (v / m.length * 100) : 0;
+  let cmp = '';
+  if (r.shortestMetrics && r.shortestMetrics.length > 0) {
+    const sm = r.shortestMetrics;
+    const dLen = (m.length / sm.length - 1) * 100;
+    const dExp = sm.exposure > 0.01 ? (1 - m.exposure / sm.exposure) * 100 : 0;
+    cmp = `<div class="label-sm" style="margin-top:10px">최단 경로 대비: 거리 <b style="color:var(--text)">${dLen >= 0 ? '+' : ''}${fmt(dLen, 1)}%</b>
+           ${sm.exposure > 0.01 ? ` · 위험 노출 <b style="color:${dExp > 0 ? 'var(--ok)' : 'var(--text)'}">${dExp > 0 ? '−' : ''}${fmt(Math.abs(dExp), 0)}%</b>` : ''}
+           ${sm.maxRisk > m.maxRisk ? ` · 최대 위험 ${fmt(sm.maxRisk)} → ${fmt(m.maxRisk)}` : ''}</div>`;
+  }
+  let redirect = '';
+  if (R.redirect) {
+    redirect = R.redirect.viaName
+      ? `<div class="alert danger" style="margin-top:10px">🚫 <b>${esc(R.redirect.fromName)}</b> 현관 출입 불가<br>➜ <b style="color:#67e8f9">${esc(R.redirect.viaName)}</b> 지하층(B1)을 통해 진입하세요</div>`
+      : `<div class="alert danger" style="margin-top:10px">🚫 <b>${esc(R.redirect.fromName)}</b> 현관 출입 불가 — 우회할 다른 건물이 없습니다. 지하층 진입로를 확인하세요.</div>`;
+  }
+  const methodLabel = { 'grid-walkable': '현장 경계 안', 'grid-open': '현장 전체' }[r.method];
+  el.innerHTML = `
+    <div class="row"><b>🧭 안전 경로 <span class="badge" style="background:${g.color}26;color:${g.color}">${g.label}</span></b>
+      <button class="btn btn-ghost btn-xs" data-act="clearRoute" title="경로 초기화">초기화</button></div>
+    <div class="row" style="align-items:baseline;margin-top:2px"><span class="big">${fmtLen(m.length)}</span><span class="label-sm">최대 R <b style="color:${g.color}">${fmt(m.maxRisk)}</b></span></div>
+    <div class="rc-detail">
+    <div class="grid2">
+      <div class="stat"><b style="color:${g.color}">${fmt(m.maxRisk)}</b><span>최대 위험도 R</span></div>
+      <div class="stat"><b>${fmt(m.avgRisk, 1)}</b><span>평균 위험도</span></div>
+      <div class="stat"><b>${fmtLen(m.bands.high + m.bands.mid)}</b><span>주의 이상 구간 길이</span></div>
+      <div class="stat"><b>${fmt(r.ms)} ms</b><span>${methodLabel}${r.cellSize ? ` · ${r.cellSize}px 격자` : ''}</span></div>
+    </div>
+    <div class="bar"><i style="width:${pct(m.bands.high)}%;background:#ef4444"></i><i style="width:${pct(m.bands.mid)}%;background:#f59e0b"></i><i style="width:${pct(m.bands.low)}%;background:#eab308"></i></div>
+    <div class="legend"><span style="--c:#ef4444">위험 ≥70</span><span style="--c:#f59e0b">주의 30~70</span><span style="--c:#eab308">경미</span><span style="--c:#10b981">안전</span></div>
+    ${cmp}${redirect}
+    ${m.maxRisk >= 70 ? '<div class="alert warn" style="margin-top:10px">위험 구역을 완전히 피할 수 없는 경로입니다. 장비 작업 중지 또는 신호수 배치를 검토하세요.</div>' : ''}
+    </div>`;
+  el.hidden = false;
+}
+
+function updateUndoButtons() {
+  $('tbUndo').disabled = !History.canUndo();
+  $('tbRedo').disabled = !History.canRedo();
+}

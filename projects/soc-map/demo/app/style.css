@@ -574,3 +574,11 @@ input[type=range]::-moz-range-thumb { width: 15px; height: 15px; border: none; b
 .ec-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 0; border-top: 1px solid var(--line); }
 .ec-row.lost .flex1 { color: #fca5a5; font-weight: 700; }
 .corr-hint { margin-top: 8px; color: #7dd3fc; }
+
+/* 2026-11-22 건축 인허가 */
+.permit-item { cursor: pointer; }
+.permit-item.on { outline: 2px solid var(--c); }
+.permit-card { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-2); display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.permit-dongs { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+.permit-dongs th, .permit-dongs td { border-bottom: 1px solid var(--line); padding: 3px 4px; text-align: left; }
+.permit-dongs th { color: var(--muted); font-weight: 600; }

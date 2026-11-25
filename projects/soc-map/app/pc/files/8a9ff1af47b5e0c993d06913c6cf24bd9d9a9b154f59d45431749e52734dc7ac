@@ -1,0 +1,41 @@
+"""외곽선 합치기 (2026-11-22) — AI 건물 따기로 지붕을 조각조각 땄을 때 겹치는 조각을 한 건물로.
+다각형들(현장 m)을 촘촘한 격자에 칠해 합치고, 맞닿은 줄눈 틈을 메운 뒤 바깥 외곽선 하나를 돌려준다. (시험: test_polyops.py)"""
+import math
+
+import cv2
+import numpy as np
+
+MAX_PX = 16_000_000      # 격자 크기 상한 (넘으면 해상도를 낮춤)
+
+
+def union(polys, res=0.1, close=0.3, simplify=0.12):
+    """polys: [[x0, y0, x1, y1, …], …] (m) → {polygon: [x0, y0, …], area: m², components: 합친 뒤 덩어리 수}
+    res 격자 한 칸(m) · close 메울 틈(m) · simplify 외곽선 단순화 허용 오차(m)"""
+    pts = [np.asarray(p, np.float64).reshape(-1, 2) for p in polys if p is not None and len(p) >= 6]
+    if not pts:
+        raise ValueError("합칠 외곽선이 없습니다.")
+    allp = np.vstack(pts)
+    pad = 3 * close + 4 * res
+    x0, y0 = allp.min(0) - pad
+    x1, y1 = allp.max(0) + pad
+    W, H = math.ceil((x1 - x0) / res), math.ceil((y1 - y0) / res)
+    if W * H > MAX_PX:
+        res *= math.sqrt(W * H / MAX_PX)
+        W, H = math.ceil((x1 - x0) / res), math.ceil((y1 - y0) / res)
+    base = np.zeros((H, W), np.uint8)
+    for p in pts:
+        cv2.fillPoly(base, [np.round((p - [x0, y0]) / res).astype(np.int32)], 1)
+    # 틈 메우기: close(m, 반지름)로 해 보고 아직 떨어져 있으면 1.5배·2배까지. 그래도 떨어져 있으면 합치지 않음 (조각을 버리지 않게)
+    for f in (1.0, 1.5, 2.0):
+        k = max(1, round(close * f / res))
+        m = cv2.morphologyEx(base, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if len(cnts) == 1:
+            break
+    if len(cnts) != 1:
+        raise ValueError(f"외곽선들이 붙어 있지 않아 합치지 않았습니다 ({len(cnts)}덩어리).")
+    c = cnts[0]
+    c = cv2.approxPolyDP(c, max(0.5, simplify / res), True).reshape(-1, 2)
+    out = (c * res + [x0, y0]).round(2)
+    return {"polygon": [float(v) for v in out.reshape(-1)], "area": round(float(cv2.contourArea(c.astype(np.float32))) * res * res, 1),
+            "components": 1}

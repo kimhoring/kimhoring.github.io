@@ -1,0 +1,162 @@
+"""현장 운영 (2026-11-22) — 서버 쪽 순수 계산. projects.py 가 연결한다 (시험: test_fieldops.py)
+
+  - clean_report: 휴대폰 위치 보고의 새 값(속도 · 장비 작업 상태 · 층 · 장비 간섭) 검사
+  - Evac: 대피 점호 — 대피 지시 때 현장 인원을 명단으로, 대피 장소 도착(위치) 또는 본인 확인으로 「도착」
+  - RefCorr: 기준점 보정 — 위치를 아는 점에 둔 휴대폰의 GPS 오차를 이동 평균해 근처 휴대폰이 빼서 쓴다
+"""
+import math
+import secrets
+import time
+
+OP_STATES = {"work": "작업 중", "idle": "정지·대기", "travel": "이동 중", "walk": "하차 · 도보"}   # walk(2026-11-25): 운전원이 내려 걸음 → 근로자로
+EVAC_ARRIVE_M = 15        # 설계값: 대피 장소 중심에서 이 거리 안이면 도착 (+ 위치 오차, 최대 10 m)
+REF = {
+    "MAX_OFFSET": 20,     # 보정량이 이보다 크면 기준점 위치를 잘못 고른 것으로 보고 쓰지 않음 (m)
+    "MAX_ACC": 15,        # 기준 휴대폰 정확도가 이보다 나쁘면 버림 (m)
+    "ALPHA": 0.15,        # 이동 평균 (약 7개 보고)
+    "STALE_S": 15,        # 이보다 오래된 보정은 쓰지 않음 (휴대폰 쪽도 같은 값)
+    "MIN_N": 5,           # 이만큼 모인 뒤부터 보냄
+}
+
+
+def _num(v, lo, hi):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and lo <= f <= hi else None
+
+
+def clean_report(msg):
+    """pos 메시지에서 새 값만 골라 검사해 돌려준다 (없거나 이상하면 빠짐)"""
+    out = {}
+    for k in ("vx", "vy"):
+        v = _num(msg.get(k), -60, 60)            # 60 m/s 넘는 속도는 오측
+        if v is not None:
+            out[k] = round(v, 2)
+    if msg.get("op_state") in OP_STATES:
+        out["op_state"] = msg["op_state"]
+    if "floor" in msg:
+        f = msg.get("floor")
+        out["floor"] = None if f is None else (int(f) if _num(f, -10, 150) is not None and float(f) == int(float(f)) else None)
+    wa = msg.get("work_at")   # 2026-11-25 운전원이 정한 작업 위치 [위도, 경도] (작업 중일 때만 옴)
+    if isinstance(wa, (list, tuple)) and len(wa) == 2 and _num(wa[0], -90, 90) is not None and _num(wa[1], -180, 180) is not None:
+        out["work_at"] = (float(wa[0]), float(wa[1]))
+    if isinstance(msg.get("conflicts"), list):
+        out["conflicts"] = [str(t)[:140] for t in msg["conflicts"][:5] if isinstance(t, str)]
+    return out
+
+
+def place_xy(place):
+    return place.get("x"), place.get("y")
+
+
+def nearest_place(x, y, places, kinds=("assembly",)):
+    best = None
+    for q in places or []:
+        if q.get("kind") not in kinds or q.get("x") is None:
+            continue
+        d = math.hypot(x - q["x"], y - q["y"])
+        if best is None or d < best[1]:
+            best = (q, d)
+    return best
+
+
+class Evac:
+    """대피 점호. people[cid] = {name, role, state: moving|arrived, at, place, how}"""
+
+    def __init__(self, clients, text, now=None):
+        self.id = secrets.token_hex(4)
+        self.start = now or time.time()
+        self.text = text
+        self.ended = None
+        self.people = {}
+        for c in clients:
+            self.add(c)
+
+    def add(self, c):
+        if c.get("id") and c["id"] not in self.people and c.get("role") in ("worker", "operator"):
+            self.people[c["id"]] = {"name": c.get("name"), "role": c.get("role"), "state": "moving", "at": None, "place": None, "how": None,
+                                    "sim": bool(c.get("sim"))}
+            return True
+        return False
+
+    def check_position(self, c, places, now=None):
+        """위치 보고로 도착 판정. 새로 도착하면 사람 정보를 돌려준다"""
+        p = self.people.get(c.get("id"))
+        if self.ended or not p or p["state"] == "arrived" or c.get("x") is None:
+            return None
+        near = nearest_place(c["x"], c["y"], places)
+        if not near:
+            return None
+        sigma = c.get("sigma") or c.get("acc") or 0
+        try:
+            sigma = min(10.0, max(0.0, float(sigma)))
+        except (TypeError, ValueError):
+            sigma = 0.0
+        if near[1] <= EVAC_ARRIVE_M + sigma:
+            return self.arrive(c["id"], "place", near[0], now)
+        return None
+
+    def arrive(self, cid, how, place=None, now=None):
+        p = self.people.get(cid)
+        if self.ended or not p or p["state"] == "arrived":
+            return None
+        p.update(state="arrived", at=now or time.time(), how=how, place=place.get("name") if place else None)
+        return p
+
+    def counts(self, clients=None):
+        """도착 · 이동 중 · 연락 없음(끊김) — clients 는 현재 접속 상태(id → c)"""
+        arrived = moving = lost = 0
+        for cid, p in self.people.items():
+            if p["state"] == "arrived":
+                arrived += 1
+            elif clients is not None and not (clients.get(cid) or {}).get("online"):
+                lost += 1
+            else:
+                moving += 1
+        return {"total": len(self.people), "arrived": arrived, "moving": moving, "lost": lost}
+
+    def public(self, clients=None):
+        return {"id": self.id, "start": self.start, "ended": self.ended, "text": self.text,
+                "counts": self.counts(clients),
+                "people": [{"id": cid, **p, "online": bool((clients or {}).get(cid, {}).get("online"))} for cid, p in self.people.items()]}
+
+
+class RefCorr:
+    """기준점 보정: offset = (기준 휴대폰 GPS 위치) − (기준점의 실제 위치), 이동 평균"""
+
+    def __init__(self):
+        self.dx = self.dy = None
+        self.n = 0
+        self.at = None
+        self.place = None
+        self.acc = None
+        self.by = None
+
+    def update(self, raw_x, raw_y, true_x, true_y, acc, place=None, by=None, now=None):
+        now = now or time.time()
+        try:
+            acc = float(acc)
+        except (TypeError, ValueError):
+            return False
+        if not (0 < acc <= REF["MAX_ACC"]):
+            return False
+        ox, oy = raw_x - true_x, raw_y - true_y
+        if math.hypot(ox, oy) > REF["MAX_OFFSET"]:
+            return False
+        if self.place != place or self.at is None or now - self.at > REF["STALE_S"]:
+            self.dx, self.dy, self.n = ox, oy, 0          # 기준점이 바뀌었거나 오래 끊겼으면 새로 시작
+        else:
+            a = REF["ALPHA"]
+            self.dx += a * (ox - self.dx)
+            self.dy += a * (oy - self.dy)
+        self.n += 1
+        self.at, self.place, self.acc, self.by = now, place, acc, by
+        return True
+
+    def public(self, now=None):
+        now = now or time.time()
+        if self.at is None or self.n < REF["MIN_N"] or now - self.at > REF["STALE_S"]:
+            return None
+        return {"dx": round(self.dx, 2), "dy": round(self.dy, 2), "n": self.n, "at": self.at, "acc": self.acc, "place": self.place, "by": self.by}

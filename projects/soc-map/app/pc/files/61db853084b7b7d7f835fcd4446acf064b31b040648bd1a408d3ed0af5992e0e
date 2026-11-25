@@ -1,0 +1,584 @@
+"""SOC-MAP 백엔드 (FastAPI) — AI 건물 검출 + 작업자 GPS 안전 모니터링
+
+실행:  python main.py                         (기본 127.0.0.1:8000, 이 PC에서만)
+       python main.py --host 0.0.0.0          (같은 네트워크의 휴대폰·PC 접속 허용)
+       python main.py --host 0.0.0.0 --https  (8000=HTTP + 8443=HTTPS. 휴대폰 GPS 는 HTTPS 에서만 동작)
+       python main.py --tunnel                (cloudflared 로 정식 인증서 https 주소 생성 → 앱 설치·푸시 알림 가능)
+       python main.py --public-url https://…  (이미 연 터널·도메인 주소를 QR 에 사용)
+       python main.py … --open                (서버가 준비되면 관리자 화면을 노트북에 앱 창으로 띄움 — SOC-MAP_노트북_실행.bat)
+       python main.py … --quiet               (콘솔에는 상태만 한글로, 자세한 기록은 logs/server.log)
+
+주소:  /map  관리자 지도(노트북)  /worker  근로자 앱     /supervisor  관리감독자 앱     /j/참여코드  QR 접속     /docs  API 문서
+       /download  앱 받기(안드로이드 APK · 아이폰 홈 화면 추가)
+       (/field 는 /worker 와 같은 화면 — 예전 QR·절차서 호환)
+"""
+import argparse
+import asyncio
+import json
+import logging
+import os
+import sys
+import threading
+import time
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
+import dataset
+import directory
+import projects
+import polyops
+import sam_inference
+import permits
+import vworld
+import weather
+from yolo_inference import extract_buildings_yolo, model_info, reload_model
+
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+log = logging.getLogger("soc-map")
+LOG_DIR = os.environ.get("SOCMAP_LOG_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")   # 시험 때는 따로
+
+
+class _ConsoleFormat(logging.Formatter):
+    """콘솔: 「시:분:초  메시지」, 경고는 앞에 「주의:」"""
+    def format(self, r):
+        t = time.strftime("%H:%M:%S", time.localtime(r.created))
+        return f"{t}  {'주의: ' if r.levelno >= logging.WARNING else ''}{r.getMessage()}"
+
+
+def _setup_logging(quiet):
+    """v14.12 콘솔은 짧게(quiet), 모든 기록은 logs/server.log 에 — 연동 문제를 나중에 확인할 수 있게"""
+    # AI 라이브러리(ultralytics)가 불러올 때 출력을 UTF-8 로 바꾸므로, 한국어 윈도우 콘솔(cp949)도 UTF-8 로 맞춰야 한글이 안 깨진다
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    con = logging.StreamHandler(sys.stdout)
+    con.setFormatter(_ConsoleFormat() if quiet else logging.Formatter("[%(levelname)s] %(message)s"))
+    root.addHandler(con)
+    root.setLevel(logging.INFO)
+    try:
+        from logging.handlers import RotatingFileHandler
+        os.makedirs(LOG_DIR, exist_ok=True)
+        fh = RotatingFileHandler(os.path.join(LOG_DIR, "server.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        root.addHandler(fh)
+    except OSError:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(app):
+    # 2026-11-24 가볍게: AI 건물 인식 모델(YOLO·ultralytics·torch)은 미리 올리지 않고 처음 쓸 때 불러온다
+    #   (미리 올리면 메모리 +178 MB · 시작 +2.3 초인데, 도면 AI 인식을 할 때만 씀. 첫 인식만 2~3초 더 걸림)
+    if not getattr(app.state, "model_tried", False):
+        app.state.model_tried = True
+        if not model_info()["model_exists"]:
+            log.error("AI 건물 인식 모델 파일이 없습니다(지도·관제는 그대로 동작) — models/best.pt")
+    # --https 모드에서는 서버 2개가 같은 앱을 쓰므로 감시 작업은 한 번만 시작
+    task = None
+    if not getattr(app.state, "watchdog_started", False):
+        app.state.watchdog_started = True
+        task = asyncio.create_task(projects.background())
+        wx_task = asyncio.create_task(weather.background())   # 기상청 날씨 (키가 없으면 바로 끝남)
+    yield
+    if task:
+        task.cancel()
+        wx_task.cancel()
+
+
+app = FastAPI(
+    title="SOC-MAP API",
+    description="AI based Site Operating & Clash Risk Map Backend API",
+    version="14.0",
+    lifespan=lifespan,
+)
+
+# SOC_MAP.html 은 file:// 로 열리므로 Origin 이 "null" 이다. 자격 증명은 쓰지 않는다.
+# 2026-11-24 가볍게: 글자 응답(화면 코드 JS·CSS·HTML·JSON)만 gzip — 휴대폰이 터널로 받는 양이 약 1/4.
+#   이미 압축된 것(APK·그림·지적도 타일·모델)은 그대로 (CPU 낭비)
+_NO_GZIP_EXT = (".apk", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".pt", ".onnx", ".zip", ".pdf", ".ico")
+
+
+class _TextGZip:
+    def __init__(self, app):
+        self.app, self.gz = app, GZipMiddleware(app, minimum_size=1024, compresslevel=6)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if not path.lower().endswith(_NO_GZIP_EXT) and not path.startswith(("/cadastral/", "/worker.apk", "/supervisor.apk")):
+                return await self.gz(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+app.add_middleware(_TextGZip)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+    allow_private_network=True,
+)
+
+
+@app.middleware("http")
+async def _fresh_app_code(request, call_next):
+    """v14.14 휴대폰 앱 화면(/app/…)은 항상 노트북의 최신 코드 — 캐시 지시가 없으면 WebView 가 옛 JS 를 하루 넘게 쓸 수 있다.
+    no-cache 는 저장은 하되 쓸 때마다 확인(ETag → 바뀐 게 없으면 304) 이라 가볍다"""
+    resp = await call_next(request)
+    if request.url.path.startswith(("/app/", "/download/shell/")) and "cache-control" not in resp.headers:
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # SOC-MAP v12/
+app.include_router(projects.router)
+app.include_router(vworld.router)
+app.include_router(permits.router)   # 2026-11-22 건축 인허가 (공사 현장 찾기)
+app.include_router(weather.router)
+app.mount("/app", StaticFiles(directory=os.path.join(APP_ROOT, "app")), name="app")
+
+
+@app.get("/")
+def root():
+    return {"message": "SOC-MAP Backend API is running", "version": app.version,
+            "pages": {"manager": "/map", "worker": "/worker", "supervisor": "/supervisor", "download": "/download", "api_docs": "/docs"}}
+
+
+@app.get("/map")
+def manager_page():
+    return FileResponse(os.path.join(APP_ROOT, "SOC_MAP.html"))
+
+
+# ── 휴대폰 앱 (설치형 웹앱 PWA) ──
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+@app.get("/worker")
+@app.get("/field")
+def worker_page():
+    """근로자 앱 — 작업자·장비 운전원. 세부 설정 없음(관리감독자 정책을 따름)"""
+    return FileResponse(os.path.join(APP_ROOT, "app", "field.html"), headers=NO_CACHE)
+
+
+@app.get("/supervisor")
+def supervisor_page():
+    """관리감독자 앱 — 실시간 인원 위치·경보·대피 지시·근로자 앱 정책"""
+    return FileResponse(os.path.join(APP_ROOT, "app", "supervisor.html"), headers=NO_CACHE)
+
+
+@app.get("/sw.js")
+def service_worker():
+    # 서비스 워커는 사이트 최상위에서 내려줘야 /worker · /supervisor 를 모두 다룰 수 있다
+    return FileResponse(os.path.join(APP_ROOT, "app", "sw.js"), media_type="text/javascript",
+                        headers={**NO_CACHE, "Service-Worker-Allowed": "/"})
+
+
+@app.get("/manifest/{name}.webmanifest")
+def manifest(name: str):
+    if name not in ("worker", "supervisor"):
+        raise HTTPException(status_code=404)
+    return FileResponse(os.path.join(APP_ROOT, "app", "pwa", f"{name}.webmanifest"), media_type="application/manifest+json")
+
+
+# ── 안드로이드 앱(APK) 받기 — android/build_apk.py 가 app/download/ 에 만든다 ──
+DOWNLOAD_DIR = os.path.join(APP_ROOT, "app", "download")
+
+
+def _apk_list():
+    try:
+        with open(os.path.join(DOWNLOAD_DIR, "apps.json"), encoding="utf-8") as f:
+            apps = json.load(f).get("apps", [])
+    except (OSError, ValueError):
+        return []
+    return [a for a in apps if os.path.isfile(os.path.join(DOWNLOAD_DIR, a.get("file", "")))]
+
+
+@app.get("/download")
+def download_page():
+    """앱 받기 — 안드로이드 APK 2종 + 설치형 웹앱(아이폰) 안내"""
+    return FileResponse(os.path.join(APP_ROOT, "app", "download.html"), headers=NO_CACHE)
+
+
+@app.get("/api/apps")
+def apps_info():
+    return {"apps": _apk_list()}
+
+
+@app.api_route("/download/{fname}", methods=["GET", "HEAD"])
+def download_apk(fname: str):
+    app_info = next((a for a in _apk_list() if a["file"] == fname), None)
+    if not app_info:
+        raise HTTPException(status_code=404, detail="APK가 없습니다. 노트북에서 android/build_apk.py 로 먼저 빌드하세요.")
+    return FileResponse(os.path.join(DOWNLOAD_DIR, fname), media_type="application/vnd.android.package-archive",
+                        filename=fname, headers=NO_CACHE)
+
+
+SHELL_DIR = os.path.join(DOWNLOAD_DIR, "shell")
+
+
+@app.api_route("/download/shell/{fname}", methods=["GET", "HEAD"])
+def shell_file(fname: str):
+    """v14.14 안드로이드 앱 화면 패치(첫 화면 파일) — shell.json 에 적힌 파일만. 앱이 SHA-256 을 확인하고 바꿔 끼운다"""
+    try:
+        with open(os.path.join(SHELL_DIR, "shell.json"), encoding="utf-8") as f:
+            allowed = set(json.load(f).get("files", {})) | {"shell.json"}
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="화면 패치가 없습니다. android/build_apk.py --shell 로 만드세요.")
+    if fname not in allowed or not os.path.isfile(os.path.join(SHELL_DIR, fname)):
+        raise HTTPException(status_code=404)
+    kind = {".json": "application/json", ".js": "text/javascript", ".html": "text/html"}.get(os.path.splitext(fname)[1], "application/octet-stream")
+    return FileResponse(os.path.join(SHELL_DIR, fname), media_type=kind, headers=NO_CACHE)
+
+
+# v14.11 누르면 바로 앱 파일이 내려받아지는 짧은 주소 — 카톡 링크·QR 용 (안내 페이지·GitHub 를 거치지 않음).
+# 카카오톡은 APK 파일 첨부를 막으므로 파일 대신 이 링크를 보낸다
+@app.api_route("/worker.apk", methods=["GET", "HEAD"])
+def worker_apk():
+    return download_apk("SOC-MAP_worker.apk")
+
+
+@app.api_route("/supervisor.apk", methods=["GET", "HEAD"])
+def supervisor_apk():
+    return download_apk("SOC-MAP_supervisor.apk")
+
+
+@app.get("/j/{code}")
+def join_short(code: str):
+    """QR 코드용 짧은 주소 → 근로자 앱"""
+    return RedirectResponse(f"/worker?code={code}")
+
+
+@app.get("/health")
+def health():
+    info = model_info()
+    return {"status": "ok" if info["model_exists"] else "degraded", **info, "sam": sam_inference.sam_available()}   # 모델은 처음 쓸 때 불러옴
+
+
+def _read_upload(file: UploadFile):
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="이미지 파일만 업로드할 수 있습니다.")
+    contents = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="이미지가 너무 큽니다 (최대 25MB).")
+    return contents
+
+
+# 동기 함수로 선언하면 FastAPI 가 스레드풀에서 실행하므로 추론 중에도 /health 가 응답한다
+@app.post("/api/detect_buildings")
+def detect_buildings(
+    file: UploadFile = File(...),
+    imageType: str = Form("floorplan"),
+    conf: float = Form(0.25),
+    imgsz: int = Form(1024),
+    tiling: str = Form("auto"),
+    tta: bool = Form(False),
+    enhance: bool = Form(False),
+):
+    if not 0.01 <= conf <= 0.95:
+        raise HTTPException(status_code=400, detail="conf 는 0.01 ~ 0.95 사이여야 합니다.")
+    if imgsz not in (640, 800, 1024, 1280, 1600):
+        raise HTTPException(status_code=400, detail="imgsz 는 640/800/1024/1280/1600 중 하나여야 합니다.")
+    if tiling not in ("auto", "on", "off"):
+        raise HTTPException(status_code=400, detail="tiling 은 auto/on/off 중 하나여야 합니다.")
+    contents = _read_upload(file)
+
+    try:
+        result = extract_buildings_yolo(contents, conf=conf, imgsz=imgsz, tiling=tiling, tta=tta, enhance=enhance)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        log.error(f"Model error: {e}")
+        raise HTTPException(status_code=500, detail="서버에 YOLO 모델 파일(best.pt)이 없습니다.")
+    except Exception as e:
+        log.exception("Inference error")
+        raise HTTPException(status_code=500, detail=f"추론 중 오류: {e}")
+
+    result["imageType"] = imageType
+    meta = result["meta"]
+    log.info(f"{file.filename}: 건물 {len(result['contours'])}개 (원시 {meta['raw_detections']}, 타일 {meta['tiles']}, "
+             f"imgsz {imgsz}, {result['inference_ms']} ms)")
+    return result
+
+
+@app.post("/api/dataset/add")
+def dataset_add(file: UploadFile = File(...), contours: str = Form(...)):
+    """앱에서 확인·수정한 건물 외곽선을 학습 데이터로 저장"""
+    contents = _read_upload(file)
+    try:
+        polys = json.loads(contours)
+        assert isinstance(polys, list)
+    except Exception:
+        raise HTTPException(status_code=400, detail="contours 형식이 올바르지 않습니다.")
+    try:
+        info = dataset.save_sample(contents, file.filename, polys)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.info(f"학습 데이터 저장: {info['name']} ({info['split']}, 건물 {info['buildings']}개)")
+    return {**info, "stats": dataset.stats()}
+
+
+@app.get("/api/dataset/stats")
+def dataset_stats():
+    return dataset.stats()
+
+
+@app.post("/api/model/reload")
+def model_reload():
+    """재학습한 models/best.pt 로 교체한 뒤 서버를 끄지 않고 다시 불러온다"""
+    try:
+        reload_model()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return model_info()
+
+
+MAX_DXF_BYTES = 80 * 1024 * 1024
+
+
+@app.post("/api/plan/dxf")
+def plan_dxf(file: UploadFile = File(...), layers: str = Form("")):
+    """v14.7 CAD 원본(DXF) 배치도 → 실제 단위(m) 건물 외곽선·선·동 이름·TM 여부 (dxf_import.py, ezdxf)"""
+    data = file.file.read(MAX_DXF_BYTES + 1)
+    if len(data) > MAX_DXF_BYTES:
+        raise HTTPException(status_code=413, detail="DXF 파일이 너무 큽니다 (최대 80MB).")
+    try:
+        chosen = json.loads(layers) if layers else None
+        assert chosen is None or (isinstance(chosen, list) and all(isinstance(s, str) for s in chosen))
+    except Exception:
+        raise HTTPException(status_code=400, detail="layers 는 레이어 이름 목록(JSON)이어야 합니다.")
+    try:
+        import dxf_import
+        r = dxf_import.read_dxf(data, chosen)
+    except ImportError:
+        raise HTTPException(status_code=503, detail="서버에 ezdxf·shapely 가 없습니다 (pip install -r requirements.txt).")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("DXF error")
+        raise HTTPException(status_code=500, detail=f"DXF 처리 중 오류: {e}")
+    log.info(f"DXF {file.filename}: 건물 {len(r['buildings'])}동, 단위 {r['units']}, 레이어 {r['chosen_layers']}, TM {bool(r['tm'])}")
+    return r
+
+
+@app.post("/api/segment_building")
+def segment_building(
+    file: UploadFile = File(None),
+    image_id: str = Form(""),
+    point: str = Form(""),
+    box: str = Form(""),
+    source: str = Form(""),
+):
+    """v14.7 클릭(점) 또는 사각형으로 건물 외곽선 한 개 따기 — MobileSAM (sam_inference.py)
+    도면은 처음 한 번만 올리고(file) 이후에는 돌려받은 image_id 만 보낸다. 서버에 없으면 404 → 다시 올림."""
+    if file is not None and file.filename:
+        try:
+            image_id = sam_inference.put_image(_read_upload(file))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    try:
+        pt = json.loads(point) if point else None
+        bx = json.loads(box) if box else None
+        assert (pt is None) != (bx is None)
+        assert pt is None or (len(pt) == 2 and all(isinstance(v, (int, float)) for v in pt))
+        assert bx is None or (len(bx) == 4 and all(isinstance(v, (int, float)) for v in bx))
+    except Exception:
+        raise HTTPException(status_code=400, detail="point [x, y] 또는 box [x1, y1, x2, y2] 중 하나를 보내세요 (도면 px).")
+    try:
+        r = sam_inference.segment(image_id, point=pt, box=bx, aerial=source == "satellite")   # 2026-11-22 위성: 조각 합치기 · 바닥 판정
+    except KeyError:
+        raise HTTPException(status_code=404, detail="image_not_cached")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log.exception("SAM error")
+        raise HTTPException(status_code=500, detail=f"외곽선 따기 중 오류: {e}")
+    log.info(f"외곽선 따기 {'위성 ' if source == 'satellite' else ''}{'점' if pt else '사각형'}: "
+             f"{'성공' if r.get('polygon') else '바닥 같음' if r.get('ground') else '실패'} ({r['ms']} ms)")
+    return r
+
+
+@app.post("/api/geom/union")
+def geom_union(body: dict):
+    """2026-11-22 겹치는 외곽선(현장 m)을 한 건물로 합치기 — AI 건물 따기로 지붕을 조각조각 땄을 때 (polyops.py)"""
+    polys = body.get("polys") if isinstance(body, dict) else None
+    if not isinstance(polys, list) or not 2 <= len(polys) <= 20 or any(
+            not isinstance(p, list) or not 6 <= len(p) <= 20000 or not all(isinstance(v, (int, float)) for v in p) for p in polys):
+        raise HTTPException(status_code=400, detail="polys: 외곽선 2~20개, 각 [x0, y0, x1, y1, …] (m)")
+    close = body.get("close", 0.3)
+    if not isinstance(close, (int, float)) or not 0.05 <= close <= 1.0:
+        raise HTTPException(status_code=400, detail="close: 0.05 ~ 1.0 m")
+    try:
+        return polyops.union(polys, close=float(close))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _open_manager_window(url):
+    """노트북에서 관리자 화면을 앱 창(주소창·탭 없는 창, 최대화)으로 연다. Chrome → Edge → 기본 브라우저 순"""
+    import subprocess
+    import webbrowser
+    env = os.environ.get
+    cands = [
+        os.path.join(env("ProgramFiles", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(env("ProgramFiles(x86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(env("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(env("ProgramFiles(x86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(env("ProgramFiles", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+    ]
+    for exe in cands:
+        if os.path.isfile(exe):
+            subprocess.Popen([exe, f"--app={url}", "--start-maximized"])
+            return os.path.basename(exe)
+    webbrowser.open(url)
+    return "기본 브라우저"
+
+
+async def _serve(args):
+    """HTTP 서버, 그리고 --https 이면 같은 앱(같은 메모리 상태)을 HTTPS 로도 동시에 띄운다"""
+    # quiet: uvicorn 의 영어 시작 문구·요청마다 찍히는 줄을 콘솔에서 뺀다 (log_config=None → 우리 로그 설정을 그대로 씀)
+    ulog = dict(log_level="warning" if args.quiet else "info", access_log=not args.quiet, log_config=None)
+    configs = [uvicorn.Config(app, host=args.host, port=args.port, **ulog)]
+    app.state.http_port = args.port
+    if args.https:
+        import certs
+        cert, key = certs.ensure_self_signed()
+        configs.append(uvicorn.Config(app, host=args.host, port=args.https_port, ssl_certfile=cert, ssl_keyfile=key, **ulog))
+        app.state.https_port = args.https_port
+    shown = projects.lan_addresses() if args.host == "0.0.0.0" else [args.host]
+    if not args.quiet:
+        for ip in shown:
+            base = f"{'https' if args.https else 'http'}://{ip}:{args.https_port if args.https else args.port}"
+            log.info(f"관리자 지도   : http://{ip}:{args.port}/map")
+            log.info(f"근로자 앱     : {base}/worker")
+            log.info(f"관리감독자 앱 : {base}/supervisor")
+    app.state.public_url = args.public_url.rstrip("/") if args.public_url else None
+    ready = _Ready(args, shown)
+    if args.tunnel:
+        import atexit
+        import tunnel
+
+        def on_url(url):
+            # v14.12 주소가 나와도 바로 알리지 않는다: 실제로 응답할 때까지 확인한 뒤 QR·안내판에 쓴다
+            app.state.public_url, app.state.tunnel_ready, app.state.directory = url, False, None
+            log.info(f"인터넷 주소를 여는 중: {url}")
+
+            def work():
+                ok = directory.wait_reachable(url)
+                if app.state.public_url != url:   # 그 사이 터널이 다시 열려 주소가 바뀜
+                    return
+                app.state.tunnel_ready = ok
+                if ok:
+                    log.info("인터넷 주소 연결 확인 — 휴대폰이 어디서나 접속할 수 있습니다")
+                else:
+                    log.warning("인터넷 주소가 2분 안에 응답하지 않습니다. 노트북 인터넷 연결을 확인하세요(같은 와이파이 연결은 됩니다).")
+                ready.update(tunnel="ready" if ok else "failed")
+
+                def board_done(st):
+                    app.state.directory = st
+                    ready.update(board=st, url=url)
+                directory.publish_async(url, board_done)   # 휴대폰이 새 주소를 찾아오게
+            threading.Thread(target=work, daemon=True).start()
+
+        def on_down():
+            app.state.public_url, app.state.tunnel_ready = None, False   # 관리자 QR 은 잠시 와이파이 주소로
+
+        t = tunnel.start(args.port, on_url, on_down)
+        if t:
+            atexit.register(t.stop)
+        else:
+            ready.update(tunnel="none", board="none")
+    servers = [uvicorn.Server(c) for c in configs]
+
+    async def when_started():
+        for _ in range(600):   # 최대 60초 (AI 모델 로드 포함)
+            if all(s.started for s in servers):
+                break
+            await asyncio.sleep(0.1)
+        if args.open:
+            url = f"http://localhost:{args.port}/map"
+            how = _open_manager_window(url)
+            log.info(f"관리자 화면을 열었습니다 ({how})")
+        ready.update(servers=True)
+
+    asyncio.get_running_loop().create_task(when_started())
+    await asyncio.gather(*(s.serve() for s in servers))
+
+
+class _Ready:
+    """v14.12 서버 · 인터넷 주소 · 안내판이 모두 준비되면 「준비 완료」를 한 번 크게 알린다. 그 뒤 주소가 바뀌면 한 줄로"""
+
+    def __init__(self, args, shown):
+        self.args, self.shown, self.lock = args, shown, threading.Lock()
+        self.servers, self.tunnel, self.board, self.url, self.done = False, None, None, None, False
+        if not args.tunnel:
+            self.tunnel = self.board = "none"
+
+    def update(self, **kw):
+        with self.lock:
+            for k, v in kw.items():
+                setattr(self, k, v)
+            if not (self.servers and self.tunnel is not None and self.board is not None):
+                return
+            first, self.done = not self.done, True
+        if first:
+            self._banner()
+        elif "board" in kw and self.board == "ok":
+            log.info("인터넷 주소가 바뀌었습니다 → 휴대폰 앱이 새 주소로 저절로 다시 연결됩니다")
+
+    def _banner(self):
+        a = self.args
+        if self.tunnel == "ready" and self.board == "ok":
+            phone = "앱에서 참여 코드만 넣으면 됩니다 (노트북을 다시 켜도 자동으로 다시 연결)"
+        elif self.tunnel == "ready" and self.board == "failed":
+            phone = "관리자 화면의 [현장 합류] QR 로 연결하세요 (자동 연결 안 됨: gh auth status 확인)"
+        elif self.tunnel == "ready":
+            phone = "관리자 화면의 [현장 합류] QR 로 연결하세요"
+        else:
+            phone = "같은 와이파이의 휴대폰만 연결됩니다 (관리자 화면의 [현장 합류] QR)"
+        lines = ["", "=" * 60, "  [준비 완료] SOC-MAP" + ("  (경보 시험 기록 모드)" if a.trace else ""),
+                 f"  관리자 화면 : {'이 노트북에 열었습니다' if a.open else f'http://localhost:{a.port}/map'}",
+                 f"  휴대폰      : {phone}"]
+        if self.tunnel == "ready" and self.url:
+            lines.append(f"  인터넷 주소 : {self.url}")
+        lines += ["  이 창을 닫으면 서버가 꺼집니다.", "=" * 60, ""]
+        print("\n".join(lines), flush=True)
+        log.debug("준비 완료 안내를 띄웠습니다")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--https", action="store_true", help="자체 서명 인증서로 HTTPS 도 함께 실행 (휴대폰 GPS 용)")
+    parser.add_argument("--https-port", type=int, default=8443)
+    parser.add_argument("--trace", action="store_true", help="경보 현장 시험용: 모든 위치 보고를 projects/{pid}/trace.jsonl 에 기록")
+    parser.add_argument("--tunnel", action="store_true", help="cloudflared 빠른 터널로 정식 인증서 https 주소 생성 (앱 설치·푸시 알림용)")
+    parser.add_argument("--public-url", default=None, help="QR 에 쓸 공개 https 주소 (직접 연 터널·도메인)")
+    parser.add_argument("--open", action="store_true", help="서버가 준비되면 관리자 화면을 이 노트북에 앱 창으로 연다")
+    parser.add_argument("--quiet", action="store_true", help="콘솔에는 상태만 한글로 (자세한 기록은 logs/server.log)")
+    args = parser.parse_args()
+    _setup_logging(args.quiet)
+    if args.trace:
+        os.environ["SOCMAP_TRACE"] = "1"
+        log.info("시험 기록 모드: 위치 보고를 trace.jsonl 에 저장합니다")
+    asyncio.run(_serve(args))

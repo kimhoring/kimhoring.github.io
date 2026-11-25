@@ -36,9 +36,9 @@ const View3D = (() => {
   let groundTex = null, groundCanvas = null, groundView = null, groundTimer = null, groundOn = false;
   let peopleGroup = null, peopleAt = 0, origin3d = null;
   const peopleMap = new Map();
-  const PERSON_S = 2.5;   // 위치 핀 크기 (실제 사람의 약 2.5배 — 현장 전체에서도 점으로 보이고 건물·장비를 가리지 않게)
+  const PERSON_S = 3;   // 위치 핀 크기 (실제 사람의 약 2.5배 — 현장 전체에서도 점으로 보이고 건물·장비를 가리지 않게)
   let pickables = [], sunInfo = null;
-  const K = 10, B1_Y = -4 * K;   // 지하 1층 4m (보행 구역 아래 주차장 표현)
+  const K = 10, B1_Y = -4 * K;   // 지하 1층 4m (현장 경계 아래 주차장 표현)
 
   const available = () => typeof THREE !== 'undefined' && THREE.OrbitControls;
 
@@ -72,7 +72,7 @@ const View3D = (() => {
     // 건물 누르기 → 선택 (끌어서 회전한 경우는 제외)
     let down = null;
     renderer.domElement.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, b: e.button }; });
-    renderer.domElement.addEventListener('pointerup', e => {
+    renderer.domElement.addEventListener('pointerup', e => { dirty = true;
       if (!down || down.b !== 0 || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
       const r = renderer.domElement.getBoundingClientRect();
       ray.setFromCamera(new THREE.Vector2((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1), camera);
@@ -90,14 +90,20 @@ const View3D = (() => {
     });
   }
 
+  // 2026-11-24 가볍게: 바뀐 것이 있을 때만 그린다 (전에는 가만히 있어도 1초에 60번 — 노트북 GPU·팬).
+  //   그리는 때: 카메라가 움직임 · 사람·장비가 움직이거나 위험 고리가 퍼지는 중 · 장면이 바뀜(dirty) · 안전용 1초에 한 번
+  let dirty = true, lastDraw = 0;
   function loop() {
     if (!running) return;
     requestAnimationFrame(loop);
     const now = performance.now();
     if (now - peopleAt > 300) { peopleAt = now; syncPeople(); }
-    animatePeople(now);
-    controls.update();
-    renderer.render(scene, camera);
+    const anim = animatePeople(now);
+    const moved = controls.update();
+    if (moved || anim || dirty || now - lastDraw > 1000) {
+      renderer.render(scene, camera);
+      lastDraw = now; dirty = false;
+    }
   }
 
   function resize() {
@@ -106,6 +112,7 @@ const View3D = (() => {
     const w = el.clientWidth, h = el.clientHeight;
     camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix();
     renderer.setSize(w, h);
+    dirty = true;
   }
 
   // ── 헬퍼 ──
@@ -149,6 +156,7 @@ const View3D = (() => {
     Basemap.draw(g, s / dpr, v);   // s/DPR → 캔버스 해상도에 맞는 줌 단계
     if (S.layers.cadastral) Basemap.drawCadastral(g, s / dpr, v);
     if (groundTex) groundTex.needsUpdate = true;
+    dirty = true;
   }
   /** 지면 ShapeGeometry 의 UV 를 현장 좌표 범위(위성 지도 캔버스)에 맞춘다 */
   function rectUV(geo, ox, oy, v) {
@@ -164,14 +172,19 @@ const View3D = (() => {
   //    위험 진입이면 바닥 고리가 퍼진다. 이름은 머리 위 작은 글자 판 ──
   function personModel(color) {
     const g = new THREE.Group(), s = PERSON_S * K;
-    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, emissive: color, emissiveIntensity: 0.35 });
-    const body = new THREE.Mesh(new THREE.ConeGeometry(0.5 * s, 1.5 * s, 20), mat);
+    // 2026-11-24 「너무 연해서 안 보임」 → 빛에 덜 흐려지게(자체 발광 ↑) + 어두운 테두리(뒤집은 면을 조금 크게)
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.35, metalness: 0, emissive: color, emissiveIntensity: 0.75 });
+    const edge = new THREE.MeshBasicMaterial({ color: 0x0b1120, side: THREE.BackSide });
+    const coneG = new THREE.ConeGeometry(0.5 * s, 1.5 * s, 20), headG = new THREE.CylinderGeometry(0.36 * s, 0.36 * s, 0.42 * s, 20);
+    const body = new THREE.Mesh(coneG, mat);
     body.rotation.x = Math.PI; body.position.y = 0.75 * s; body.castShadow = true;            // 뒤집힌 원뿔: 끝이 바닥(위치)
-    const head = new THREE.Mesh(new THREE.CylinderGeometry(0.36 * s, 0.36 * s, 0.42 * s, 20), mat);
+    const head = new THREE.Mesh(headG, mat);
     head.position.y = 1.5 * s + 0.12 * s + 0.21 * s; head.castShadow = true;                   // 몸 위에 조금 띄워 머리로 읽히게
+    const bodyEdge = new THREE.Mesh(coneG, edge); bodyEdge.rotation.x = Math.PI; bodyEdge.position.y = 0.75 * s; bodyEdge.scale.setScalar(1.14);
+    const headEdge = new THREE.Mesh(headG, edge); headEdge.position.y = head.position.y; headEdge.scale.setScalar(1.18);
     const ring = new THREE.Mesh(new THREE.RingGeometry(0.55 * s, 0.75 * s, 32), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
-    ring.rotation.x = -Math.PI / 2; ring.position.y = 1.5;
-    g.add(body, head, ring);
+    ring.rotation.x = -Math.PI / 2; ring.position.y = 1.5; ring.scale.setScalar(1.15);
+    g.add(bodyEdge, headEdge, body, head, ring);
     g.userData = { mat, ring, top: 1.5 * s + 0.12 * s + 0.42 * s };
     return g;
   }
@@ -204,28 +217,53 @@ const View3D = (() => {
   function syncPeople() {
     if (!ready) return;
     if (!peopleGroup) { peopleGroup = new THREE.Group(); scene.add(peopleGroup); }
-    peopleGroup.visible = S.layers.people !== false;
+    const vis = S.layers.people !== false;
+    let changedPeople = peopleGroup.visible !== vis;
+    peopleGroup.visible = vis;
     const list = (api.peopleSource && api.peopleSource()) || [], seen = new Set();
     for (const c of list) {
       if (c.x == null || c.y == null) continue;
       seen.add(c.id);
       let p = peopleMap.get(c.id);
-      if (!p) { p = { obj: personModel(c.color), key: '', x: c.x, y: c.y }; peopleGroup.add(p.obj); peopleMap.set(c.id, p); }
+      if (!p) { p = { obj: personModel(c.color), key: '', x: c.x, y: c.y }; peopleGroup.add(p.obj); peopleMap.set(c.id, p); changedPeople = true; }
       const key = [c.name, c.color, c.online, c.role].join('|');
-      if (p.key !== key) { p.key = key; lookPerson(p, c); }
-      p.tx = c.x; p.ty = c.y; p.danger = c.level === 'danger' && c.online !== false;
+      if (p.key !== key) { p.key = key; lookPerson(p, c); changedPeople = true; }
+      p.tx = c.x; p.ty = c.y; p.danger = c.level === 'danger' && c.online !== false; p.equip = c.role === 'operator' ? c.equipment : null;
     }
-    for (const [id, p] of peopleMap) if (!seen.has(id)) { peopleGroup.remove(p.obj); dispose(p.obj); peopleMap.delete(id); }
+    for (const [id, p] of peopleMap) if (!seen.has(id)) { peopleGroup.remove(p.obj); dispose(p.obj); peopleMap.delete(id); changedPeople = true; }
+    if (changedPeople) dirty = true;   // 이름·색·인원 수가 바뀌었을 때만 (위치 이동은 animatePeople 이 알림)
   }
+  let animAt = 0;
   function animatePeople(now) {
-    if (!origin3d || !peopleMap.size) return;
-    const k = (now / 800) % 1;
+    const dt = Math.min(0.1, Math.max(0, (now - (animAt || now)) / 1000)); animAt = now;
+    let moving = animateEquipment();
+    if (!origin3d || !peopleMap.size) return moving;
+    const k = (now / 800) % 1, a = 1 - Math.exp(-dt / 0.25);
     for (const p of peopleMap.values()) {
-      if (p.tx != null) { p.x += (p.tx - p.x) * 0.15; p.y += (p.ty - p.y) * 0.15; }   // 1초 간격 위치를 부드럽게 잇는다
+      if (p.tx != null && Math.hypot(p.tx - p.x, p.ty - p.y) > 0.01) moving = true;
+      if (p.danger) moving = true;   // 위험 고리가 퍼지는 중
+      if (p.tx != null) { p.x += (p.tx - p.x) * a; p.y += (p.ty - p.y) * a; }   // 1초 간격 위치를 부드럽게 잇는다 (프레임 속도와 무관)
+      if (p.equip && LiveMotion.pose(p.equip)) { const d = LiveMotion.pose(p.equip); p.x = d.x; p.y = d.y; }   // 운전원 핀은 장비와 함께
       p.obj.position.set((p.x - origin3d.ox) * K, 0, (p.y - origin3d.oy) * K);
       const r = p.obj.userData.ring, sc = p.danger ? 1 + 0.8 * k : 1;
       r.scale.set(sc, sc, 1); r.material.opacity = p.danger ? 0.95 * (1 - k) + 0.1 : 0.85;
     }
+    return moving;
+  }
+
+  // 2026-11-24 실시간 장비: 본체·위험 구역·표지를 한 묶음으로 만들고(build), 매 프레임 LiveMotion 자세로 옮기고 돌린다.
+  //   전에는 다시 짓기(build) 때만 장비가 옮겨져, 운전원 핀만 움직이고 굴착기는 제자리에 있다가 뚝 건너뛰었다
+  const equipAnim = new Map();   // 장비 id → { g, x0, y0, h0 }
+  function animateEquipment() {
+    if (!origin3d || !equipAnim.size) return false;
+    const moving = LiveMotion.step();
+    for (const [id, e] of equipAnim) {
+      const d = LiveMotion.pose(id);
+      if (!d) continue;
+      e.g.position.set((d.x - origin3d.ox) * K, 0, (d.y - origin3d.oy) * K);
+      e.g.rotation.y = -(d.h - e.h0);
+    }
+    return moving;
   }
 
   /** ShapeGeometry 의 UV 를 배치도 이미지 좌표로 다시 매긴다 (항공 사진을 지면·지붕에 입힘) */
@@ -615,9 +653,9 @@ const View3D = (() => {
 
     if (S.settings.showUnderground) buildUnderground(polys, ox, oy, W, add);
 
-    // 보행 구역 / 환경 구역
-    if (S.walkableAreaPolygon.length >= 6) {
-      add(flatMesh(S.walkableAreaPolygon, ox, oy, new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide }), 0.3));
+    // 현장 경계(= 보행 구역) 바닥 / 환경 구역
+    if (S.siteBoundary.length >= 6) {
+      add(flatMesh(S.siteBoundary, ox, oy, new THREE.MeshBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.10, depthWrite: false, side: THREE.DoubleSide }), 0.3));
     }
     // v14.8 무늬 텍스처 (hazardviz.js 무늬 칸을 m 단위로 반복 — 2D 지도와 같은 무늬)
     const hzTex = (kind, metersPerTile) => {
@@ -637,12 +675,7 @@ const View3D = (() => {
       sp.position.copy(W(c.x, c.y, 34)); add(sp);
     });
 
-    // 도로 / 울타리
-    const roadMat = new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.7 });
-    S.polylines.forEach(l => {
-      const pts = []; for (let i = 0; i < l.points.length; i += 2) pts.push(W(l.points[i], l.points[i + 1], 1));
-      add(tube(pts, (l.width || 3) / 2 * K, roadMat, 0.15));
-    });
+    // 울타리
     // v14.8 울타리: 실제 가설 울타리처럼 빨강·흰 사선 줄무늬 판(높이 1.2 m) + 기둥 2.5 m 간격 + 출입 금지 표지.
     // 닫힌 울타리는 안쪽 바닥을 빨간 빗금(통행 금지 구역)으로
     const stripeCanvas = document.createElement('canvas'); stripeCanvas.width = 128; stripeCanvas.height = 64;
@@ -684,22 +717,35 @@ const View3D = (() => {
 
     // 장비 · 위험물
     const field = getRiskField();
+    equipAnim.clear();
     field.equipments.forEach((eq, k) => {
       const m = eq.marker;
+      // 묶음: 바깥(g)은 장비 자리에, 안쪽(inner)은 그만큼 되돌려 — 안의 것은 절대 좌표로 그리고, g 를 옮기고 돌리면 함께 움직임
+      const g = new THREE.Group(), inner = new THREE.Group(), P0 = W(m.x, m.y, 0);
+      g.position.copy(P0); inner.position.copy(P0).negate(); g.add(inner);
       const shapes = eq.isFullControl()
         ? [{ type: 'circle', zone: 'red', cx: eq.xc, cy: eq.yc, radius: eq.getMaxRadius() }]
         : eq.getZoneShapes();
+      // 2026-11-25 작업 중이면 위험 구역은 작업 위치에 고정 → 움직이는 묶음(g) 밖에 둠 (장비 모형만 따라 움직임)
+      const zoneParent = eq.fixedZone && !eq.isFullControl() ? null : inner;
       if (S.layers.zones !== false) shapes.forEach((sh, j) => {
         const zs = zoneStyle(sh.zone);
         const mat = new THREE.MeshBasicMaterial({ color: zs.hex, transparent: true, opacity: zs.opacity, depthWrite: false, side: THREE.DoubleSide });
-        add(flatMesh(zoneShapePolygon(sh, 48), ox, oy, mat, 0.8 + k * 0.03 + j * 0.01));
+        const mesh = flatMesh(zoneShapePolygon(sh, 48), ox, oy, mat, 0.8 + k * 0.03 + j * 0.01);
+        if (zoneParent) zoneParent.add(mesh); else add(mesh);
       });
+      if (!zoneParent && eq.padZone() && S.layers.zones !== false) {
+        const zt = sprite('⛔', '작업 구역 · 출입 금지', '#ef4444', 30);
+        zt.position.copy(W(eq.xc, eq.yc - eq.getMaxRadius(), 14)); add(zt);
+      }
       const model = equipmentModel(m.type, (EQUIPMENT_TYPES[m.type] || {}).color || '#f59e0b');
       model.scale.setScalar(3);   // 실제 장비 크기에 가깝게 (굴착기 약 7.5m)
-      model.position.copy(W(m.x, m.y, 0)); model.rotation.y = -(m.heading || 0);
-      add(model);
+      model.position.copy(P0); model.rotation.y = -(m.heading || 0);
+      inner.add(model);
       const sp = sprite(m.icon || '⚙️', eq.isFullControl() ? '전면 통제' : m.label, eq.isFullControl() ? '#ef4444' : '#f59e0b', 42);
-      sp.position.copy(W(m.x, m.y, m.type === 'towerCrane' ? 95 : 60)); add(sp);
+      sp.position.copy(W(m.x, m.y, m.type === 'towerCrane' ? 95 : 60)); inner.add(sp);
+      add(g);
+      if (m._live) equipAnim.set(m.id, { g, h0: m.heading || 0 });
     });
     field.simple.forEach((m, k) => {
       if (S.layers.zones === false) return;
@@ -732,12 +778,13 @@ const View3D = (() => {
       });
     }
     if (api.onBuilt) api.onBuilt(sunInfo);
+    dirty = true;
     syncPeople();   // 레이어(👷 인원) 켜고 끔을 다음 갱신(0.3초)까지 기다리지 않고 바로
   }
 
-  /** 지하 1층 주차장: 보행 구역(없으면 건물 범위+여유) 형태로 절차적 생성 */
+  /** 지하 1층 주차장: 현장 경계(없으면 건물 범위+여유) 형태로 절차적 생성 */
   function buildUnderground(polys, ox, oy, W, add) {
-    let outline = S.walkableAreaPolygon.length >= 6 ? S.walkableAreaPolygon : null;
+    let outline = S.siteBoundary.length >= 6 ? S.siteBoundary : null;
     if (!outline) {
       const all = polys.filter(p => p.length >= 6);
       if (!all.length) return;
@@ -774,20 +821,21 @@ const View3D = (() => {
     show(container) {
       if (!available()) return false;
       if (!ready) init(container);
-      resize(); build();
+      resize(); build(); dirty = true;
       if (typeof Basemap !== 'undefined') Basemap.onTile = () => { clearTimeout(groundTimer); groundTimer = setTimeout(drawGround, 150); };
       if (!running) { running = true; loop(); }
       return true;
     },
     hide() { running = false; if (typeof Basemap !== 'undefined') Basemap.onTile = null; },
-    rebuild() { if (ready && running) build(); },
+    rebuild() { if (ready && running) build(); dirty = true; },
     resize,
     get sun() { return sunInfo; },
     onPick: null,     // (건물 번호 | null) — app.js 가 지정
     onBuilt: null,    // (태양 정보) — 3D 패널 표시
     peopleSource: null,   // () => [{id, x, y, name, role, online, level, color}] — project.js 가 지정
     /** 시험·디버그용 상태 */
-    stats: () => ({ ready, running, satellite: groundOn, people: peopleMap.size, peopleVisible: !!(peopleGroup && peopleGroup.visible), pickables: pickables.length }),
+    stats: () => ({ ready, running, lastDraw, satellite: groundOn, people: peopleMap.size, peopleVisible: !!(peopleGroup && peopleGroup.visible), pickables: pickables.length,
+      equip: Object.fromEntries([...equipAnim].map(([id, e]) => [id, { x: e.g.position.x / K + (origin3d ? origin3d.ox : 0), y: e.g.position.z / K + (origin3d ? origin3d.oy : 0) }])) }),   // 시험용: 실시간 장비 화면 위치(m)
   };
   return api;
 })();

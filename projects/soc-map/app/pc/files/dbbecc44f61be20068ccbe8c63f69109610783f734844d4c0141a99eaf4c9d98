@@ -1,0 +1,425 @@
+"""클릭·사각형으로 건물 외곽선 따기 (v14.7) — MobileSAM (Segment Anything 경량판, Apache-2.0)
+
+학습한 YOLO 모델이 처음 보는 도면 양식에서 건물을 못 찾을 때(P1-2) 쓰는 반자동 도구.
+학습이 필요 없는 범용 분할 모델이라 도면 양식에 덜 민감하다.
+
+  - 점(클릭): 클릭한 곳 주변을 640 → 1280 → 2560 px → 전체 순서로 잘라 분할하고,
+    잘라 낸 가장자리에 닿지 않는(= 잘리지 않은) 가장 큰 마스크를 고른다. 큰 도면에서 작은 건물이
+    1024 px 로 줄며 뭉개지는 것을 막는다.
+  - 사각형(끌기): 사각형 + 여백만 잘라 분할 → 사각형 안에서 가장 큰 덩어리.
+  - 후처리: 빗금(해치) 사이 틈 메우기(닫힘 연산) → 구멍 채우기 → 클릭 지점을 품은 외곽선 → 단순화.
+
+가중치 models/mobile_sam.pt (약 40 MB, ultralytics assets 배포본) 가 없으면 처음 쓸 때 내려받는다.
+CPU 시간(i5-1135G7): 잘라 낸 한 장 인코딩 약 0.25~0.4초 + 마스크 수십 ms.
+"""
+import hashlib
+import os
+import threading
+import time
+from collections import OrderedDict
+
+import cv2
+import numpy as np
+
+MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+SAM_PATH = os.path.join(MODEL_DIR, "mobile_sam.pt")
+
+POINT_WINDOWS = (640, 1280, 2560)   # 클릭 주변 잘라 낼 크기(px) — 작은 것부터
+BOX_MARGIN = 0.15                   # 사각형 바깥 여백 (긴 변 비율)
+EDGE_PX = 3                         # 이 안쪽까지 닿으면 「잘린 마스크」로 봄
+SIMPLIFY_RATIO = 0.004              # yolo_inference 와 같은 단순화 (둘레 대비)
+MAX_FRACTION = 0.85                 # 잘라 낸 그림의 이 비율보다 큰 마스크는 바탕으로 봄
+MAX_FULL_FRACTION = 0.2             # 도면 전체를 볼 때는 더 엄격히 (한 동이 도면의 20 % 를 넘는 일은 드묾 — 설계값)
+CACHE_IMAGES = 3
+
+_predictor = None
+_lock = threading.Lock()
+_cache = OrderedDict()              # image_id → BGR 이미지 (같은 도면을 클릭마다 다시 올리지 않게)
+
+
+def _ensure_weights():
+    if os.path.exists(SAM_PATH):
+        return SAM_PATH
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    from ultralytics.utils.downloads import attempt_download_asset
+    got = attempt_download_asset(SAM_PATH)
+    if not os.path.exists(got):
+        raise FileNotFoundError("MobileSAM 가중치(mobile_sam.pt)를 내려받지 못했습니다 (인터넷 연결 필요).")
+    return got
+
+
+def _get_predictor():
+    global _predictor
+    if _predictor is None:
+        from ultralytics.models.sam import Predictor as SAMPredictor
+        path = _ensure_weights()
+        _predictor = SAMPredictor(overrides=dict(conf=0.0, task="segment", mode="predict", imgsz=1024,
+                                                 model=path, save=False, verbose=False))
+        _predictor.setup_model()
+    return _predictor
+
+
+def sam_available():
+    return os.path.exists(SAM_PATH)
+
+
+# ── 이미지 보관 ──────────────────────────────────────────
+
+def put_image(contents: bytes):
+    image_id = hashlib.sha1(contents).hexdigest()[:20]
+    if image_id not in _cache:
+        img = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("이미지를 읽을 수 없습니다.")
+        _cache[image_id] = img
+        while len(_cache) > CACHE_IMAGES:
+            _cache.popitem(last=False)
+    _cache.move_to_end(image_id)
+    return image_id
+
+
+def get_image(image_id):
+    img = _cache.get(image_id or "")
+    if img is not None:
+        _cache.move_to_end(image_id)
+    return img
+
+
+# ── 분할 ─────────────────────────────────────────────────
+
+def _masks(crop, point=None, box=None):
+    """잘라 낸 그림 한 장 → (마스크들 bool[N,H,W], 점수들)"""
+    p = _get_predictor()
+    p.set_image(crop)
+    try:
+        kw = dict(bboxes=[box]) if box is not None else dict(points=[point], labels=[1])
+        masks, boxes = p.inference_features(p.features, src_shape=crop.shape[:2], multimask_output=True, **kw)
+    finally:
+        p.reset_image()
+    if masks is None:
+        return np.zeros((0,) + crop.shape[:2], bool), np.zeros(0)
+    return masks.cpu().numpy().astype(bool), boxes[:, 4].cpu().numpy()
+
+
+def _clean(mask, seed=None):
+    """마스크 → 외곽선 하나 (빗금 틈 메우기 · 구멍 채우기 · 클릭 지점을 품은 덩어리)"""
+    m = mask.astype(np.uint8) * 255
+    ys, xs = np.nonzero(m)
+    if len(xs) == 0:
+        return None
+    side = max(xs.max() - xs.min(), ys.max() - ys.min())
+    k = int(np.clip(side * 0.02, 3, 15)) | 1
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    if seed is not None:
+        inside = [c for c in cnts if cv2.pointPolygonTest(c, (float(seed[0]), float(seed[1])), True) >= -k]
+        cnts = inside or cnts
+    c = max(cnts, key=cv2.contourArea)
+    if cv2.contourArea(c) < 30:
+        return None
+    eps = SIMPLIFY_RATIO * cv2.arcLength(c, True)
+    c = cv2.approxPolyDP(c, eps, True)
+    return c.reshape(-1, 2)
+
+
+# ── 2026-11-22 위성 영상: 건물/바닥(주차장·도로·잔디) 구별용 특징 ─────────────
+FEATURE_NAMES = ("log_area", "score", "sat", "val", "val_std", "exg", "exg_std", "lap", "edges",
+                 "tophat_w", "tophat_b", "rect", "solidity", "border", "elong", "lines", "lines_par")
+
+
+def _stripe_lines(gray, inner, mpp):
+    """주차선처럼 짧고 밝은 곧은 선: (100 m² 당 개수, 나란한 정도 0~1)"""
+    tw = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
+    bw = ((tw > 35) & inner).astype(np.uint8) * 255
+    ls = cv2.HoughLinesP(bw, 1, np.pi / 180, threshold=8, minLineLength=max(6, int(2.0 / mpp)), maxLineGap=2)
+    if ls is None:
+        return 0.0, 0.0
+    ls = ls.reshape(-1, 4)
+    ang = np.mod(np.arctan2(ls[:, 3] - ls[:, 1], ls[:, 2] - ls[:, 0]), np.pi)
+    ln = np.hypot(ls[:, 2] - ls[:, 0], ls[:, 3] - ls[:, 1])
+    h, _ = np.histogram(ang, bins=18, range=(0, np.pi), weights=ln)
+    par = float(h.max() / max(1e-6, h.sum()))
+    area100 = inner.sum() * mpp * mpp / 100
+    return float(len(ls) / max(0.5, area100)), par
+
+
+def mask_features(img, mask, score, mpp):
+    """마스크 한 개의 특징 (학습·판정 공용). img BGR, mask bool, mpp = m/px"""
+    m8 = mask.astype(np.uint8)
+    n = int(m8.sum())
+    if n < 10:
+        return [0.0] * len(FEATURE_NAMES)
+    inner = cv2.erode(m8, np.ones((5, 5), np.uint8)).astype(bool)
+    if inner.sum() < 10:
+        inner = mask
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    b, g, r = [img[..., i].astype(np.float32) for i in range(3)]
+    exg = (2 * g - r - b)[mask] / 255.0
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))[inner].mean() / 255.0
+    edges = (cv2.Canny(gray, 60, 140) > 0)[inner].mean()
+    ker = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))                 # 약 2 m — 주차선·차·옥상 설비 크기
+    th_w = (cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, ker) > 30)[inner].mean()
+    th_b = (cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, ker) > 30)[inner].mean()
+    cnts, _ = cv2.findContours(m8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    c = max(cnts, key=cv2.contourArea)
+    (_, _), (rw, rh), _ = cv2.minAreaRect(c)
+    hull = cv2.contourArea(cv2.convexHull(c))
+    H, W = mask.shape
+    border = (mask[0, :].sum() + mask[-1, :].sum() + mask[:, 0].sum() + mask[:, -1].sum()) / max(1.0, 2 * (H + W))
+    lines, par = _stripe_lines(gray, inner, mpp)
+    return [float(np.log(n * mpp * mpp)), float(score), float(hsv[..., 1][mask].mean() / 255), float(hsv[..., 2][mask].mean() / 255),
+            float(hsv[..., 2][mask].std() / 255), float(exg.mean()), float(exg.std()), float(lap), float(edges), float(th_w), float(th_b),
+            float(n / max(1.0, rw * rh)), float(n / max(1.0, hull)), float(border), float(min(rw, rh) / max(1.0, max(rw, rh))),
+            min(lines, 20.0), par]
+
+
+def _touches(bb, crop_box, img_shape):
+    """마스크 바깥 사각형이 잘라 낸 가장자리(그림 원래 가장자리 제외)에 닿는지"""
+    x0, y0, x1, y1 = crop_box
+    H, W = img_shape[:2]
+    mx0, my0, mx1, my1 = bb
+    return ((x0 > 0 and mx0 <= EDGE_PX) or (y0 > 0 and my0 <= EDGE_PX)
+            or (x1 < W and mx1 >= (x1 - x0) - 1 - EDGE_PX) or (y1 < H and my1 >= (y1 - y0) - 1 - EDGE_PX))
+
+
+def _window(cx, cy, s, W, H):
+    s = min(s, max(W, H))
+    x0 = int(np.clip(cx - s / 2, 0, max(0, W - s))); y0 = int(np.clip(cy - s / 2, 0, max(0, H - s)))
+    return x0, y0, min(W, x0 + s), min(H, y0 + s)
+
+
+def segment_point(img, x, y):
+    H, W = img.shape[:2]
+    if not (0 <= x < W and 0 <= y < H):
+        raise ValueError("클릭한 곳이 도면 밖입니다.")
+    tries = []
+    sizes = [s for s in POINT_WINDOWS if s < max(W, H)] + [max(W, H)]
+    for s in sizes:
+        x0, y0, x1, y1 = _window(x, y, s, W, H)
+        crop = img[y0:y1, x0:x1]
+        lx, ly = x - x0, y - y0
+        masks, scores = _masks(crop, point=[lx, ly])
+        area_c = crop.shape[0] * crop.shape[1]
+        whole = (x1 - x0) >= W and (y1 - y0) >= H
+        limit = MAX_FULL_FRACTION if whole else MAX_FRACTION   # 도면 전체에서는 바탕(대지·도로로 나뉜 구역)을 더 엄격히 거름
+        best = None
+        for mk, sc in zip(masks, scores):
+            if not mk[int(ly), int(lx)]:
+                continue
+            ys, xs = np.nonzero(mk)
+            frac = len(xs) / area_c
+            bb = (xs.min(), ys.min(), xs.max(), ys.max())
+            if frac > limit or _touches(bb, (x0, y0, x1, y1), img.shape):
+                continue
+            if best is None or len(xs) > best[0]:
+                best = (len(xs), mk, float(sc))
+        tries.append(s)
+        if best is not None:
+            poly = _clean(best[1], seed=(lx, ly))
+            if poly is not None:
+                return {"polygon": (poly + [x0, y0]).tolist(), "score": round(best[2], 3), "window": s, "tries": tries}
+    return {"polygon": None, "tries": tries,
+            "reason": "클릭한 곳에서 닫힌 건물 영역을 찾지 못했습니다. 건물을 사각형으로 감싸듯 끌어 보세요."}
+
+
+def segment_box(img, bx0, by0, bx1, by1):
+    H, W = img.shape[:2]
+    bx0, bx1 = sorted((float(bx0), float(bx1))); by0, by1 = sorted((float(by0), float(by1)))
+    bx0, by0 = max(0, bx0), max(0, by0); bx1, by1 = min(W - 1, bx1), min(H - 1, by1)
+    if bx1 - bx0 < 6 or by1 - by0 < 6:
+        raise ValueError("사각형이 너무 작습니다.")
+    mg = max(BOX_MARGIN * max(bx1 - bx0, by1 - by0), 24)
+    x0, y0 = int(max(0, bx0 - mg)), int(max(0, by0 - mg)); x1, y1 = int(min(W, bx1 + mg)), int(min(H, by1 + mg))
+    crop = img[y0:y1, x0:x1]
+    box = [bx0 - x0, by0 - y0, bx1 - x0, by1 - y0]
+    masks, scores = _masks(crop, box=box)
+    if not len(masks):
+        return {"polygon": None, "reason": "사각형 안에서 건물 영역을 찾지 못했습니다."}
+    # 사각형을 가장 잘 채우는(사각형 밖으로 덜 새는) 마스크: 점수 × (사각형 안 비율)
+    bxi = np.zeros(crop.shape[:2], bool); bxi[int(box[1]):int(box[3]) + 1, int(box[0]):int(box[2]) + 1] = True
+    best, best_v = None, -1
+    for mk, sc in zip(masks, scores):
+        n = mk.sum()
+        if n == 0:
+            continue
+        v = float(sc) * (mk & bxi).sum() / n * min(1.0, n / max(1, bxi.sum() * 0.15))
+        if v > best_v:
+            best, best_v = (mk & bxi, float(sc)), v
+    poly = _clean(best[0], seed=((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)) if best else None
+    if poly is None:
+        return {"polygon": None, "reason": "사각형 안에서 건물 영역을 찾지 못했습니다."}
+    return {"polygon": (poly + [x0, y0]).tolist(), "score": round(best[1], 3), "window": max(x1 - x0, y1 - y0)}
+
+
+# ═══════════════════════════════════════════════
+#  2026-11-22 위성 영상 전용 — 지붕이 여러 덩어리(층·설비·옥탑·벽 옆면)로 나뉘면 하나로 모으고,
+#  주차장·도로·잔디처럼 보이면 「바닥 같음」으로 알린다. 건물/바닥 분류기는 공식 건물 외곽선(브이월드)과
+#  OSM 주차장으로 자동 라벨을 붙여 학습한 로지스틱 회귀(aerial_model.json, 특징 FEATURE_NAMES)
+# ═══════════════════════════════════════════════
+AERIAL = {
+    "MPP": 0.25,          # 클라이언트가 보내는 영상 해상도 (m/px)
+    "T_MAIN": 0.35,       # 이보다 건물 같지 않으면 「바닥 같음」(그래도 추가 가능). 0.65 는 맞추기 영역에만 맞아 새 동네에서 건물 30 %를 바닥으로 봄 → 보수적으로
+    "T_PART": 0.85,       # 합칠 조각(옆 지붕·옥탑·벽 옆면)의 건물 같음 기준 (낮으면 나무·바닥까지 합침)
+    "GROW": 1.0,          # 조각이 이 거리(m) 안에서 닿아야 합침
+    "CLOSE": 1.5,         # 난간·줄눈 같은 틈 메우기 (m)
+    "MAX_GROW": 3.0,      # 합친 결과가 처음 덩어리의 몇 배까지 (이웃 건물까지 번지지 않게)
+    "POINT_GROW": 0,      # 한 번 누르기에서는 합치지 않음 — 붙어 있는 옆집까지 합쳐짐(겹침 0.57 → 0.42). 사각형에서만 합침
+    "MAIN_BASE": 0,       # 1 = 사각형의 주 덩어리를 예전(도면) 방식으로 고르고 건물 같음은 동점일 때만
+}
+_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aerial_model.json")
+_model = None
+
+
+def _bprob(feats):
+    """건물일 확률 (모델 파일이 없으면 0.5 — 판정 안 함)"""
+    global _model
+    if _model is None:
+        try:
+            import json
+            with open(_MODEL_PATH, encoding="utf-8") as f:
+                _model = json.load(f)
+        except FileNotFoundError:
+            _model = {}
+    if not _model:
+        return 0.5
+    f = np.array(feats)[:len(_model["mean"])]          # 특징을 뒤에 더해도 옛 모델은 앞의 것만 씀
+    z = (f - np.array(_model["mean"])) / np.array(_model["std"])
+    return float(1 / (1 + np.exp(-(z @ np.array(_model["w"]) + _model["b"]))))
+
+
+def _many(crop, prompts):
+    """그림 한 장에 여러 프롬프트 (특징 계산은 한 번) → [(마스크, 점수, 프롬프트 번호)]"""
+    p = _get_predictor()
+    p.set_image(crop)
+    out = []
+    try:
+        for i, (kind, v) in enumerate(prompts):
+            kw = dict(bboxes=[v]) if kind == "box" else dict(points=[v], labels=[1])
+            masks, boxes = p.inference_features(p.features, src_shape=crop.shape[:2], multimask_output=True, **kw)
+            if masks is None:
+                continue
+            for mk, sc in zip(masks.cpu().numpy().astype(bool), boxes[:, 4].cpu().numpy()):
+                if mk.sum() >= 30:
+                    out.append((mk, float(sc), i))
+    finally:
+        p.reset_image()
+    return out
+
+
+def _px(m):
+    return max(1, int(round(m / AERIAL["MPP"])))
+
+
+def _finish(img, mask, seed, mpp):
+    """조각을 합친 마스크 → 틈 메우기 · 구멍 채우기 · 씨앗을 품은 덩어리 → 외곽선"""
+    k = _px(AERIAL["CLOSE"]) | 1
+    m = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    return _clean(m.astype(bool), seed=seed)
+
+
+def segment_aerial(img, box=None, point=None, opts=None):
+    """위성 영상(0.25 m/px)에서 건물 하나. box [x0,y0,x1,y1] 또는 point [x,y] (px).
+    돌려주는 값: polygon(없으면 None) · ground(바닥 같음) · fallback(바닥 같아도 「그래도 추가」할 외곽선) · parts(합친 조각 수) · prob"""
+    mpp = AERIAL["MPP"]
+    H, W = img.shape[:2]
+    if box is not None:
+        bx0, bx1 = sorted((float(box[0]), float(box[2]))); by0, by1 = sorted((float(box[1]), float(box[3])))
+        bx0, by0, bx1, by1 = max(0, bx0), max(0, by0), min(W - 1, bx1), min(H - 1, by1)
+        if bx1 - bx0 < 6 or by1 - by0 < 6:
+            raise ValueError("사각형이 너무 작습니다.")
+        prompts = [("box", [bx0, by0, bx1, by1])] + [("point", [bx0 + fx * (bx1 - bx0), by0 + fy * (by1 - by0)])
+                                                     for fx in (0.25, 0.5, 0.75) for fy in (0.25, 0.5, 0.75)]
+        cands = _many(img, prompts)
+        bxi = np.zeros((H, W), bool); bxi[int(by0):int(by1) + 1, int(bx0):int(bx1) + 1] = True
+        seed = ((bx0 + bx1) / 2, (by0 + by1) / 2)
+        rows = []
+        for mk, sc, i in cands:
+            n = mk.sum(); inside = (mk & bxi).sum() / n
+            if inside < 0.85:
+                continue
+            m2 = mk & bxi
+            rows.append({"m": m2, "sc": sc, "p": _bprob(mask_features(img, m2, sc, mpp)), "box": i == 0, "n": int(m2.sum())})
+        if not rows:
+            return {"polygon": None, "reason": "사각형 안에서 건물 영역을 찾지 못했습니다."}
+        # 사각형 프롬프트 결과 중 사각형을 가장 잘 채우는 것 = 주 덩어리
+        boxrows = [r for r in rows if r["box"]] or rows
+        if AERIAL["MAIN_BASE"]:
+            main = max(boxrows, key=lambda r: r["sc"] * min(1.0, r["n"] / max(1, bxi.sum() * 0.15)) * (0.9 + 0.1 * r["p"]))
+        else:
+            main = max(boxrows, key=lambda r: r["sc"] * min(1.0, r["n"] / max(1, bxi.sum() * 0.5)) * (0.5 + r["p"]))
+    else:
+        x, y = float(point[0]), float(point[1])
+        if not (0 <= x < W and 0 <= y < H):
+            raise ValueError("누른 곳이 영상 밖입니다.")
+        cands = _many(img, [("point", [x, y])])
+        seed = (x, y)
+        rows = []
+        for mk, sc, i in cands:
+            if not mk[int(y), int(x)]:
+                continue
+            n = mk.sum(); ys, xs = np.nonzero(mk)
+            if n > 0.5 * H * W or _touches((xs.min(), ys.min(), xs.max(), ys.max()), (0, 0, W, H), (H + 1, W + 1)):
+                continue
+            rows.append({"m": mk, "sc": sc, "p": _bprob(mask_features(img, mk, sc, mpp)), "box": True, "n": int(n)})
+        if not rows:
+            return {"polygon": None, "reason": "누른 곳에서 닫힌 건물 영역을 찾지 못했습니다. 건물을 사각형으로 감싸듯 끌어 보세요."}
+        # 주 덩어리는 도면과 같은 방식(잘리지 않은 가장 큰 것) — 「가장 건물 같은 것」을 고르면 지붕 조각을 골라 더 쪼개짐(새 동네 시험)
+        main = max(rows, key=lambda r: r["n"])
+        # 둘레 바깥 2.5 m 에 다시 눌러 옆 지붕 조각을 찾는다
+        ys, xs = np.nonzero(main["m"]); cx, cy = xs.mean(), ys.mean()
+        ring = []
+        cnts, _ = cv2.findContours(main["m"].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        c = max(cnts, key=cv2.contourArea).reshape(-1, 2)
+        for a in np.linspace(0, 2 * np.pi, 8, endpoint=False):
+            d = np.array([np.cos(a), np.sin(a)])
+            j = int(np.argmax((c - [cx, cy]) @ d))          # 그 방향으로 가장 먼 둘레 점
+            q = c[j] + d * _px(2.5)
+            if 0 <= q[0] < W and 0 <= q[1] < H:
+                ring.append(("point", [float(q[0]), float(q[1])]))
+        if ring and AERIAL["POINT_GROW"]:
+            for mk, sc, i in _many(img, ring):
+                n = mk.sum(); ys2, xs2 = np.nonzero(mk)
+                if n > AERIAL["MAX_GROW"] * main["n"] or _touches((xs2.min(), ys2.min(), xs2.max(), ys2.max()), (0, 0, W, H), (H + 1, W + 1)):
+                    continue
+                rows.append({"m": mk, "sc": sc, "p": _bprob(mask_features(img, mk, sc, mpp)), "box": False, "n": int(n)})
+    # 주 덩어리가 바닥 같으면 → 알림 (그래도 추가할 수 있게 외곽선은 함께)
+    if main["p"] < AERIAL["T_MAIN"]:
+        fb = _clean(main["m"], seed=seed)
+        return {"polygon": None, "ground": True, "prob": round(main["p"], 2), "fallback": fb.tolist() if fb is not None else None,
+                "reason": "주차장·도로·바닥처럼 보입니다 (건물 외곽선이 아닐 수 있음)."}
+    # 주 덩어리에 닿는 건물 같은 조각을 합친다 (층이 나뉜 지붕 · 옥탑 · 벽 옆면)
+    union = main["m"].copy()
+    grow = cv2.dilate(union.astype(np.uint8), np.ones((_px(AERIAL["GROW"]) * 2 + 1,) * 2, np.uint8)).astype(bool)
+    parts = 1
+    for r in sorted(rows, key=lambda r: -r["p"]):
+        if r is main or r["p"] < AERIAL["T_PART"] or not (r["m"] & grow).any():
+            continue
+        new = r["m"] & ~union
+        if new.sum() < 0.05 * r["n"]:
+            continue                                         # 이미 들어 있는 조각
+        if (union | r["m"]).sum() > AERIAL["MAX_GROW"] * main["n"]:
+            continue
+        union |= r["m"]; parts += 1
+        grow = cv2.dilate(union.astype(np.uint8), np.ones((_px(AERIAL["GROW"]) * 2 + 1,) * 2, np.uint8)).astype(bool)
+    poly = _finish(img, union, seed, mpp)
+    if poly is None:
+        return {"polygon": None, "reason": "외곽선을 만들지 못했습니다."}
+    return {"polygon": poly.tolist(), "score": round(main["sc"], 3), "prob": round(main["p"], 2), "parts": parts}
+
+
+def segment(image_id, point=None, box=None, aerial=False):
+    img = get_image(image_id)
+    if img is None:
+        raise KeyError(image_id)
+    t = time.perf_counter()
+    with _lock:   # ultralytics 예측기는 동시 호출에 안전하지 않음
+        if aerial:
+            r = segment_aerial(img, box=box, point=point)
+        else:
+            r = segment_point(img, *point) if point is not None else segment_box(img, *box)
+    r["ms"] = round((time.perf_counter() - t) * 1000)
+    r["image_id"] = image_id
+    return r

@@ -1,0 +1,108 @@
+/* SOC-MAP 관리감독자 앱 (휴대폰) — field.css 위에 덧붙임 */
+button.card { width: 100%; text-align: left; color: inherit; font: inherit; }
+.card em { font-style: normal; font-size: 11px; font-weight: 700; color: #c4b5fd; background: #7c3aed33; border-radius: 6px; padding: 1px 6px; margin-left: 4px; vertical-align: 1px; }
+.prj-pick.on { border-color: #60a5fa; background: #1e3a8a50; }
+.section-title small { font-weight: 500; color: var(--muted); margin-left: 6px; letter-spacing: 0; }
+
+/* 상단 상태 */
+.sv-status { display: block; width: 100%; border: none; border-bottom: 3px solid var(--lv); color: inherit; text-align: left; font: inherit; padding: 10px 14px 9px; }
+.sv-status .lv { font-size: 21px; }
+.sv-kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 7px; }
+.sv-kpis span { display: flex; flex-direction: column; align-items: center; background: rgba(5,8,15,.35); border-radius: 9px; padding: 4px 2px; font-size: 11px; color: rgba(255,255,255,.8); }
+.sv-kpis b { font-size: 18px; font-weight: 900; color: #fff; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.sv-kpis .w b { color: #fdba74; }
+.sv-kpis .d b { color: #fca5a5; }
+
+/* 지도 */
+.map-legend { position: absolute; left: 10px; right: 64px; top: 10px; background: rgba(17,26,46,.92); border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px; font-size: 12.5px; color: var(--text-2); }
+.map-legend:empty { display: none; }
+
+/* 전체 알림 버튼 */
+.bc-fab { position: absolute; right: 14px; bottom: 14px; width: 64px; height: 64px; border-radius: 50%; border: none; z-index: 20; background: #2563eb; color: #fff; box-shadow: 0 6px 20px rgba(37,99,235,.55), inset 0 0 0 4px rgba(255,255,255,.15); display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.bc-fab span { font-size: 24px; line-height: 1; }
+.bc-fab small { font-size: 10.5px; font-weight: 700; margin-top: 2px; }
+
+/* 목록 */
+.row-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+.card.person.off { opacity: .6; }
+.card.person.danger { background: #ef44441f; animation: pulseBg 1s infinite; }
+@keyframes pulseBg { 50% { background: #ef444440; } }
+.card .body small b.d { color: #fca5a5; }
+.card.ev.unack { background: #ef44441c; border-color: #ef444466; }
+.card.ev.acked { opacity: .65; }
+.card.ev .body b { font-weight: 600; font-size: 14px; }
+.btn-sm { padding: 7px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); font-size: 13px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
+.btn-sm.danger { border-color: #ef444477; background: #ef444422; color: #fecaca; }
+.btn-danger { width: 100%; padding: 15px; font-size: 16px; font-weight: 800; border-radius: 14px; border: none; background: #dc2626; color: #fff; }
+.btn-primary:disabled, .btn-danger:disabled { opacity: .4; }
+.row-btns { display: flex; gap: 10px; margin-top: 10px; }
+.row-btns > * { flex: 1; width: auto; }
+.list-pane .row-btns .btn-ghost { padding: 12px 8px; font-size: 14px; }
+
+/* 시트 */
+.sheet.center { align-items: stretch; text-align: center; }
+.qr { display: flex; justify-content: center; padding: 14px; background: #fff; border-radius: 16px; margin: 4px auto; }
+.qr img, .qr canvas { display: block; }
+.join-code { font-size: 32px; font-weight: 900; letter-spacing: .25em; }
+.join-url { font-size: 12.5px; color: var(--muted); word-break: break-all; }
+.choice.two { flex-direction: row; }
+.choice.two button { flex: 1; text-align: center; }
+.quick { display: flex; flex-wrap: wrap; gap: 6px; }
+.quick button { padding: 8px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); font-size: 13px; color: var(--text-2); }
+.evac-hold {
+  --p: 0; position: relative; overflow: hidden; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; text-align: left;
+  width: 100%; padding: 16px; border-radius: 16px; border: 2px solid #ef4444; background: #3b0d0d; color: #fff; user-select: none; -webkit-user-select: none; touch-action: none;
+}
+.evac-hold::before { content: ''; position: absolute; inset: 0; width: calc(var(--p) * 1%); background: #dc2626; }
+.evac-hold span, .evac-hold small { position: relative; }
+.evac-hold span { font-size: 18px; font-weight: 900; }
+.evac-hold small { font-size: 12.5px; color: #fecaca; line-height: 1.45; }
+.person-head { display: flex; gap: 12px; align-items: center; border-left: 5px solid var(--c); padding-left: 12px; }
+.person-head .ic { font-size: 34px; }
+.person-head h2 { font-size: 20px; }
+.person-head small { color: var(--muted); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; background: var(--surface-2); border-radius: 12px; padding: 12px 14px; font-size: 14px; }
+.kv span { color: var(--muted); }
+.kv b { font-weight: 600; text-align: right; }
+
+/* SOS 경보 (깜박이지 않음) · 앱 알림 배너 */
+.sos-ov .dialog { border-color: #ef4444; background: #2a0f12; box-shadow: 0 0 0 6px rgba(239,68,68,.18); }
+.sos-ov .sos-where { font-size: 20px; font-weight: 800; line-height: 1.45; color: #fff; }
+.alarm-meta { color: #fecaca; font-size: 13px; line-height: 1.5; }
+.toast.notif { pointer-events: auto; display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; color: inherit; font: inherit;
+  border: 1px solid var(--line); border-left: 4px solid #ef4444; background: rgba(23,34,58,.98); }
+.toast.notif img { width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0; }
+.toast.notif span { flex: 1; min-width: 0; }
+.toast.notif b { display: block; font-size: 14px; }
+.toast.notif small { display: block; font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toast.notif time { font-size: 11.5px; color: var(--muted); flex-shrink: 0; align-self: flex-start; }
+
+/* 토스트 */
+.toasts { position: fixed; left: 12px; right: 12px; top: calc(12px + env(safe-area-inset-top)); z-index: 60; display: flex; flex-direction: column; gap: 8px; pointer-events: none; max-width: 536px; margin: 0 auto; }
+.toast { background: rgba(17,26,46,.97); border: 1px solid var(--line); border-left: 4px solid #3b82f6; border-radius: 12px; padding: 11px 13px; font-size: 14px; line-height: 1.45; box-shadow: 0 8px 24px rgba(0,0,0,.45); transition: opacity .4s, transform .4s; }
+.toast.ok { border-left-color: #10b981; } .toast.warn { border-left-color: #f59e0b; } .toast.err { border-left-color: #ef4444; }
+.toast.out { opacity: 0; transform: translateY(-8px); }
+
+/* 기상청 날씨 (v14.5) */
+.wx-box { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.wx-box .now { font-size: 14px; color: var(--text-2); line-height: 1.6; }
+.wx-box .now b { color: var(--text); }
+.wx-row { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; line-height: 1.45; padding: 7px 9px; border-radius: 9px; background: var(--surface-2); }
+.wx-row .st { flex-shrink: 0; font-weight: 800; min-width: 36px; }
+.wx-row small { display: block; color: var(--muted); font-size: 12px; }
+.wx-row.st-stop { background: #ef444426; } .wx-row.st-stop .st { color: #fca5a5; }
+.wx-row.st-warn { background: #f9731622; } .wx-row.st-warn .st { color: #fdba74; }
+.wx-row.st-caution .st { color: #fcd34d; }
+.wx-ok { font-size: 13px; color: var(--muted); }
+
+/* 2026-11-22 대피 점호 */
+.sv-evac { padding: 9px 12px; background: #450a0a; border-bottom: 2px solid #ef4444; display: flex; flex-direction: column; gap: 6px; }
+.sv-evac.ended { background: var(--surface-2); border-color: var(--line); }
+.se-head { display: flex; justify-content: space-between; font-size: 15px; }
+.se-nums { display: flex; gap: 12px; font-size: 13px; }
+.se-nums .ok b { color: #6ee7b7; } .se-nums .bad b { color: #fca5a5; }
+.se-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.se-list button { border: 1px solid var(--line); background: var(--surface-2); color: var(--text); border-radius: 999px; padding: 5px 11px; font-size: 13px; }
+.se-list button.lost { border-color: #ef4444; color: #fca5a5; font-weight: 800; }
+.se-btn { height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font-weight: 800; }
+.se-btn.end { background: #ef4444; border-color: #ef4444; color: #fff; }

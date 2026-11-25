@@ -1,0 +1,126 @@
+"""Web Push — 관리감독자 휴대폰으로 위험 경보 알림 보내기 (외부 라이브러리 없이 cryptography 로 구현)
+
+관리감독자 앱 화면이 꺼져 있거나 다른 앱을 보고 있어도 위험 구역 진입·SOS 를 휴대폰 알림으로 받기 위해 쓴다.
+  - RFC 8291 (aes128gcm 메시지 암호화) · RFC 8292 (VAPID 서버 인증) · RFC 8030 (전송)
+  - VAPID 키: backend/vapid_private.pem (처음 쓸 때 생성, *.pem 은 git 제외)
+  - 구독 정보는 관리감독자 앱이 브라우저에서 받아 서버에 등록한다 (projects/{pid}/push.json)
+  - 브라우저는 **정식 인증서 HTTPS**(예: cloudflared 터널)에서만 구독을 허용한다. 자체 서명 인증서에서는 앱 안 경보만 동작
+"""
+import base64
+import json
+import os
+import struct
+import time
+from urllib.parse import urlparse
+
+import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vapid_private.pem")
+SUBJECT = os.environ.get("SOCMAP_VAPID_SUBJECT", "mailto:soc-map@example.com")   # 푸시 서비스가 요구하는 연락처
+RECORD_SIZE = 4096
+_X962 = serialization.Encoding.X962
+_UNCOMPRESSED = serialization.PublicFormat.UncompressedPoint
+
+
+def b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def b64u_dec(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def _hkdf(salt, ikm, info, length):
+    return HKDF(algorithm=hashes.SHA256(), length=length, salt=salt, info=info).derive(ikm)
+
+
+_key = None
+
+
+def private_key():
+    global _key
+    if _key is None:
+        if os.path.exists(KEY_PATH):
+            with open(KEY_PATH, "rb") as f:
+                _key = serialization.load_pem_private_key(f.read(), password=None)
+        else:
+            _key = ec.generate_private_key(ec.SECP256R1())
+            with open(KEY_PATH, "wb") as f:
+                f.write(_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    return _key
+
+
+def public_key_b64() -> str:
+    """브라우저 pushManager.subscribe 의 applicationServerKey"""
+    return b64u(private_key().public_key().public_bytes(_X962, _UNCOMPRESSED))
+
+
+def vapid_authorization(endpoint: str, now: float = None) -> str:
+    """RFC 8292: 푸시 서비스 주소(aud)에 대해 ES256 으로 서명한 JWT"""
+    u = urlparse(endpoint)
+    enc = lambda obj: b64u(json.dumps(obj, separators=(",", ":")).encode())
+    head = enc({"typ": "JWT", "alg": "ES256"})
+    claims = enc({"aud": f"{u.scheme}://{u.netloc}", "exp": int((now or time.time()) + 12 * 3600), "sub": SUBJECT})
+    der = private_key().sign(f"{head}.{claims}".encode(), ec.ECDSA(hashes.SHA256()))
+    r, s = decode_dss_signature(der)
+    sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    return f"vapid t={head}.{claims}.{b64u(sig)}, k={public_key_b64()}"
+
+
+def encrypt(payload: bytes, p256dh: str, auth: str, salt: bytes = None, server_key=None) -> bytes:
+    """RFC 8291 aes128gcm 단일 레코드. salt·server_key 는 시험용으로만 지정한다"""
+    ua_public = b64u_dec(p256dh)
+    auth_secret = b64u_dec(auth)
+    ua_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), ua_public)
+    server_key = server_key or ec.generate_private_key(ec.SECP256R1())
+    as_public = server_key.public_key().public_bytes(_X962, _UNCOMPRESSED)
+    ecdh = server_key.exchange(ec.ECDH(), ua_key)
+    ikm = _hkdf(auth_secret, ecdh, b"WebPush: info\x00" + ua_public + as_public, 32)
+    salt = salt or os.urandom(16)
+    cek = _hkdf(salt, ikm, b"Content-Encoding: aes128gcm\x00", 16)
+    nonce = _hkdf(salt, ikm, b"Content-Encoding: nonce\x00", 12)
+    if len(payload) + 1 + 16 > RECORD_SIZE:
+        raise ValueError("알림 내용이 너무 깁니다.")
+    body = AESGCM(cek).encrypt(nonce, payload + b"\x02", None)   # 0x02 = 마지막 레코드 구분자
+    return salt + struct.pack(">IB", RECORD_SIZE, len(as_public)) + as_public + body
+
+
+def decrypt(body: bytes, ua_private, auth: str) -> bytes:
+    """encrypt 의 역 (브라우저 쪽 동작) — 시험용"""
+    salt, (rs, idlen) = body[:16], struct.unpack(">IB", body[16:21])
+    as_public, ct = body[21:21 + idlen], body[21 + idlen:]
+    ua_public = ua_private.public_key().public_bytes(_X962, _UNCOMPRESSED)
+    ecdh = ua_private.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), as_public))
+    ikm = _hkdf(b64u_dec(auth), ecdh, b"WebPush: info\x00" + ua_public + as_public, 32)
+    cek = _hkdf(salt, ikm, b"Content-Encoding: aes128gcm\x00", 16)
+    nonce = _hkdf(salt, ikm, b"Content-Encoding: nonce\x00", 12)
+    plain = AESGCM(cek).decrypt(nonce, ct, None).rstrip(b"\x00")
+    if not plain.endswith(b"\x02"):
+        raise ValueError("레코드 구분자 없음")
+    return plain[:-1]
+
+
+def send(subscription: dict, data: dict, ttl: int = 600, urgency: str = "high") -> int:
+    """구독 하나에 알림 전송. 반환: HTTP 상태 코드 (404·410 이면 구독이 사라진 것)"""
+    keys = subscription.get("keys") or {}
+    body = encrypt(json.dumps(data, ensure_ascii=False).encode("utf-8"), keys["p256dh"], keys["auth"])
+    endpoint = subscription["endpoint"]
+    r = requests.post(endpoint, data=body, timeout=10, headers={
+        "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
+        "TTL": str(ttl), "Urgency": urgency, "Authorization": vapid_authorization(endpoint)})
+    return r.status_code
+
+
+def valid_subscription(sub) -> bool:
+    try:
+        u = urlparse(sub["endpoint"])
+        return u.scheme == "https" and bool(u.netloc) and len(b64u_dec(sub["keys"]["p256dh"])) == 65 \
+            and len(b64u_dec(sub["keys"]["auth"])) >= 16
+    except Exception:
+        return False

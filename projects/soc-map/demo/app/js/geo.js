@@ -494,7 +494,7 @@ function closingTime(px, py, pvx, pvy, qx, qy, qvx, qvy, R) {
 function closestThreat(field, x, y, vx, vy) {
   let best = null;
   for (const eq of field.equipments || []) {
-    const v = eq.marker._v || {};
+    const v = eq.fixedZone ? {} : eq.marker._v || {};   // 작업 중 = 작업 구역 고정 → 구역은 다가오지 않음 (2026-11-25)
     const t = closingTime(x, y, vx, vy, eq.xc, eq.yc, v.vx, v.vy, eq.getMaxRadius());
     if (t && t.ttc <= TTC.WARN_S && (!best || t.ttc < best.ttc)) best = { ...t, eq, bearing: Math.atan2(eq.yc - y, eq.xc - x) };
   }

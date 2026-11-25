@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0b1120">
+<title>SOC-MAP v14 — 공사 현장 안전 위치 관제</title>
+<meta name="description" content="KOSHA 기반 건설현장 장비 충돌·위험도 맵과 안전 경로 탐색">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦺</text></svg>">
+<link rel="stylesheet" href="app/style.css">
+<!-- 3D 뷰어 전용 (인터넷 연결 필요). 없으면 3D 모드만 비활성화되고 나머지는 정상 동작 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" defer></script>
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- ═════════ 상단 바 ═════════ -->
+  <header class="topbar">
+    <button class="icon-tb" id="tbSidebar" title="패널 접기/펼치기">☰</button>
+    <div class="logo"><span class="logo-mark">🦺</span><b>SOC-MAP</b></div>
+
+    <div class="prj-switch-wrap">
+      <button class="prj-switch" id="prjSwitch" title="프로젝트 전환·관리">
+        <span class="prj-switch-ico">🏗️</span>
+        <span class="prj-switch-text"><b id="prjName">새 현장</b><small id="prjLoc">위치 미지정</small></span>
+        <span class="badge" id="prjBadge"></span>
+        <span class="caret">▾</span>
+      </button>
+      <div class="popover prj-menu" id="prjMenu" hidden>
+        <div class="pop-section">
+          <div class="label-sm" id="prjStatus"></div>
+          <label class="row menu-row" id="syncRow"><span>📡 실시간 동기화<small>배치를 바꾸면 현장 앱에 즉시 반영</small></span><span class="switch"><input type="checkbox" id="syncToggle"><span class="sl"></span></span></label>
+        </div>
+        <div class="pop-section menu">
+          <button class="menu-item" id="prjNewBtn"><span>＋</span>새 프로젝트<small>현장 위치로 프로젝트 만들기</small></button>
+          <button class="menu-item" id="prjOpenBtn"><span>📂</span>서버 프로젝트 열기<small>서버에 등록된 현장 목록</small></button>
+          <button class="menu-item" id="prjLocBtn"><span>📍</span>현장 위치 지정<small>로컬 프로젝트의 원점 설정</small></button>
+          <button class="menu-item" id="prjInfoBtn"><span>ⓘ</span>프로젝트 정보<small>참여 코드 · 관리자 키</small></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="top-status">
+      <span class="status-chip" id="backendChip" title="AI·현장 서버 상태"><span class="dot checking" id="statusDot"></span><span id="statusText">서버 확인 중…</span></span>
+      <button class="status-chip wx-chip" id="wxChip" hidden title="기상청 날씨 — 눌러서 현장 설정에서 자세히"></button>
+    </div>
+
+    <div class="top-actions">
+      <button class="icon-tb" id="tbUndo" title="실행 취소 (Ctrl+Z)">↶</button>
+      <button class="icon-tb" id="tbRedo" title="다시 실행 (Ctrl+Y)">↷</button>
+      <span class="tb-sep"></span>
+      <button class="icon-tb bell" id="alertBell" title="경보 (관제 화면으로)">🔔<span class="bell-count" id="bellCount" hidden></span></button>
+      <button class="btn btn-join" id="joinBtn" title="휴대폰으로 현장 합류 (QR)">📱 <span class="lbl">현장 합류</span></button>
+      <button class="icon-tb" id="helpBtn" title="단축키 · 도움말">?</button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <!-- ═════════ 내비게이션 레일 ═════════ -->
+    <nav class="rail" id="rail">
+      <button class="rail-btn" data-ws="layout"><span class="ri">🗺️</span><span class="rl">배치</span></button>
+      <button class="rail-btn" data-ws="route"><span class="ri">🧭</span><span class="rl">경로</span></button>
+      <button class="rail-btn" data-ws="monitor"><span class="ri">👷</span><span class="rl">관제</span><span class="rail-badge" id="monBadge"></span></button>
+      <button class="rail-btn" data-ws="plan"><span class="ri">📐</span><span class="rl">도면</span></button>
+      <button class="rail-btn" data-ws="site"><span class="ri">⚙️</span><span class="rl">현장</span></button>
+    </nav>
+
+    <!-- ═════════ 패널 ═════════ -->
+    <aside class="panel sidebar" id="panel">
+
+      <!-- 배치 -->
+      <section class="ws" data-ws="layout">
+        <header class="ws-head"><h2>현장 배치</h2><p>건물·동선·위험 구역을 그리고 장비와 위험물을 놓습니다.</p></header>
+        <div class="ws-body">
+          <div class="group">
+            <div class="group-title">그리기 도구</div>
+            <div class="tool-list" id="modeGrid"></div>
+          </div>
+          <div class="mode-slot" data-slot="layout"><div class="mode-options" id="modeOptions"></div></div>
+          <div class="group">
+            <div class="group-title">장비 <small>누른 뒤 지도에서 놓을 곳 누르기</small></div>
+            <div class="items-grid" id="equipmentGrid"></div>
+          </div>
+          <div class="group">
+            <div class="group-title">위험물 <button class="btn btn-xs" id="addHazardBtn">＋ 추가</button></div>
+            <div class="items-grid" id="hazardGrid"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 경로 -->
+      <section class="ws" data-ws="route">
+        <header class="ws-head"><h2>안전 경로</h2><p>위험 구역을 피하는 이동 경로를 찾고 최단 경로와 비교합니다.</p></header>
+        <div class="ws-body">
+          <button class="route-main" data-mode="route">
+            <span class="rm-ico">🧭</span>
+            <span class="rm-text"><b>안전 경로 탐색</b><small id="routeMainSub">출발지 → 도착지를 클릭</small></span>
+            <kbd>5</kbd>
+          </button>
+          <div class="mode-slot" data-slot="route"></div>
+          <div class="group">
+            <div class="group-title">결과</div>
+            <div class="route-card" id="routeCard"></div>
+          </div>
+          <div class="group">
+            <div class="group-title">탐색 기준</div>
+            <div class="field-row"><span>🛡️ 안전 우선도</span><b class="value" id="safetyLabel">10</b></div>
+            <input type="range" id="safetySlider" min="0" max="10" step="1" value="10">
+            <div class="hint">0 = 최단 거리 · 10 = 위험 구역 최대 회피</div>
+                      </div>
+        </div>
+      </section>
+
+      <!-- 관제 -->
+      <section class="ws" data-ws="monitor">
+        <header class="ws-head"><h2>현장 관제</h2><p>현장 앱으로 합류한 작업자·장비의 위치와 경보를 실시간으로 봅니다.</p></header>
+        <div class="ws-body">
+          <div class="mon-summary" id="monStatus"></div>
+          <div class="group">
+            <div class="group-title">인원 · 장비</div>
+            <div class="list" id="workerList"></div>
+          </div>
+          <div class="row-gap">
+            <button class="btn flex1" id="broadcastBtn">📢 전체 알림</button>
+            <button class="btn flex1" id="simWorkersBtn">🧪 가상 인원 투입</button>
+          </div>
+          <button class="btn report-btn" id="reportBtn" title="날짜별 출입 명부 · 경보 기록 — 인쇄(PDF)·엑셀(CSV)로 저장">📋 하루 안전 기록 <small>출입 · 경보 · 인쇄</small></button>
+          <div class="group">
+            <div class="group-title">대피 장소 · 목적지 <button class="btn btn-xs" id="placeAddBtn">＋ 지도에서 추가</button></div>
+            <div class="list" id="placeList"></div>
+            <div class="hint">근로자 앱의 안전 경로 목적지입니다. 「전체 알림 → 즉시 대피」를 보내면 근로자 앱이 가까운 대피 장소까지 경로를 안내합니다.</div>
+          </div>
+          <div class="group">
+            <div class="group-title">경보 기록 <button class="btn btn-danger btn-xs" id="ackAllBtn" hidden></button></div>
+            <div class="list events" id="eventList"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 도면 -->
+      <section class="ws" data-ws="plan">
+        <header class="ws-head"><h2>배치도</h2><p>도면을 올리고 AI로 건물을 인식한 뒤 실제 위치에 맞춥니다.</p></header>
+        <div class="ws-body">
+          <div class="step">
+            <div class="step-no">1</div>
+            <div class="step-body">
+              <div class="step-title">도면 업로드 · AI 건물 인식</div>
+              <div class="seg" id="imageTypeSeg">
+                <label><input type="radio" name="imageType" value="floorplan" checked>일반 배치도</label>
+                <label><input type="radio" name="imageType" value="construction">항공 사진</label>
+              </div>
+              <button class="btn btn-primary" id="uploadBtn" title="이미지·PDF 는 AI 가 건물을 찾고, CAD 원본(DXF)은 도형을 그대로 실제 단위로 읽습니다">⬆ 배치도 업로드 (이미지 · PDF · DXF)</button>
+              <div class="hint" id="dxfInfo" hidden></div>
+              <button class="btn" data-act="aipickMode" title="AI 가 건물을 못 찾았거나 빠뜨렸을 때 — 건물을 사각형으로 감싸 끌면 외곽선을 땁니다 (MobileSAM)">✨ AI 건물 따기 (감싸 끌기)</button>
+              <button class="btn" id="reanalyzeBtn" title="현재 도면을 지금 설정으로 다시 분석 (Ctrl+Z로 이전 결과 복원)">🔄 다시 분석</button>
+              <button class="btn" data-act="regularizeAll" title="모든 건물 외곽선을 단순화하고 주축 방향 직각으로 정리 (Ctrl+Z로 되돌리기)">📐 외곽선 직각 보정 (구조 정합)</button>
+              <details class="adv" id="aiAdvanced">
+                <summary>AI 검출 설정 <span class="label-sm" id="aiOptsSummary"></span></summary>
+                <div class="adv-body">
+                  <div class="field-row"><span>신뢰도 임계값</span><b class="value" id="confLabel">0.25</b></div>
+                  <input type="range" id="confSlider" min="0.05" max="0.9" step="0.05" value="0.25">
+                  <div class="field-row"><span>입력 해상도</span>
+                    <select class="input input-sel" id="optImgsz"><option value="640">640 · 빠름</option><option value="1024">1024 · 권장</option><option value="1280">1280 · 정밀</option></select></div>
+                  <div class="field-row"><span>타일 분할</span>
+                    <select class="input input-sel" id="optTiling"><option value="auto">자동</option><option value="on">항상</option><option value="off">끄기</option></select></div>
+                  <label class="field-row"><span>반전 추론(TTA) <small>정확도↑ 약 3배 느림</small></span><span class="switch"><input type="checkbox" id="optTta"><span class="sl"></span></span></label>
+                  <label class="field-row"><span>선 도면 선명도 보정</span><span class="switch"><input type="checkbox" id="optEnhance"><span class="sl"></span></span></label>
+                  <label class="field-row"><span>외곽선 직각 보정 <small>인식 직후 자동 · 실제 건물처럼 반듯하게</small></span><span class="switch"><input type="checkbox" id="optRegularize"><span class="sl"></span></span></label>
+                  <div class="row-gap"><button class="btn btn-xs flex1" id="optReset">기본값으로</button>
+                  <button class="btn btn-xs flex1" id="saveSampleBtn" title="현재 건물 외곽선을 정답으로 삼아 재학습용 데이터에 추가 (AI 개선용)">🎯 학습용 저장</button></div>
+                </div>
+              </details>
+              <div class="hint" id="datasetInfo"></div>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-no">2</div>
+            <div class="step-body">
+              <div class="step-title">현장 주변 (실제 건물 · 공사 인허가)</div>
+              <div class="hint">국토교통부 <b>GIS건물통합정보·도로명주소</b>(외곽선·층수·높이·구조·이름)와 <b>건축 인허가</b>(주변 공사 중·착공 전 필지). 현장 위치(📍)가 정해져 있어야 하고, 현장 경계가 있으면 경계 둘레만 불러옵니다.</div>
+              <button class="btn" id="realBldgBtn" title="현장 주변의 실제 건물을 추가하고(이미 그린 건물 자리는 건너뜀), 인허가 키가 있으면 주변 공사 현장도 찾아 지도에 표시">🏢 현장 주변 불러오기</button>
+              <div class="hint" id="realBldgInfo"></div>
+              <div id="permitInfo"></div>
+              <button class="btn" id="autoAlignBtn" title="AI가 도면에서 찾은 건물을 실제 건물과 짝 지어 도면의 축척·방향·위치를 자동으로 맞춤 (맞는 건물 5동 이상)">🧭 AI 인식 건물로 도면 자동 맞추기</button>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-no">3</div>
+            <div class="step-body">
+              <div class="step-title">실제 위치에 맞추기 (정합)</div>
+              <div class="hint">도면의 확실한 지점 3~4곳(기준점)에 실제 위치를 지정하면 위치·축척·방향이 맞춰집니다. 정합에 쓰지 않는 검증점 2곳을 더하면 실제 오차를 알 수 있습니다.</div>
+              <button class="btn btn-outline" data-mode="align">📍 도면 정합 시작 <kbd>9</kbd></button>
+              <button class="btn" data-act="dimCheck" title="도면에 적힌 치수로 지금 축척이 맞는지 확인">📏 치수로 축척 확인</button>
+              <div class="mode-slot" data-slot="plan"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 현장 설정 -->
+      <section class="ws" data-ws="site">
+        <header class="ws-head"><h2>현장 설정</h2><p>기상 조건, 데이터와 서버를 관리합니다. 지도 표시는 지도 위 보기 막대와 🗂️ 에서.</p></header>
+        <div class="ws-body">
+          <div class="group">
+            <div class="group-title">현장 조건</div>
+            <div class="wx-card" id="wxCard" hidden>
+              <div class="wx-head"><b>☁️ 기상청 날씨</b><span class="label-sm" id="wxMeta"></span><button class="icon-btn" id="wxRefresh" title="다시 받기">↻</button></div>
+              <div class="wx-now" id="wxNow"></div>
+              <div class="wx-hours" id="wxHours"></div>
+              <div class="hint warn" id="wxMiss" hidden></div>
+              <div class="wx-checks" id="wxChecks"></div>
+              <label class="field-row"><span>순간풍속에 자동 반영<small class="wx-sub">기상청 평균풍속 × <span id="wxGf">1.66</span>(돌풍계수, 설계값). 장비 풍속계 값이 있으면 끄고 아래에 직접 넣으세요.</small></span><span class="switch"><input type="checkbox" id="wxAuto"><span class="sl"></span></span></label>
+            </div>
+            <div class="hint" id="wxOff" hidden></div>
+            <div class="field-row"><span title="작업 중지 판단은 순간풍속 기준 (안전보건규칙 제37조)">🌬️ 순간풍속</span><b class="value" id="windLabel">0 m/s</b></div>
+            <input type="range" id="windSlider" min="0" max="25" step="1" value="0">
+            <div class="hint">10 m/s 이상이면 크레인·항타기가 전면 통제 구역이 됩니다.</div>
+            <div id="envZoneListWrap" hidden>
+              <div class="label-sm" style="margin:8px 0 6px">환경 구역</div>
+              <div class="list" id="envZoneList"></div>
+            </div>
+          </div>
+          <div class="group">
+            <div class="group-title">데이터</div>
+            <div class="row-gap">
+              <button class="btn flex1" id="importBtn">📂 불러오기</button>
+              <button class="btn flex1" id="exportBtn">💾 백업 저장</button>
+            </div>
+            <button class="btn" id="sampleBtn">🧪 샘플 현장 열기</button>
+          </div>
+          <div class="group">
+            <div class="group-title">서버</div>
+            <button class="btn" id="backendBtn">🔧 서버 주소 설정</button>
+          </div>
+        </div>
+      </section>
+      <input type="file" id="fileInput" accept="image/*,application/pdf,.pdf,.dxf,.dwg" hidden>
+      <input type="file" id="jsonInput" accept=".json,application/json" hidden>
+    </aside>
+
+    <!-- ═════════ 지도 ═════════ -->
+    <main class="stage" id="stage">
+      <canvas id="mainCanvas"></canvas>
+
+      <div class="view3d" id="view3d" hidden>
+        <div class="floating view3d-panel">
+          <h3>3D 뷰어</h3>
+          <div class="field-row"><span>기본 건물 높이</span><b class="value" id="bldgHeightLabel">18</b></div>
+          <input type="range" id="bldgHeightSlider" min="3" max="120" value="18">
+          <label class="field-row"><span>지하층(B1) 표시</span><span class="switch"><input type="checkbox" id="showUnderground" checked><span class="sl"></span></span></label>
+          <label class="field-row"><span>구조 골조 보기 <small>모든 건물을 기둥·보·슬래브로</small></span><span class="switch"><input type="checkbox" id="show3dXray"><span class="sl"></span></span></label>
+          <label class="field-row"><span>비계 · 보호망</span><span class="switch"><input type="checkbox" id="show3dScaffold" checked><span class="sl"></span></span></label>
+          <div class="field-row"><span>☀️ 태양</span><b class="value sun-label" id="sunLabel">-</b></div>
+          <div class="row-gap"><input type="date" class="input" id="sunDate"><button class="btn btn-xs" id="sunNow" title="지금 시각">지금</button></div>
+          <input type="range" id="sunHour" min="5" max="20" step="0.25">
+          <button class="btn btn-xs" id="sunPhoto" hidden>📷 항공 사진 촬영 시각으로</button>
+          <div class="hint">건물을 누르면 구조 형식·공정 단계를 바꿀 수 있습니다.<br>드래그 회전 · 우클릭 드래그 이동 · 휠 확대</div>
+          <button class="btn" data-mode="select">2D 지도로 돌아가기</button>
+        </div>
+      </div>
+
+      <div class="empty-state" id="emptyState">
+        <div class="box floating">
+          <div class="big-ico">🏗️</div>
+          <h2>공사 현장을 시작하세요</h2>
+          <p>현장 위치로 프로젝트를 만들면 위성 지도 위에서<br>실제 거리(m) 기준으로 위험 반경과 인원 위치를 관리합니다.</p>
+          <div class="row-gap" style="justify-content:center;flex-wrap:wrap">
+            <button class="btn btn-primary" id="emptyNewPrjBtn">＋ 새 프로젝트</button>
+            <button class="btn" id="emptyUploadBtn">⬆ 배치도 업로드</button>
+            <button class="btn" id="emptySampleBtn">🧪 샘플 현장</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 보기 막대 (왼쪽 위): 2D/3D 전환 + 자주 켜고 끄는 레이어 — 글자로 보이게 (v14.6) -->
+      <div class="viewbar" id="viewbar" hidden>
+        <div class="vb-seg" role="tablist" aria-label="지도 보기">
+          <button class="vb-mode" id="vb2d" title="2D 지도 — 배치·경로·관제 (Esc)">🗺️ <span class="vb-t">2D 지도</span></button>
+          <button class="vb-mode" id="vb3d" title="3D 보기 — 건물 구조·공정, 위성 지도, 현장 인원을 입체로 (8)">🏙️ <span class="vb-t">3D 보기</span></button>
+        </div>
+        <div class="vb-chips" aria-label="레이어">
+          <button class="vb-chip" data-layer="basemap" title="위성 지도 켜기/끄기 (2D·3D)"><i class="vb-dot"></i>🛰️ <span class="vb-t">위성 지도</span></button>
+          <button class="vb-chip" data-layer="bg" title="배치도(올린 도면 그림) 켜기/끄기 (2D·3D)"><i class="vb-dot"></i>📐 <span class="vb-t">배치도</span></button>
+          <button class="vb-chip" data-layer="zones" title="장비 위험 구역 켜기/끄기 (2D·3D)"><i class="vb-dot"></i>⚠️ <span class="vb-t">위험 구역</span></button>
+          <button class="vb-chip" data-layer="heat" title="위험도 히트맵 (H, 2D)"><i class="vb-dot"></i>🔥 <span class="vb-t">히트맵</span></button>
+          <button class="vb-chip" data-layer="people" title="현장 인원 실시간 위치 (2D·3D)"><i class="vb-dot"></i>👷 <span class="vb-t">인원</span></button>
+        </div>
+      </div>
+
+      <!-- 장비·위험물 배치 안내 (v14.8): 목록에서 누르면 「OO를 배치하세요」 → 지도에서 누른 곳에 생김 -->
+      <div class="place-banner" id="placeBanner" hidden role="status" aria-live="polite">
+        <span class="pb-ico" id="placeIcon"></span>
+        <div class="pb-txt"><b id="placeTitle">배치하세요</b><small>지도에서 놓을 곳을 누르세요 · Shift 누른 채 누르면 여러 개 · Esc 취소</small></div>
+        <button class="btn btn-xs" id="placeCancel">취소</button>
+      </div>
+
+      <!-- 지도 컨트롤 (오른쪽) -->
+      <div class="map-controls">
+        <div class="ctl-group">
+          <button class="ctl" id="tbZoomIn" title="확대 (+)">＋</button>
+          <button class="ctl" id="tbZoomOut" title="축소 (−)">－</button>
+          <button class="ctl" id="tbFit" title="현장 전체 보기 (F)">⤢</button>
+        </div>
+        <div class="ctl-group">
+          <button class="ctl" id="layersBtn" title="지도 레이어">🗂️</button>
+          <button class="ctl" data-mode="measure" title="거리·면적 측정 (0)">📏</button>
+          <button class="ctl" id="tbPng" title="화면을 이미지로 저장">📷</button>
+        </div>
+        <span class="zoom-label" id="zoomLabel" hidden>100%</span>
+      </div>
+      <div class="popover layers-pop" id="layersPop" hidden>
+        <!-- 2026-11-24 지도 설정은 여기 한 곳 (켜고 끄기는 위쪽 보기 막대) -->
+        <div class="pop-title">배경 지도</div>
+        <select class="input input-sel" id="basemapSelect"><option value="vworld" data-vw>브이월드 영상</option><option value="vworldHybrid" data-vw>브이월드 영상+지명</option><option value="vworldBase" data-vw>브이월드 지도</option><option value="satellite">위성 (Esri)</option><option value="street">일반 지도 (OSM)</option><option value="none">끄기</option></select>
+        <label class="row label-sm" id="cadastralRow" style="margin-top:8px;cursor:pointer"><span>연속지적도 <small>필지 경계 · 줌 15 이상</small></span><input type="checkbox" id="layerCadastral"></label>
+        <label class="row label-sm" style="margin-top:6px;cursor:pointer"><span>최단 경로 비교선</span><input type="checkbox" id="layerShortest" checked></label>
+        <div class="pop-title">도면 불투명도</div>
+        <input type="range" id="planOpacity" min="0" max="1" step="0.05" value="0.85">
+      </div>
+
+      <div class="floating dock" id="dock"></div>
+      <div class="route-guide" id="routeGuide" hidden></div>
+      <div class="floating inspector" id="inspector" hidden></div>
+      <div class="map-attr" id="mapAttribution" hidden></div>
+      <div class="statusbar"><span class="grow" id="hintText"></span><span id="cursorInfo"></span></div>
+      <div class="toasts" id="toasts"></div>
+      <div class="loading-overlay" id="loading" hidden><div class="spinner"></div><div id="loadingText">AI 분석 중…</div></div>
+    </main>
+  </div>
+</div>
+
+<!-- 현장 합류 (QR) -->
+<div class="modal" id="joinModal" hidden>
+  <div class="modal-box" style="width:420px">
+    <h3>📱 휴대폰 연결</h3>
+    <div class="seg" id="joinSeg">
+      <label><input type="radio" name="joinApp" value="worker" checked>👷 근로자 앱</label>
+      <label><input type="radio" name="joinApp" value="supervisor">🦺 관리감독자 앱</label>
+      <label><input type="radio" name="joinApp" value="download">📲 앱 받기</label>
+    </div>
+    <div class="join-card" id="joinCard" hidden>
+      <div id="qrBox" class="qr"></div>
+      <div class="join-info">
+        <div class="label-sm" id="joinCodeLabel">현장 참여 코드</div>
+        <div class="join-code" id="joinCode"></div>
+        <div class="join-url" id="joinUrl"></div>
+      </div>
+    </div>
+    <button class="btn btn-primary" id="joinCopyBtn" hidden>📋 초대 메시지 복사</button>
+    <div class="hint" id="joinNote"></div>
+    <div class="alert info join-empty" id="joinEmpty"><span id="joinEmptyText"></span><button class="btn btn-primary" id="joinStartBtn" hidden></button></div>
+    <ol class="join-steps" id="joinSteps">
+      <li>휴대폰으로 QR을 찍거나, 「초대 메시지 복사」를 눌러 카카오톡 단체방에 붙여 넣습니다.</li>
+      <li>이름을 넣고 「동의하고 현장 합류」를 누르면 끝입니다. 다음부터는 앱을 열기만 하면 됩니다.</li>
+    </ol>
+    <button class="btn" data-close>닫기</button>
+  </div>
+</div>
+
+<!-- 새 위험물 -->
+<div class="modal" id="hazardModal" hidden>
+  <div class="modal-box">
+    <h3>새 위험물 추가</h3>
+    <label class="label-sm">위험물 이름</label>
+    <input type="text" class="input" id="newHazardName" maxlength="20" placeholder="예: 자재 적치장">
+    <div><div class="row label-sm"><span>기본 위험 반경</span><span class="value" id="newHazardRadiusLabel">3 m</span></div>
+    <input type="range" id="newHazardRadius" min="0.5" max="30" step="0.5" value="3"></div>
+    <div><div class="row label-sm"><span>위험 등급 (1~5)</span><span class="value" id="newHazardRiskLabel">3</span></div>
+    <input type="range" id="newHazardRisk" min="1" max="5" value="3"></div>
+    <label class="label-sm">이모지 아이콘</label>
+    <input type="text" class="input" id="newHazardIcon" value="⚠️" maxlength="4" style="font-size:20px;text-align:center">
+    <div class="row-gap"><button class="btn flex1" data-close>취소</button><button class="btn btn-primary flex1" id="hazardAddBtn">추가</button></div>
+  </div>
+</div>
+
+<!-- AI 서버 설정 -->
+<div class="modal" id="backendModal" hidden>
+  <div class="modal-box" style="width:440px">
+    <h3>🔧 AI 백엔드 서버 설정</h3>
+    <p class="hint">다른 PC에서 서버를 켰다면 그 PC의 주소를 입력하세요. (예: http://192.168.0.5:8000)</p>
+    <div class="row-gap"><input type="text" class="input" id="backendUrlInput" placeholder="http://localhost:8000"><button class="btn btn-primary" id="backendSaveBtn" style="padding:7px 14px">저장</button></div>
+    <div id="backendDetail" class="hint"></div>
+    <pre># 서버 직접 실행
+cd backend
+pip install -r requirements.txt
+python main.py                 # 이 PC에서만
+python main.py --host 0.0.0.0  # 다른 PC 접속 허용</pre>
+    <p class="hint">AI 서버 없이도 배치도 위에 장비·위험물·건물을 수동으로 배치해 모든 기능을 쓸 수 있습니다.</p>
+    <button class="btn" data-close>닫기</button>
+  </div>
+</div>
+
+<!-- 단축키 -->
+<div class="modal" id="helpModal" hidden>
+  <div class="modal-box" style="width:420px">
+    <h3>❔ 화면 구성 · 단축키</h3>
+    <div class="help-areas">
+      <div><b>🗺️ 배치</b><span>건물·현장 경계(보행 구역)·울타리·환경 구역 그리기, 장비·위험물 배치</span></div>
+      <div><b>🧭 경로</b><span>위험을 피하는 이동 경로 탐색과 결과 지표</span></div>
+      <div><b>👷 관제</b><span>현장 앱으로 합류한 인원·장비 위치, 경보, 전체 알림</span></div>
+      <div><b>📐 도면</b><span>배치도 업로드·AI 건물 인식·실제 위치 정합</span></div>
+      <div><b>⚙️ 현장</b><span>풍속·환경 구역, 지도 표시, 백업, 서버</span></div>
+    </div>
+    <div class="shortcuts">
+      <span><kbd>1</kbd> 선택 <kbd>2</kbd> 도로 <kbd>3</kbd> 보행 <kbd>4</kbd> 울타리</span><span>동선 도구</span>
+      <span><kbd>5</kbd></span><span>안전 경로 탐색</span>
+      <span><kbd>6</kbd> 건물 <kbd>7</kbd> 환경 구역</span><span>배치 도구</span>
+      <span><kbd>8</kbd> 3D · <kbd>9</kbd> 도면 정합 · <kbd>0</kbd> 측정</span><span>보기 · 도면 · 측정</span>
+      <span><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd></span><span>실행 취소 / 다시 실행</span>
+      <span><kbd>Delete</kbd></span><span>선택한 장비·위험물 삭제</span>
+      <span><kbd>R</kbd> / <kbd>Shift</kbd>+<kbd>R</kbd></span><span>선택 장비 15° 회전</span>
+      <span><kbd>Ctrl</kbd>+<kbd>D</kbd></span><span>선택 항목 복제</span>
+      <span><kbd>Esc</kbd></span><span>선택 해제 · 경로 초기화</span>
+      <span><kbd>H</kbd></span><span>위험도 히트맵</span>
+      <span><kbd>F</kbd></span><span>화면 맞춤</span>
+      <span><kbd>Ctrl</kbd>+<kbd>S</kbd></span><span>백업 파일 저장</span>
+      <span>휠</span><span>커서 기준 확대/축소</span>
+      <span>빈 곳 드래그 / 휠 클릭 / <kbd>Space</kbd>+드래그</span><span>화면 이동</span>
+      <span>장비 방향 핸들 드래그</span><span>장비 방향(heading) 조절</span>
+      <span>경로 핀 드래그</span><span>출발/도착 위치 이동 후 재탐색</span>
+    </div>
+    <button class="btn" data-close>닫기</button>
+  </div>
+</div>
+
+<!-- 새 프로젝트 / 위치 지정 -->
+<div class="modal" id="projectModal" hidden>
+  <div class="modal-box" style="width:460px">
+    <h3 id="prjModalTitle">🏗️ 새 공사 프로젝트</h3>
+    <div id="prjNameRow"><label class="label-sm">프로젝트(현장) 이름</label><input type="text" class="input" id="prjNameInput" maxlength="30" placeholder="예: OO지구 공동주택 신축공사"></div>
+    <label class="label-sm">현장 위치 — 현장 원점(대표 지점)의 위도, 경도</label>
+    <input type="text" class="input" id="prjLocInput" placeholder="35.1760000, 126.9065000">
+    <div class="row-gap"><input type="text" class="input" id="prjAddrInput" placeholder="주소·지명 검색 (예: 광주 북구 용봉로 77)"><button class="btn" id="prjAddrBtn">🔍 검색</button></div>
+    <div class="addr-results" id="prjAddrResults"></div>
+    <div class="row-gap">
+      <button class="btn flex1" id="prjHereBtn">📡 현재 위치</button>
+      <button class="btn flex1" id="prjMapBtn">🗺️ 지도에서 선택</button>
+    </div>
+    <label class="row label-sm" id="prjKeepRow"><span>현재 배치(도면·장비·건물) 유지</span><input type="checkbox" id="prjKeep"></label>
+    <div class="hint" id="prjMsg"></div>
+    <div class="row-gap"><button class="btn flex1" data-close>취소</button><button class="btn btn-primary flex1" id="prjCreateBtn" style="padding:8px">만들기</button></div>
+  </div>
+</div>
+
+<!-- 서버 프로젝트 열기 -->
+<div class="modal" id="openModal" hidden>
+  <div class="modal-box" style="width:460px">
+    <h3>📂 서버의 공사 프로젝트</h3>
+    <div class="list" id="prjList"></div>
+    <button class="btn" data-close>닫기</button>
+  </div>
+</div>
+
+<!-- 프로젝트 정보 -->
+<div class="modal" id="prjInfoModal" hidden>
+  <div class="modal-box" style="width:460px">
+    <h3>ⓘ 프로젝트 정보</h3>
+    <div class="prj-info" id="prjInfoBody"></div>
+    <button class="btn" data-close>닫기</button>
+  </div>
+</div>
+
+<!-- 도면 정합 기준점 -->
+<div class="modal" id="alignModal" hidden>
+  <div class="modal-box" style="width:440px">
+    <h3 id="alignTitle">새 기준점</h3>
+    <p class="hint">클릭한 도면 지점의 <b>실제 위치</b>를 지정하세요. 정확도: 도면에 적힌 TM 좌표(대지 경계점·기준점) ≫ 현장 측량점 ≈ 지적 경계점 &gt; 위성 지도 클릭</p>
+    <select class="input" id="alignSurvey"></select>
+    <div class="row-gap"><select class="input input-sel" id="alignCrs" style="flex:0 0 44%"></select><input type="text" class="input" id="alignInput" placeholder="위도, 경도 (예: 35.1760123, 126.9065123)" style="flex:1"></div>
+    <div class="hint" id="alignPreview"></div>
+    <button class="btn" id="alignPick">🛰️ 지도에서 같은 지점 클릭</button>
+    <label class="row label-sm" style="cursor:pointer"><span>🔍 <b>검증점</b> — 정합 계산에 쓰지 않고 실제 오차 확인에만 사용</span><input type="checkbox" id="alignCheck"></label>
+    <div class="hint" id="alignMsg"></div>
+    <div class="row-gap">
+      <button class="btn btn-danger" id="alignDelete" hidden>삭제</button>
+      <button class="btn flex1" data-close>취소</button>
+      <button class="btn btn-primary flex1" id="alignSave" style="padding:8px">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- 그림자로 건물 높이 추정 -->
+<div class="modal" id="shadowModal" hidden>
+  <div class="modal-box" style="width:440px">
+    <h3>☀️ 그림자로 건물 높이 추정</h3>
+    <p class="hint">항공 사진에서 잰 그림자 길이와 <b>촬영 시각의 태양 고도</b>로 높이를 계산합니다 (높이 = 그림자 길이 × tan 고도). 도면 정합(축척·방향)이 맞아야 정확합니다.</p>
+    <label class="label-sm">촬영 날짜 · 시각 (사진 EXIF 가 있으면 자동)</label>
+    <input type="datetime-local" class="input" id="shadowTime">
+    <div class="prj-info" id="shadowResult"></div>
+    <div class="row-gap"><button class="btn flex1" data-close>취소</button><button class="btn btn-primary flex1" id="shadowApply" style="padding:8px">층수에 적용</button></div>
+  </div>
+</div>
+
+<div class="phone-banner" id="phoneBanner" hidden>
+  <span>관리자 화면은 <b>노트북용</b>입니다. 휴대폰에서는 <b>관리감독자 앱</b>을 쓰세요</span>
+  <a class="btn btn-primary btn-xs" id="phoneBannerGo" href="/supervisor">열기</a>
+  <button class="btn btn-ghost btn-xs" id="phoneBannerX" aria-label="닫기">✕</button>
+</div>
+
+<!-- 전체 알림 -->
+<div class="modal" id="reportModal" hidden>
+  <div class="modal-box report-box">
+    <div class="report-head">
+      <h3>📋 하루 안전 기록</h3>
+      <select class="input" id="reportDate" title="날짜"></select>
+    </div>
+    <div id="reportBody"><div class="hint">불러오는 중…</div></div>
+    <div class="row-gap">
+      <button class="btn btn-primary flex1" id="reportPrint" style="padding:8px">🖨️ 인쇄 · PDF</button>
+      <button class="btn flex1" id="reportCsvEvents">⬇️ 경보 기록 (엑셀)</button>
+      <button class="btn flex1" id="reportCsvPeople">⬇️ 출입 명부 (엑셀)</button>
+    </div>
+    <button class="btn" data-close>닫기</button>
+  </div>
+</div>
+
+<div class="modal" id="broadcastModal" hidden>
+  <div class="modal-box">
+    <h3>📢 전체 작업자에게 알림</h3>
+    <button class="btn btn-danger" data-broadcast="evacuate" style="padding:12px;font-size:14px">🚨 즉시 대피 지시</button>
+    <label class="label-sm">또는 직접 입력</label>
+    <input type="text" class="input" id="broadcastText" maxlength="200" placeholder="예: 14시부터 타워크레인 양중 작업 — 3번 구역 접근 금지">
+    <div class="row-gap"><button class="btn flex1" data-close>취소</button><button class="btn btn-primary flex1" data-broadcast="info" style="padding:7px">보내기</button></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer></script>
+<script src="app/js/costmap.js"></script>
+<script src="app/js/hazardviz.js"></script>
+<script src="app/js/geo.js"></script>
+<script src="app/js/structure.js"></script>
+<script src="app/js/pathfinding.js"></script>
+<script src="app/js/state.js"></script>
+<script src="app/js/basemap.js"></script>
+<script src="app/js/render2d.js"></script>
+<script src="app/js/view3d.js"></script>
+<script src="app/js/ui.js"></script>
+<script src="app/js/app.js"></script>
+<script src="app/js/detection.js"></script>
+<script src="app/js/project.js"></script>
+</body>
+</html>

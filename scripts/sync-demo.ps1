@@ -59,3 +59,21 @@ if (Test-Path (Join-Path $Apks 'apps.json')) {
 } else {
   Write-Host "APK 가 없어 앱 받기 페이지는 건너뜀 (android\APK_빌드.bat 으로 먼저 빌드)"
 }
+
+# SOC-MAP PC 배포판 자동 업데이트 (https://kimhoring.github.io/projects/soc-map/app/pc/) — 2026-11-25
+# 설치된 PC 가 켤 때 manifest.json · manifest.sig(개발자 서명)를 읽고 바뀐 files/{SHA-256} 만 받는다. SOC-MAP_PC.zip = 처음 설치용
+# 먼저 SOC-MAP 폴더에서: backend\venv\Scripts\python.exe release\build_release.py
+$PcChan = Join-Path $Source 'release\out\channel'
+if (Test-Path (Join-Path $PcChan 'manifest.sig')) {
+  $PcOut = Join-Path $AppDir 'pc'
+  if (Test-Path $PcOut) { Remove-Item $PcOut -Recurse -Force }
+  New-Item -ItemType Directory -Force (Join-Path $PcOut 'files') | Out-Null
+  # 업데이트 파일을 먼저, 목록·서명은 마지막에 (받는 PC 가 목록만 먼저 보고 파일이 없는 순간이 없게)
+  Get-ChildItem (Join-Path $PcChan 'files') -File | ForEach-Object { Copy-Item $_.FullName (Join-Path $PcOut "files\$($_.Name)") -Force }
+  Copy-Item (Join-Path $PcChan 'SOC-MAP_PC.zip') (Join-Path $PcOut 'SOC-MAP_PC.zip') -Force
+  Copy-Item (Join-Path $PcChan 'manifest.json') (Join-Path $PcOut 'manifest.json') -Force
+  Copy-Item (Join-Path $PcChan 'manifest.sig') (Join-Path $PcOut 'manifest.sig') -Force
+  Write-Host "projects/soc-map/app/pc/ (PC 배포판 · 자동 업데이트) 갱신 완료"
+} else {
+  Write-Host "PC 배포판이 없어 건너뜀 (SOC-MAP 폴더에서 release\build_release.py 로 먼저 만들기)"
+}

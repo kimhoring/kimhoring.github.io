@@ -1,0 +1,1175 @@
+"""공사 프로젝트 · 현장 인원 실시간 위치 공유 · 경보
+
+프로젝트
+  - 위경도 원점으로 위치가 고정된 공사 현장. 서버 하나에 여러 프로젝트를 둘 수 있다.
+  - 참여 코드(join_code): 현장 인원이 휴대폰으로 참여할 때 사용
+  - 관리자 키(manager_key): 현장 배치 수정·공유·메시지 등 관리 기능. 서버에는 해시만 저장
+  - GPS 현장 인식(gps_join, 기본 켬): 휴대폰 위치로 주변 현장을 찾고(/api/nearby),
+    현장 경계 가까이(50 m + 위치 오차, 최대 +50 m) 있으면 참여 코드 없이 합류(/api/gps_join)
+  - 근로자 앱 정책(policy): 관리감독자가 정하고 근로자 앱은 바꿀 수 없다 (경보음 잠금, 시연 모드 허용)
+  - 대피 장소·목적지(places): 근로자 앱의 안전 경로 목적지. 대피 지시가 오면 가까운 대피 장소로 자동 안내
+  - 휴대폰 알림(push): 관리감독자 앱이 등록한 Web Push 구독으로 긴급 경보를 보낸다 (webpush.py)
+
+실시간 (WebSocket, 프로젝트별)
+  /ws/p/{pid}/client  : 작업자·장비 운전원 휴대폰. 위치(위경도·정확도·방향)와 위험 단계를 보고
+  /ws/p/{pid}/manager : 관리자 화면
+  서버는 위경도를 프로젝트 좌표(m)로 바꿔 모든 참여자에게 1초마다 위치 목록(peers)을 보낸다.
+  → 운전원 휴대폰 위치가 곧 장비 위치가 되어 위험 반경이 실시간으로 움직이고,
+    작업자·운전원이 서로의 위치로 접근·진입을 판단한다.
+
+저장: backend/projects/{pid}/  project.json · site.json · plan.jpg · survey.json · places.json · push.json · events.jsonl
+      attendance.jsonl · acks.jsonl — 2026-11-22 하루 안전 기록(출입 · 경보 확인), 보고서는 report.py · GET …/report
+      trace.jsonl — 서버를 --trace 로 켰을 때만. 모든 위치 보고 기록 (경보 현장 시험 분석용, analyze_trial.py)
+"""
+import asyncio
+import base64
+import hashlib
+import json
+import logging
+import math
+import os
+import re
+import secrets
+import socket
+import threading
+import time
+import urllib.request
+from typing import Optional
+
+from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
+
+import fieldops
+import report
+import webpush
+from geo import LocalFrame, valid_latlon
+
+log = logging.getLogger("soc-map.projects")
+router = APIRouter()
+
+ROOT = os.environ.get("SOCMAP_PROJECTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects")   # 시험 때 따로 지정
+OFFLINE_SEC = 30
+MAX_SITE_BYTES = 12 * 1024 * 1024
+ROLES = ("worker", "operator")
+NEARBY_M = 1000        # 이 거리 안의 현장만 「주변 현장」으로 보여 준다
+SITE_MARGIN_M = 30    # 2026-11-24 현장 경계 바깥 여유 (app costmap.js SITE_MARGIN 과 같음)
+
+
+def _seg_dist(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    L = dx * dx + dy * dy
+    t = 0.0 if L == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+    return math.hypot(px - ax - t * dx, py - ay - t * dy)
+
+
+def polygon_distance(x, y, poly):
+    """평탄 다각형 [x0,y0,…] 까지 거리(m), 안이면 0"""
+    n = len(poly) // 2
+    inside, d = False, float("inf")
+    for i in range(n):
+        j = (i - 1) % n
+        xi, yi, xj, yj = poly[2 * i], poly[2 * i + 1], poly[2 * j], poly[2 * j + 1]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        d = min(d, _seg_dist(x, y, xj, yj, xi, yi))
+    return 0.0 if inside else d
+
+
+def site_inside(site, x, y, margin=SITE_MARGIN_M):
+    """현장 안인가: 경계(siteBoundary)가 있으면 경계 + margin, 없으면 배치 범위 사각형 + margin, 둘 다 없으면 안"""
+    b = ((site or {}).get("doc") or {}).get("siteBoundary")
+    if isinstance(b, list) and len(b) >= 6:
+        return polygon_distance(x, y, b) <= margin
+    ext = (site or {}).get("extent")
+    if ext:
+        return ext["minX"] - margin <= x <= ext["maxX"] + margin and ext["minY"] - margin <= y <= ext["maxY"] + margin
+    return True
+
+
+GPS_JOIN_M = 50        # 현장 경계(배치 범위)에서 이 거리 + 위치 오차 안이면 GPS 로 합류 허용
+GPS_ACC_CAP = 50       # 위치 오차로 넓혀 주는 최대치(m)
+GPS_MAX_ACC = 100      # 이보다 부정확한 측위로는 합류를 허용하지 않음(m)
+LEVEL_RANK = {"safe": 0, "caution": 1, "warning": 2, "danger": 3}
+LEVEL_LABEL = {"safe": "안전", "caution": "주의", "warning": "위험 구역 접근", "danger": "위험 구역 진입"}
+# 근로자 앱 정책 — alarm_locked: 경보음·진동을 근로자가 끌 수 없음, allow_sim: GPS 대신 지도를 눌러 위치를 정하는 시연 모드 허용
+DEFAULT_POLICY = {"alarm_locked": True, "allow_sim": False, "ref_corr": True}
+POLICY_LABEL = {"alarm_locked": "경보음 잠금", "allow_sim": "시연 모드 허용", "ref_corr": "기준점 보정 사용"}
+PLACE_KINDS = ("assembly", "dest", "ref")   # 대피 장소(집결지) / 일반 목적지 / 기준점(2026-11-22 위치 보정)
+PLACE_LABEL = {"assembly": "대피 장소", "dest": "목적지", "ref": "기준점"}
+MAX_PLACES = 40
+os.makedirs(ROOT, exist_ok=True)
+
+
+def _hash(key):
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _code():
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # 헷갈리는 0/O, 1/I 제외
+    return "".join(secrets.choice(alphabet) for _ in range(6))
+
+
+def lan_addresses():
+    ips = set()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))   # 패킷을 보내지 않고 기본 경로의 IP 만 확인
+        ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            if not info[4][0].startswith("127."):
+                ips.add(info[4][0])
+    except Exception:
+        pass
+    return sorted(ips)
+
+
+# ═══════════════════════════════════════════════
+#  프로젝트 저장소
+# ═══════════════════════════════════════════════
+
+class Project:
+    def __init__(self, meta):
+        self.meta = meta
+        self.id = meta["id"]
+        self.dir = os.path.join(ROOT, self.id)
+        self.frame = LocalFrame(meta["origin"]["lat"], meta["origin"]["lon"])
+        self.site = self._read_json("site.json")
+        self.survey = self._read_json("survey.json") or []
+        self.places = self._read_json("places.json") or []
+        self.push_subs = self._read_json("push.json") or []
+        self.push_lock = threading.Lock()
+        self.clients = {}        # id → 상태
+        self.client_ws = {}      # id → WebSocket
+        self.managers = set()
+        self.events = []
+        self.peers_dirty = True
+        self.evac = None                   # 2026-11-22 대피 점호 (fieldops.Evac)
+        self.outside_pos = {}              # 2026-11-24 현장 밖 사람의 마지막 위치 — 공유하지 않고 긴급 호출 때만 씀
+        self.corr = fieldops.RefCorr()     # 2026-11-22 기준점 보정
+        self._corr_sent = 0
+        if os.path.exists(self._path("attendance.jsonl")):   # 서버가 다시 켜짐 → 지난 접속 구간은 마지막으로 본 시각에서 끊는다
+            report.append_jsonl(self._path("attendance.jsonl"), {"ts": time.time(), "kind": "reset"})
+
+    # ── 파일 ──
+    def _path(self, name):
+        return os.path.join(self.dir, name)
+
+    def _read_json(self, name):
+        try:
+            with open(self._path(name), encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+    def _write_json(self, name, data):
+        os.makedirs(self.dir, exist_ok=True)
+        tmp = self._path(name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, self._path(name))
+
+    def save_meta(self):
+        self._write_json("project.json", self.meta)
+
+    def public(self, manager=False):
+        out = {k: v for k, v in self.meta.items() if k not in ("manager_key_sha256", "join_code")}
+        out["online"] = sum(1 for c in self.clients.values() if c.get("online"))
+        out["site_version"] = (self.site or {}).get("version", 0)
+        out["policy"] = self.policy
+        if manager:
+            out["join_code"] = self.meta["join_code"]
+            out["push_count"] = len(self.push_subs)
+        return out
+
+    @property
+    def policy(self):
+        return {**DEFAULT_POLICY, **(self.meta.get("policy") or {})}
+
+    def check_manager(self, key):
+        return bool(key) and secrets.compare_digest(_hash(key), self.meta["manager_key_sha256"])
+
+    @property
+    def gps_join(self):
+        return self.meta.get("gps_join", True)
+
+    def site_distance(self, lat, lon):
+        """위경도에서 현장까지 거리(m). 현장 경계가 있으면 경계까지, 배치를 공유했으면 배치 범위 사각형까지, 아니면 원점까지"""
+        x, y = self.frame.to_local(lat, lon)
+        b = ((self.site or {}).get("doc") or {}).get("siteBoundary")
+        if isinstance(b, list) and len(b) >= 6:
+            return polygon_distance(x, y, b)
+        ext = (self.site or {}).get("extent")
+        if ext:
+            dx = max(ext["minX"] - x, 0.0, x - ext["maxX"])
+            dy = max(ext["minY"] - y, 0.0, y - ext["maxY"])
+            return math.hypot(dx, dy)
+        return math.hypot(x, y)
+
+    def check_code(self, code):
+        return bool(code) and secrets.compare_digest(code.strip().upper(), self.meta["join_code"])
+
+    # ── 좌표 ──
+    def locate(self, c, msg):
+        """보고된 위치를 프로젝트 좌표로. 위경도가 있으면 서버가 직접 변환(권위 있는 값)"""
+        lat, lon = msg.get("lat"), msg.get("lon")
+        if lat is not None and valid_latlon(lat, lon):
+            c["lat"], c["lon"] = float(lat), float(lon)
+            x, y = self.frame.to_local(c["lat"], c["lon"])
+            c["x"], c["y"] = round(x, 2), round(y, 2)
+        elif isinstance(msg.get("x"), (int, float)) and isinstance(msg.get("y"), (int, float)):
+            c["x"], c["y"] = round(float(msg["x"]), 2), round(float(msg["y"]), 2)   # 시연 모드
+            c["lat"], c["lon"] = self.frame.to_latlon(c["x"], c["y"])
+        if "x" in c and (lat is not None or "x" in msg):
+            c["pos_ts"] = time.time()
+        if "x" in c and c.get("x") is not None and self.site:
+            # 2026-11-24 현장 경계(+30 m) — 앱(costmap.js siteContains)과 같은 규칙. 앱이 「안」(위험 구역 20 m 안)이라고 하면 안
+            c["inside_site"] = site_inside(self.site, c["x"], c["y"]) or msg.get("inside") is True
+
+    def trace(self, c, msg):
+        """경보 현장 시험용 위치 보고 기록 (SOCMAP_TRACE=1 일 때만)"""
+        if os.environ.get("SOCMAP_TRACE") != "1":
+            return
+        row = {"ts": time.time(), "client_id": c.get("id"), "name": c.get("name"), "role": c.get("role"),
+               "x": c.get("x"), "y": c.get("y"), "lat": c.get("lat"), "lon": c.get("lon")}
+        for k in ("acc", "sigma", "speed", "level", "raw_level", "risk", "nearest_m", "source", "raw_lat", "raw_lon", "client_ts", "intrusions"):
+            if k in msg:
+                row[k] = msg[k]
+        if valid_latlon(msg.get("raw_lat"), msg.get("raw_lon")):
+            rx, ry = self.frame.to_local(float(msg["raw_lat"]), float(msg["raw_lon"]))
+            row["raw_x"], row["raw_y"] = round(rx, 2), round(ry, 2)
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            with open(self._path("trace.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    # ── 전송 ──
+    async def to_managers(self, msg):
+        for ws in list(self.managers):
+            try:
+                await ws.send_json(msg)
+            except Exception:
+                self.managers.discard(ws)
+
+    async def to_client(self, cid, msg):
+        ws = self.client_ws.get(cid)
+        if not ws:
+            return False
+        try:
+            await ws.send_json(msg)
+            return True
+        except Exception:
+            return False
+
+    async def to_clients(self, msg):
+        for cid in list(self.client_ws):
+            await self.to_client(cid, msg)
+
+    def describe_location(self, x, y):
+        """현장 좌표 → 사람이 읽는 위치 설명 (예: "102동 남쪽 8 m · 굴착기에서 6 m")
+        건물 이름·대피 장소·장비(운전원 휴대폰 실시간 위치 우선)를 기준으로 삼는다"""
+        doc = (self.site or {}).get("doc") or {}
+        parts = []
+        bdata = doc.get("buildingData") or {}
+        best = None   # (거리, 이름, 가장 가까운 점)
+        for i, c in enumerate(doc.get("contours") or []):
+            poly = _flat_contour(c)
+            if len(poly) < 3:
+                continue
+            name = (bdata.get(str(i)) or bdata.get(i) or {}).get("name") or f"건물 {i + 1}"
+            if _point_in_poly(x, y, poly):
+                best = (0.0, name, None)
+                break
+            d, q = _dist_to_poly(x, y, poly)
+            if best is None or d < best[0]:
+                best = (d, name, q)
+        if best and best[0] == 0:
+            parts.append(f"{best[1]} 안")
+        elif best and best[0] <= 40:
+            parts.append(f"{best[1]} {_compass(x - best[2][0], y - best[2][1])}쪽 {round(best[0])} m")
+        live = {c.get("equipment"): (c.get("eq_x", c["x"]), c.get("eq_y", c["y"])) for c in self.clients.values()
+                if c.get("role") == "operator" and c.get("online") and c.get("x") is not None}
+        eq = None
+        for m in doc.get("markers") or []:
+            if not m.get("isEquipment"):
+                continue
+            ex, ey = live.get(m.get("id"), (m.get("x"), m.get("y")))
+            if ex is None:
+                continue
+            d = math.hypot(x - ex, y - ey)
+            if d <= 30 and (eq is None or d < eq[0]):
+                eq = (d, m.get("label") or "장비")
+        if eq:
+            parts.append(f"{eq[1]}에서 {round(eq[0])} m")
+        for pl in self.places:
+            d = math.hypot(x - pl["x"], y - pl["y"])
+            if d <= 25:
+                parts.append(f"{pl['name']} 근처 {round(d)} m")
+                break
+        if not parts:
+            parts.append(f"현장 원점에서 {_compass(x, y)}쪽 {round(math.hypot(x, y))} m")
+        return " · ".join(parts)
+
+    def equipment_label(self, mid):
+        for m in ((self.site or {}).get("doc") or {}).get("markers", []):
+            if m.get("id") == mid:
+                return m.get("label") or "장비"
+        return "장비 미지정" if not mid else "장비"
+
+    def peers(self):
+        keys = ("id", "name", "role", "equipment", "x", "y", "sigma", "heading", "level", "online", "sim", "speed", "vx", "vy", "op_state", "floor",
+                "eq_x", "eq_y", "eq_heading", "work_x", "work_y")   # 2026-11-25 장비 자세(운전원이 내려 걸어도 장비는 그 자리) · 작업 위치
+        return [{k: c.get(k) for k in keys} for c in self.clients.values() if c.get("x") is not None]
+
+    def attend(self, c, kind, ts=None):
+        """출입 기록 한 줄 (in 들어옴 · out 나감 · seen 5분마다 접속 중) — 하루 안전 기록의 출입 명부.
+        사람마다 지금 상태(c["_att"])를 기억해 같은 것을 두 번 쓰지 않는다: 연결만 바꾼 휴대폰은 새 출입이 아니고,
+        신호 끊김(30초 보고 없음)은 마지막 보고 시각으로 나감 → 다시 보고가 오면 들어옴"""
+        now_in = c.get("_att") == "in"
+        if (kind == "in" and now_in) or (kind in ("out", "seen") and not now_in):
+            return
+        if kind != "seen":
+            c["_att"] = kind
+        report.append_jsonl(self._path("attendance.jsonl"), {
+            "ts": ts or time.time(), "kind": kind, "client_id": c.get("id"), "name": c.get("name"), "role": c.get("role"),
+            "equipment": self.equipment_label(c.get("equipment")) if c.get("role") == "operator" else None,
+            "sim": bool(c.get("sim"))})
+
+    async def event(self, kind, c, text, severity="info", **extra):
+        ev = {"id": secrets.token_hex(6), "ts": time.time(), "kind": kind, "severity": severity, "text": text,
+              "client_id": c.get("id") if c else None, "name": c.get("name") if c else None,
+              "role": c.get("role") if c else None, "sim": bool(c.get("sim")) if c else False,
+              "x": c.get("x") if c else None, "y": c.get("y") if c else None,
+              "lat": c.get("lat") if c else None, "lon": c.get("lon") if c else None, "acked": False, **extra}
+        self.events.append(ev)
+        self.events = self.events[-500:]
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            with open(self._path("events.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        log.info(f"[{self.meta['name']}] {text}")
+        await self.to_managers({"type": "event", "event": ev})
+        if severity == "critical":
+            _webhook(self, ev)
+            _push(self, ev)
+        return ev
+
+    def save_push(self):
+        with self.push_lock:
+            self._write_json("push.json", self.push_subs)
+
+
+class Store:
+    def __init__(self):
+        self.projects = {}
+        for pid in sorted(os.listdir(ROOT)):
+            try:
+                with open(os.path.join(ROOT, pid, "project.json"), encoding="utf-8") as f:
+                    meta = json.load(f)
+                self.projects[meta["id"]] = Project(meta)
+            except Exception:
+                continue
+
+    def get(self, pid) -> Project:
+        p = self.projects.get(pid)
+        if not p:
+            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+        return p
+
+    def by_code(self, code):
+        code = (code or "").strip().upper()
+        return next((p for p in self.projects.values() if p.meta["join_code"] == code), None)
+
+    def create(self, name, lat, lon):
+        pid = secrets.token_hex(4)
+        key = secrets.token_urlsafe(18)
+        code = _code()
+        while self.by_code(code):
+            code = _code()
+        meta = {"id": pid, "name": name, "origin": {"lat": lat, "lon": lon}, "created_at": time.time(),
+                "join_code": code, "manager_key_sha256": _hash(key)}
+        p = Project(meta)
+        p.save_meta()
+        self.projects[pid] = p
+        return p, key
+
+
+store = Store()
+
+
+def _webhook(project, ev):
+    url = os.environ.get("SOCMAP_WEBHOOK_URL")
+    if not url:
+        return
+    text = f"[SOC-MAP · {project.meta['name']}] {ev['text']}"
+    if ev.get("lat") is not None:
+        text += f" (https://maps.google.com/?q={ev['lat']:.6f},{ev['lon']:.6f})"
+    body = json.dumps({"text": text, "content": text, "event": ev}, ensure_ascii=False).encode("utf-8")
+
+    def send():
+        try:
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=5).close()
+        except Exception as e:
+            log.warning(f"웹훅 전송 실패: {e}")
+    threading.Thread(target=send, daemon=True).start()
+
+
+def _flat_contour(c):
+    pts = []
+    for pt in c or []:
+        q = pt[0] if pt and isinstance(pt[0], (list, tuple)) else pt
+        try:
+            pts.append((float(q[0]), float(q[1])))
+        except (TypeError, ValueError, IndexError):
+            pass
+    return pts
+
+
+def _point_in_poly(x, y, poly):
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _dist_to_poly(x, y, poly):
+    best, bq = float("inf"), poly[0]
+    for i in range(len(poly)):
+        (ax, ay), (bx, by) = poly[i], poly[(i + 1) % len(poly)]
+        dx, dy = bx - ax, by - ay
+        t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)))
+        qx, qy = ax + dx * t, ay + dy * t
+        d = math.hypot(x - qx, y - qy)
+        if d < best:
+            best, bq = d, (qx, qy)
+    return best, bq
+
+
+def _compass(dx, dy):
+    """현장 좌표 벡터(x = 동, y = 남) → 8방위"""
+    brg = (math.degrees(math.atan2(dx, -dy)) + 360) % 360
+    return ["북", "북동", "동", "남동", "남", "남서", "서", "북서"][round(brg / 45) % 8]
+
+
+def _push(project, ev, only=None):
+    """긴급 이벤트를 관리감독자 휴대폰에 Web Push 로 보낸다 (스레드). 사라진 구독(404·410)은 지운다"""
+    subs = [s for s in project.push_subs if only is None or s["endpoint"] == only]
+    if not subs:
+        return
+    sos = ev.get("kind") == "sos"
+    data = {"title": f"🆘 긴급 호출 — {ev.get('name')}" if sos else f"SOC-MAP · {project.meta['name']}",
+            "body": f"📍 {ev.get('location')}" + (f" (±{round(ev['acc'])} m)" if (ev.get("acc") or 0) >= 1 else "") if sos and ev.get("location") else ev["text"],
+            "tag": ev.get("id"), "kind": ev.get("kind"), "severity": ev.get("severity"),
+            "url": f"/supervisor#ev={ev.get('id')}", "ts": ev.get("ts")}
+
+    def run():
+        gone = []
+        for s in subs:
+            try:
+                code = webpush.send(s, data)
+                if code in (404, 410):
+                    gone.append(s["endpoint"])
+                elif code >= 400:
+                    log.warning(f"푸시 전송 실패 {code}: {s.get('label') or s['endpoint'][:40]}")
+            except Exception as e:
+                log.warning(f"푸시 전송 오류: {e}")
+        if gone:
+            with project.push_lock:
+                project.push_subs = [s for s in project.push_subs if s["endpoint"] not in gone]
+            project.save_push()
+            log.info(f"만료된 푸시 구독 {len(gone)}개 삭제")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _manager(p: Project, key):
+    if not p.check_manager(key):
+        raise HTTPException(status_code=403, detail="관리자 키가 올바르지 않습니다.")
+
+
+def _member(p: Project, code, key):
+    if not (p.check_code(code) or p.check_manager(key)):
+        raise HTTPException(status_code=403, detail="참여 코드가 올바르지 않습니다.")
+
+
+def _clean_name(name, default):
+    name = re.sub(r"[\x00-\x1f<>]", "", str(name or "")).strip()[:30]
+    return name or default
+
+
+# ═══════════════════════════════════════════════
+#  HTTP
+# ═══════════════════════════════════════════════
+
+@router.get("/api/server/info")
+def server_info(request: Request):
+    return {"lan": lan_addresses(), "http_port": getattr(request.app.state, "http_port", 8000),
+            "https_port": getattr(request.app.state, "https_port", None),
+            "public_url": getattr(request.app.state, "public_url", None),   # 정식 인증서 주소(터널) — 앱 설치·푸시 알림 가능
+            "directory": getattr(request.app.state, "directory", None),     # 주소 안내판: ok / failed / off (directory.py)
+            "tunnel_ready": getattr(request.app.state, "tunnel_ready", None),   # v14.12 터널 주소가 실제로 응답하는가 (False 면 아직 여는 중)
+            "webhook": bool(os.environ.get("SOCMAP_WEBHOOK_URL")), "projects": len(store.projects)}
+
+
+@router.get("/api/projects")
+def list_projects():
+    return sorted((p.public() for p in store.projects.values()), key=lambda m: -m["created_at"])
+
+
+@router.post("/api/projects")
+async def create_project(request: Request):
+    body = await request.json()
+    name = _clean_name(body.get("name"), "새 현장")
+    if not valid_latlon(body.get("lat"), body.get("lon")):
+        raise HTTPException(status_code=400, detail="현장 위치(위도·경도)가 올바르지 않습니다.")
+    p, key = store.create(name, float(body["lat"]), float(body["lon"]))
+    log.info(f"프로젝트 생성: {name} ({p.id}) @ {body['lat']}, {body['lon']}")
+    return {"project": p.public(manager=True), "manager_key": key}
+
+
+@router.get("/api/projects/{pid}")
+def get_project(pid: str, code: Optional[str] = None, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _member(p, code, x_manager_key)
+    return p.public(manager=p.check_manager(x_manager_key))
+
+
+@router.patch("/api/projects/{pid}")
+async def update_project(pid: str, request: Request, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    body = await request.json()
+    if "name" in body:
+        p.meta["name"] = _clean_name(body["name"], p.meta["name"])
+    if body.get("new_code"):
+        p.meta["join_code"] = _code()
+    if "gps_join" in body:
+        p.meta["gps_join"] = bool(body["gps_join"])
+    policy_changed = {}
+    if isinstance(body.get("policy"), dict):
+        policy_changed = {k: bool(v) for k, v in body["policy"].items() if k in DEFAULT_POLICY and bool(v) != p.policy[k]}
+        p.meta["policy"] = {**p.policy, **policy_changed}
+    p.save_meta()
+    if policy_changed:
+        await p.to_clients({"type": "policy", "policy": p.policy})
+        await p.to_managers({"type": "policy", "policy": p.policy})
+        await p.event("policy", None, "⚙️ 근로자 앱 정책 변경: " + ", ".join(
+            f"{POLICY_LABEL[k]} {'켬' if v else '끔'}" for k, v in policy_changed.items()))
+    return p.public(manager=True)
+
+
+@router.post("/api/join")
+async def join(request: Request):
+    body = await request.json()
+    p = store.by_code(body.get("code"))
+    if not p:
+        raise HTTPException(status_code=404, detail="참여 코드에 해당하는 현장이 없습니다.")
+    return p.public()
+
+
+def _fix(body):
+    lat, lon, acc = body.get("lat"), body.get("lon"), body.get("acc")
+    if not valid_latlon(lat, lon):
+        raise HTTPException(status_code=400, detail="위치(위도·경도)가 올바르지 않습니다.")
+    acc = float(acc) if isinstance(acc, (int, float)) and acc >= 0 else None
+    return float(lat), float(lon), acc
+
+
+def _join_radius(acc):
+    return GPS_JOIN_M + min(acc or 0.0, GPS_ACC_CAP)
+
+
+@router.post("/api/nearby")
+async def nearby(request: Request):
+    """휴대폰 위치로 주변 현장 찾기 — 참여 코드는 돌려주지 않는다"""
+    lat, lon, acc = _fix(await request.json())
+    found = []
+    for p in store.projects.values():
+        if not p.gps_join:
+            continue
+        d = p.site_distance(lat, lon)
+        if d <= NEARBY_M:
+            pub = p.public()
+            found.append({"id": p.id, "name": pub["name"], "online": pub["online"], "distance_m": round(d),
+                          "can_join": acc is not None and acc <= GPS_MAX_ACC and d <= _join_radius(acc)})
+    found.sort(key=lambda f: f["distance_m"])
+    return {"projects": found[:10], "join_radius_m": round(_join_radius(acc)), "acc": acc}
+
+
+@router.post("/api/gps_join")
+async def gps_join(request: Request):
+    """현장 근처에서 보고한 위치를 확인하고 참여 코드를 발급(합류 이후 흐름은 코드 합류와 같다)"""
+    body = await request.json()
+    p = store.get(str(body.get("pid") or ""))
+    lat, lon, acc = _fix(body)
+    if not p.gps_join:
+        raise HTTPException(status_code=403, detail="이 현장은 GPS 합류가 꺼져 있습니다. 관리자에게 받은 참여 코드를 입력하세요.")
+    if acc is None or acc > GPS_MAX_ACC:
+        raise HTTPException(status_code=400, detail=f"위치 정확도가 낮습니다(±{round(acc) if acc is not None else '?'} m). "
+                            "하늘이 보이는 곳에서 다시 시도하거나 참여 코드를 입력하세요.")
+    d = p.site_distance(lat, lon)
+    if d > _join_radius(acc):
+        raise HTTPException(status_code=403, detail=f"현장에서 {round(d)} m 떨어져 있습니다. 현장 안에서 다시 시도하세요.")
+    await p.event("gps_join", None, f"📍 GPS 위치로 현장 인식 — 합류 요청 (현장까지 {round(d)} m, 오차 ±{round(acc)} m)")
+    return {**p.public(), "code": p.meta["join_code"], "distance_m": round(d)}
+
+
+@router.post("/api/projects/{pid}/site")
+async def publish_site(pid: str, request: Request, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    raw = await request.body()
+    if len(raw) > MAX_SITE_BYTES:
+        raise HTTPException(status_code=413, detail="현장 데이터가 너무 큽니다.")
+    site = json.loads(raw)
+    img = site.pop("planImage", None)
+    if isinstance(img, str) and img.startswith("data:image"):
+        with open(p._path("plan.jpg"), "wb") as f:
+            f.write(base64.b64decode(img.split(",", 1)[1]))
+        site["planVersion"] = int(time.time())
+    elif img is None:
+        try:
+            os.remove(p._path("plan.jpg"))
+        except FileNotFoundError:
+            pass
+        site["planVersion"] = None
+    else:   # "keep"
+        site["planVersion"] = (p.site or {}).get("planVersion")
+    site["version"] = (p.site or {}).get("version", 0) + 1
+    site["updated_at"] = time.time()
+    site["origin"] = p.meta["origin"]
+    p.site = site
+    p._write_json("site.json", site)
+    await p.to_clients({"type": "site", "version": site["version"]})
+    await p.to_managers({"type": "site", "version": site["version"]})   # 관리감독자 휴대폰 앱도 배치를 다시 받는다
+    return {"version": site["version"]}
+
+
+@router.get("/api/projects/{pid}/site")
+def get_site(pid: str, code: Optional[str] = None, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _member(p, code, x_manager_key)
+    if not p.site:
+        raise HTTPException(status_code=404, detail="관리자가 아직 현장 배치를 공유하지 않았습니다.")
+    return {**p.site, "places": p.places, "policy": p.policy}
+
+
+@router.get("/api/projects/{pid}/plan")
+def get_plan(pid: str, code: Optional[str] = None, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _member(p, code, x_manager_key)
+    try:
+        with open(p._path("plan.jpg"), "rb") as f:
+            return Response(f.read(), media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="도면 없음")
+
+
+@router.post("/api/projects/{pid}/survey")
+async def add_survey(pid: str, request: Request, code: Optional[str] = None, x_manager_key: Optional[str] = Header(None)):
+    """현장에서 GPS 평균 측량한 점 (도면 정합 기준점으로 사용)"""
+    p = store.get(pid)
+    _member(p, code, x_manager_key)
+    b = await request.json()
+    if not valid_latlon(b.get("lat"), b.get("lon")):
+        raise HTTPException(status_code=400, detail="좌표가 올바르지 않습니다.")
+    pt = {"id": secrets.token_hex(4), "name": _clean_name(b.get("name"), f"측량점 {len(p.survey) + 1}"),
+          "lat": float(b["lat"]), "lon": float(b["lon"]), "n": int(b.get("n") or 1),
+          "estError": float(b.get("estError") or 0), "by": _clean_name(b.get("by"), ""), "ts": time.time()}
+    p.survey.append(pt)
+    p._write_json("survey.json", p.survey)
+    await p.to_managers({"type": "survey", "survey": p.survey})
+    return pt
+
+
+@router.get("/api/projects/{pid}/survey")
+def get_survey(pid: str, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    return p.survey
+
+
+@router.delete("/api/projects/{pid}/survey/{sid}")
+async def delete_survey(pid: str, sid: str, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    p.survey = [s for s in p.survey if s["id"] != sid]
+    p._write_json("survey.json", p.survey)
+    await p.to_managers({"type": "survey", "survey": p.survey})
+    return {"ok": True}
+
+
+# ── 대피 장소 · 목적지 (근로자 앱 안전 경로의 목적지) ──
+def _place_pos(p, b):
+    if valid_latlon(b.get("lat"), b.get("lon")):
+        lat, lon = float(b["lat"]), float(b["lon"])
+        x, y = p.frame.to_local(lat, lon)
+    elif isinstance(b.get("x"), (int, float)) and isinstance(b.get("y"), (int, float)):
+        x, y = float(b["x"]), float(b["y"])
+        lat, lon = p.frame.to_latlon(x, y)
+    else:
+        raise HTTPException(status_code=400, detail="위치(위도·경도 또는 현장 좌표)가 필요합니다.")
+    if math.hypot(x, y) > 5000:
+        raise HTTPException(status_code=400, detail="현장에서 너무 먼 위치입니다.")
+    return round(x, 2), round(y, 2), lat, lon
+
+
+async def _places_changed(p):
+    p._write_json("places.json", p.places)
+    msg = {"type": "places", "places": p.places}
+    await p.to_clients(msg)
+    await p.to_managers(msg)
+
+
+@router.get("/api/projects/{pid}/places")
+def get_places(pid: str, code: Optional[str] = None, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _member(p, code, x_manager_key)
+    return p.places
+
+
+@router.post("/api/projects/{pid}/places")
+async def add_place(pid: str, request: Request, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    b = await request.json()
+    if len(p.places) >= MAX_PLACES:
+        raise HTTPException(status_code=400, detail=f"장소는 최대 {MAX_PLACES}개까지 등록할 수 있습니다.")
+    kind = b.get("kind") if b.get("kind") in PLACE_KINDS else "assembly"
+    x, y, lat, lon = _place_pos(p, b)
+    kind_label = PLACE_LABEL[kind]
+    n = sum(1 for q in p.places if q["kind"] == kind) + 1
+    place = {"id": secrets.token_hex(4), "kind": kind, "x": x, "y": y, "lat": lat, "lon": lon,
+             "name": _clean_name(b.get("name"), f"{kind_label} {n}"), "ts": time.time()}
+    p.places.append(place)
+    await _places_changed(p)
+    await p.event("place", None, f"📍 {kind_label} 등록: {place['name']}")
+    return place
+
+
+@router.delete("/api/projects/{pid}/places/{plid}")
+async def delete_place(pid: str, plid: str, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    p.places = [q for q in p.places if q["id"] != plid]
+    await _places_changed(p)
+    return {"ok": True}
+
+
+# ── 휴대폰 알림 (Web Push) ──
+@router.get("/api/push/key")
+def push_key():
+    return {"key": webpush.public_key_b64()}
+
+
+@router.post("/api/projects/{pid}/push")
+async def push_subscribe(pid: str, request: Request, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    b = await request.json()
+    sub = b.get("subscription") or {}
+    if not webpush.valid_subscription(sub):
+        raise HTTPException(status_code=400, detail="구독 정보가 올바르지 않습니다.")
+    entry = {"endpoint": sub["endpoint"], "keys": {"p256dh": sub["keys"]["p256dh"], "auth": sub["keys"]["auth"]},
+             "label": _clean_name(b.get("label"), "관리감독자"), "ts": time.time()}
+    with p.push_lock:
+        p.push_subs = [s for s in p.push_subs if s["endpoint"] != entry["endpoint"]] + [entry]
+    p.save_push()
+    log.info(f"[{p.meta['name']}] 푸시 알림 등록: {entry['label']} (총 {len(p.push_subs)})")
+    return {"ok": True, "count": len(p.push_subs)}
+
+
+@router.post("/api/projects/{pid}/push/remove")
+async def push_unsubscribe(pid: str, request: Request, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    endpoint = (await request.json()).get("endpoint")
+    with p.push_lock:
+        p.push_subs = [s for s in p.push_subs if s["endpoint"] != endpoint]
+    p.save_push()
+    return {"ok": True, "count": len(p.push_subs)}
+
+
+@router.post("/api/projects/{pid}/push/test")
+async def push_test(pid: str, request: Request, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    endpoint = (await request.json()).get("endpoint")
+    if not any(s["endpoint"] == endpoint for s in p.push_subs):
+        raise HTTPException(status_code=404, detail="이 휴대폰은 알림에 등록되어 있지 않습니다.")
+    _push(p, {"id": secrets.token_hex(6), "ts": time.time(), "kind": "test", "severity": "info",
+              "text": "🔔 알림 시험 — 위험 구역 진입·SOS 가 이렇게 표시됩니다."}, only=endpoint)
+    return {"ok": True}
+
+
+@router.get("/api/projects/{pid}/events")
+def get_events(pid: str, limit: int = 200, x_manager_key: Optional[str] = Header(None)):
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    return p.events[-limit:]
+
+
+@router.get("/api/projects/{pid}/report")
+def get_report(pid: str, date: Optional[str] = None, x_manager_key: Optional[str] = Header(None)):
+    """2026-11-22 하루 안전 기록 — 날짜(YYYY-MM-DD, 이 PC 시각)의 출입 · 경보 · 확인. 없으면 오늘"""
+    p = store.get(pid)
+    _manager(p, x_manager_key)
+    if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise HTTPException(status_code=400, detail="날짜 형식은 2026-11-22 처럼 써 주세요.")
+    events = report.read_jsonl(p._path("events.jsonl"))
+    attendance = report.read_jsonl(p._path("attendance.jsonl"))
+    acks = report.read_jsonl(p._path("acks.jsonl"))
+    date = date or report.day_of(time.time())
+    try:
+        out = report.build(p.meta, events, attendance, acks, date, online_ids={i for i in p.client_ws if p.clients.get(i, {}).get("online")})
+    except ValueError:
+        raise HTTPException(status_code=400, detail="없는 날짜입니다.")
+    out["dates"] = report.available_dates(events, attendance)
+    return out
+
+
+# ═══════════════════════════════════════════════
+#  WebSocket
+# ═══════════════════════════════════════════════
+
+async def _refuse(ws: WebSocket, code: int):
+    """v14.12 받은 뒤에 닫아야 앱이 이유(4403 키·코드 틀림, 4409 시연 모드 불허)를 받는다.
+    받기 전에 닫으면 브라우저에는 HTTP 403 → 닫힘 코드 1006 만 보여서 「참여 코드가 바뀌었습니다」 같은 안내가 뜨지 않았다"""
+    await ws.accept()
+    await ws.close(code=code)
+
+
+@router.websocket("/ws/p/{pid}/manager")
+async def ws_manager(ws: WebSocket, pid: str, key: Optional[str] = None):
+    p = store.projects.get(pid)
+    if not p or not p.check_manager(key):
+        await _refuse(ws, 4403)
+        return
+    await ws.accept()
+    p.managers.add(ws)
+    await ws.send_json({"type": "snapshot", "clients": list(p.clients.values()), "events": p.events[-80:], "survey": p.survey,
+                        "places": p.places, "policy": p.policy, "site_version": (p.site or {}).get("version", 0),
+                        "weather": getattr(p, "weather", None),
+                        "evac": p.evac.public(p.clients) if p.evac else None, "corr": p.corr.public()})
+    try:
+        while True:
+            msg = await ws.receive_json()
+            t = msg.get("type")
+            if t == "message":
+                text = str(msg.get("text", ""))[:200]
+                payload = {"type": "message", "text": text, "level": msg.get("level", "info"), "ts": time.time()}
+                if msg.get("to") == "all":
+                    await p.to_clients(payload)
+                    await p.event("broadcast", None, f"📢 전체 전송: {text}")
+                    if payload["level"] == "evacuate" and not (p.evac and not p.evac.ended):
+                        await _evac_start(p, text)
+                else:
+                    c = p.clients.get(msg.get("to"))
+                    ok = await p.to_client(msg.get("to"), payload)
+                    if c:
+                        await p.event("message", c, f"💬 {c['name']}에게 전송{'' if ok else ' 실패(연결 끊김)'}: {text}")
+            elif t == "ack":
+                for ev in p.events:
+                    if ev["id"] == msg.get("event_id"):
+                        if ev.get("kind") == "sos" and not ev.get("acked") and ev.get("client_id"):
+                            await p.to_client(ev["client_id"], {"type": "sos_ack", "event_id": ev["id"], "ts": time.time()})
+                        if not ev.get("acked"):
+                            report.append_jsonl(p._path("acks.jsonl"), {"event_id": ev["id"], "ts": time.time()})
+                        ev["acked"] = True
+                await p.to_managers({"type": "ack", "event_id": msg.get("event_id")})
+            elif t == "evac_end":
+                await _evac_end(p)
+            elif t == "evac_safe" and msg.get("id"):      # 관리자가 직접 확인 (무전·대면)
+                c2 = p.clients.get(msg["id"])
+                who = p.evac.arrive(msg["id"], "manager") if p.evac else None
+                if who and c2:
+                    await _evac_arrived(p, c2, who)
+            elif t == "ref_fix":                            # 기준점에 둔 휴대폰의 GPS
+                await _ref_fix(p, msg)
+            elif t == "remove":
+                p.clients.pop(msg.get("id"), None)
+                p.peers_dirty = True
+                await p.to_managers({"type": "left", "id": msg.get("id")})
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        p.managers.discard(ws)
+
+
+@router.websocket("/ws/p/{pid}/client")
+async def ws_client(ws: WebSocket, pid: str, code: Optional[str] = None, key: Optional[str] = None,
+                    id: Optional[str] = None, name: Optional[str] = None, role: str = "worker",
+                    equipment: Optional[str] = None, sim: int = 0):
+    p = store.projects.get(pid)
+    if not p or not (p.check_code(code) or p.check_manager(key)):
+        await _refuse(ws, 4403)
+        return
+    if sim and not p.policy["allow_sim"] and not p.check_manager(key):
+        await _refuse(ws, 4409)   # 관리감독자가 시연 모드를 허용하지 않음 (가상 인원은 관리자 키로 접속하므로 예외)
+        return
+    await ws.accept()
+    cid = re.sub(r"[^A-Za-z0-9_-]", "", id or "")[:40] or secrets.token_hex(5)
+    role = role if role in ROLES else "worker"
+    name = _clean_name(name, "작업자" if role == "worker" else "운전원")
+
+    old = p.client_ws.get(cid)
+    p.client_ws[cid] = ws
+    if old is not None and old is not ws:
+        try:
+            await old.close()
+        except Exception:
+            pass
+    c = p.clients.get(cid) or {"id": cid, "level": "safe", "risk": 0}
+    was_offline = c.get("online") is False
+    c.update({"name": name, "role": role, "equipment": equipment if role == "operator" else None,
+              "online": True, "sim": bool(sim), "last_seen": time.time()})
+    c.pop("_stale", None)
+    c.pop("_left", None)
+    p.clients[cid] = c
+    p.peers_dirty = True
+    await ws.send_json({"type": "hello", "id": cid, "site_version": (p.site or {}).get("version", 0),
+                        "peers": p.peers(), "policy": p.policy, "places": p.places, "corr": p.corr.public(),
+                        "evac": {"active": True, "state": p.evac.people.get(cid, {}).get("state")} if p.evac and not p.evac.ended else None})
+    if p.evac and not p.evac.ended and p.evac.add(c):   # 대피 중에 들어온 사람도 명단에
+        await _evac_push(p)
+    await p.to_managers({"type": "client", "client": c})
+    p.attend(c, "in")
+    if was_offline:
+        await p.event("online", c, f"🔌 {name} 연결 복구")
+    elif role == "operator":
+        await p.event("operator", c, f"🚜 {name} 장비 운전원 합류 ({p.equipment_label(equipment)})")
+    if role == "operator" and equipment:
+        dup = [o for o in p.clients.values() if o is not c and o.get("online") and o.get("role") == "operator" and o.get("equipment") == equipment]
+        if dup:
+            await p.event("duplicate", c, f"⚠️ {p.equipment_label(equipment)}에 운전원 {len(dup) + 1}명이 동시에 연결됨 "
+                          f"({', '.join(o['name'] for o in dup)}, {name}) — 장비 위치가 섞일 수 있습니다", "warning")
+
+    try:
+        while True:
+            msg = await ws.receive_json()
+            t = msg.get("type")
+            c["last_seen"] = time.time()
+            if c.get("_stale"):   # 신호 끊김 뒤 같은 연결로 보고가 다시 옴 → 연결 복구 (전에는 다시 접속할 때까지 「끊김」으로 남았음)
+                c.pop("_stale", None)
+                c["online"] = True
+                p.peers_dirty = True
+                await p.to_managers({"type": "client", "client": c})
+                await p.event("online", c, f"🔌 {c['name']} 연결 복구")
+            p.attend(c, "in")   # 나감 뒤 다시 보고가 오면 들어옴 — 평소에는 아무것도 안 씀
+            if t == "pos":
+                prev = c.get("level", "safe")
+                p.locate(c, msg)
+                if c.get("inside_site") is False:
+                    # 2026-11-24 현장 밖: 위치·위험도·작업 상태를 공유·기록하지 않는다 (마지막 위치는 긴급 호출 때만)
+                    p.outside_pos[cid] = {k: c.get(k) for k in ("x", "y", "lat", "lon", "sigma", "acc")} | {"ts": time.time()}
+                    was_in = c.get("x_shared", True)
+                    for k in ("x", "y", "lat", "lon", "risk", "nearest_m", "source", "intrusions", "op_state", "vx", "vy", "speed", "heading", "floor"):
+                        c.pop(k, None)
+                    c["level"], c["x_shared"], c["_conflicts"] = "safe", False, []
+                    if was_in:
+                        p.peers_dirty = True
+                        await p.to_managers({"type": "client", "client": c})
+                    if p.evac and not p.evac.ended:
+                        who = p.evac.arrive(cid, "outside")   # 현장을 벗어남 = 대피함
+                        if who:
+                            await _evac_arrived(p, c, who)
+                    continue
+                c["x_shared"] = True
+                p.outside_pos.pop(cid, None)
+                p.trace(c, msg)
+                for k in ("acc", "sigma", "heading", "speed", "risk", "level", "nearest_m", "source", "battery", "intrusions"):
+                    if k in msg:
+                        c[k] = msg[k]
+                if c.get("level") not in LEVEL_RANK:
+                    c["level"] = "safe"
+                await _report_extras(p, c, fieldops.clean_report(msg))
+                p.peers_dirty = True
+                await p.to_managers({"type": "client", "client": c})
+                await _level_events(p, c, prev)
+                if p.evac and not p.evac.ended:
+                    who = p.evac.check_position(c, p.places)
+                    if who:
+                        await _evac_arrived(p, c, who)
+            elif t == "sos":
+                out = p.outside_pos.get(cid) if c.get("x") is None else None
+                if out and out.get("x") is not None:   # 현장 밖에서 호출 — 마지막 위치를 이때만 알림
+                    age = time.time() - out["ts"]
+                    acc = out.get("sigma") or out.get("acc")
+                    where = f"현장 밖 (현장에서 약 {round(p.site_distance(out['lat'], out['lon']))} m · {out['lat']:.5f}, {out['lon']:.5f})"
+                    text = f"🆘 {c['name']} {'쓰러짐 감지 · 응답 없음' if msg.get('reason') == 'fall' else '긴급 호출'} — {where}"
+                elif c.get("x") is not None:
+                    age = time.time() - c.get("pos_ts", time.time())
+                    where = p.describe_location(c["x"], c["y"])
+                    acc = c.get("sigma") or c.get("acc")
+                    stale = f" · 마지막 위치 {round(age)}초 전" if age > 15 else ""
+                    what = "쓰러짐 감지 · 응답 없음" if msg.get("reason") == "fall" else "긴급 호출"
+                    text = f"🆘 {c['name']} {what} — {where}{f' (±{round(acc)} m)' if acc and acc >= 1 else ''}{stale}"
+                else:
+                    where, acc, age = None, None, None
+                    text = f"🆘 {c['name']} 긴급 호출 — 위치 정보 없음 (GPS 수신 전)"
+                ev = await p.event("sos", c, text, "critical", location=where, acc=acc, fix_age=round(age) if age is not None else None)
+                await ws.send_json({"type": "sos_sent", "event_id": ev["id"], "location": where, "acc": acc})
+            elif t == "ack_message":
+                await p.event("ack_message", c, f"✔️ {c['name']} 메시지 확인")
+            elif t == "evac_safe":   # 대피 중 「안전한 곳에 도착」(대피 장소가 아닌 곳으로 피한 경우)
+                who = p.evac.arrive(cid, "self") if p.evac else None
+                if who:
+                    await _evac_arrived(p, c, who)
+            elif t == "leave":   # 「현장 나가기」 — 스스로 나간 것이므로 신호 끊김 경보를 내지 않는다
+                c["_left"] = True
+                p.attend(c, "out")
+                await p.event("leave", c, f"🚪 {c['name']} 현장 나가기")
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        if p.client_ws.get(cid) is ws:
+            p.client_ws.pop(cid, None)
+            c["online"] = False
+            p.attend(c, "out")
+            p.peers_dirty = True
+            if p.clients.get(cid) is c:   # 관리자가 이미 목록에서 지운 참여자는 다시 알리지 않음
+                await p.to_managers({"type": "client", "client": c})
+
+
+async def _report_extras(p, c, ext):
+    """2026-11-22 위치 보고의 새 값: 속도 · 장비 작업 상태(바뀌면 기록) · 층 · 장비 간섭(새로 생기면 기록)
+    2026-11-25 운전원: 장비에 타 있으면(도보 아님) 장비 자세 = 휴대폰 위치, 도보면 마지막 자세 그대로(장비는 그 자리에 정지).
+    작업 중 작업 위치(work_at) — 운전원이 배치와 다른 곳을 작업 구역으로 정했을 때만 옴"""
+    conflicts = ext.pop("conflicts", None)
+    work_at = ext.pop("work_at", None)
+    old_state = c.get("op_state")
+    c.update(ext)
+    if c.get("role") == "operator":
+        if c.get("op_state") != "walk" and c.get("x") is not None:
+            c["eq_x"], c["eq_y"], c["eq_heading"] = c["x"], c["y"], c.get("heading")
+        old_work = (c.get("work_x"), c.get("work_y"))
+        if work_at and c.get("op_state") == "work":
+            wx, wy = p.frame.to_local(*work_at)
+            c["work_x"], c["work_y"] = round(wx, 2), round(wy, 2)
+        else:
+            c.pop("work_x", None), c.pop("work_y", None)
+        if c.get("work_x") is not None and old_work[0] is None:
+            await p.event("work_zone", c, f"🚧 {p.equipment_label(c.get('equipment'))} 작업 구역을 운전원이 지금 위치로 정함 ({c['name']}) — "
+                          f"{p.describe_location(c['work_x'], c['work_y'])}", "warning")
+    if c.get("role") == "operator" and ext.get("op_state") and old_state and ext["op_state"] != old_state:
+        await p.event("op_state", c, f"🚜 {p.equipment_label(c.get('equipment'))} {fieldops.OP_STATES[old_state]} → "
+                      f"{fieldops.OP_STATES[ext['op_state']]} ({c['name']})", op_state=ext["op_state"])
+    if conflicts is not None:
+        prev = set(c.get("_conflicts") or [])
+        for text in conflicts:
+            if text not in prev:
+                await p.event("conflict", c, f"⚠️ 장비 간섭: {text}", "warning")
+        c["_conflicts"] = conflicts
+
+
+async def _evac_push(p):
+    await p.to_managers({"type": "evac", "evac": p.evac.public(p.clients) if p.evac else None})
+
+
+async def _evac_start(p, text):
+    p.evac = fieldops.Evac([c for c in p.clients.values() if c.get("online")], text)
+    n = len(p.evac.people)
+    await p.event("evac_start", None, f"🚨 대피 시작 — 대상 {n}명 (대피 장소 도착 또는 본인 확인으로 점호)", "warning")
+    await _evac_push(p)
+
+
+async def _evac_arrived(p, c, who):
+    how = {"place": f"{who['place']} 도착", "self": "안전한 곳 도착 (본인 확인)", "manager": "관리자 확인", "outside": "현장 밖으로 나감"}.get(who["how"], "도착")
+    await p.event("evac_arrived", c, f"✅ {who['name']} 대피 — {how}")
+    await p.to_client(c["id"], {"type": "evac_status", "state": "arrived", "how": who["how"], "place": who.get("place")})
+    await _evac_push(p)
+
+
+async def _evac_end(p):
+    if not p.evac or p.evac.ended:
+        return
+    p.evac.ended = time.time()
+    k = p.evac.counts(p.clients)
+    missing = [q["name"] for q in p.evac.people.values() if q["state"] != "arrived"]
+    mins = round((p.evac.ended - p.evac.start) / 60, 1)
+    text = f"🏁 대피 종료 ({mins}분) — 도착 {k['arrived']}/{k['total']}명" + (f", 확인 안 됨: {', '.join(missing)}" if missing else "")
+    await p.event("evac_end", None, text, "warning" if missing else "info")
+    await p.to_clients({"type": "evac_status", "state": "ended"})
+    await _evac_push(p)
+
+
+async def _ref_fix(p, msg):
+    place = next((q for q in p.places if q.get("id") == msg.get("place") and q.get("kind") == "ref"), None)
+    lat, lon = msg.get("lat"), msg.get("lon")
+    if not place or not valid_latlon(lat, lon):
+        return
+    rx, ry = p.frame.to_local(float(lat), float(lon))
+    if not p.corr.update(rx, ry, place["x"], place["y"], msg.get("acc"), place=place["id"], by=msg.get("by")):
+        return
+    now = time.time()
+    pub = p.corr.public(now)
+    if pub and now - p._corr_sent >= 2:          # 2초마다 휴대폰들에
+        p._corr_sent = now
+        await p.to_clients({"type": "corr", "corr": pub})
+        await p.to_managers({"type": "corr", "corr": pub})
+
+
+async def _level_events(p, c, prev):
+    new = c["level"]
+    name = c["name"]
+    if c.get("role") == "operator":
+        # 운전원: 작업 반경 안에 들어온 작업자 수 변화
+        n_now = len(c.get("intrusions") or [])
+        n_prev = c.get("_intrusions_prev", 0)
+        if n_now > n_prev:
+            names = ", ".join(p.clients[i]["name"] for i in (c.get("intrusions") or []) if i in p.clients)
+            await p.event("intrusion", c, f"🚜 {name}({p.equipment_label(c.get('equipment'))}) 작업 반경 내 작업자 {n_now}명: {names}", "warning")
+        c["_intrusions_prev"] = n_now
+    if new == prev:
+        return
+    src = f" — {c.get('source')}" if c.get("source") else ""
+    if new == "danger":
+        await p.event("enter", c, f"🚨 {name} 위험 구역 진입{src}", "critical", risk=c.get("risk"), source=c.get("source"))
+    elif new == "warning" and LEVEL_RANK[prev] < LEVEL_RANK["warning"]:
+        dist = f" ({c.get('nearest_m')}m)" if c.get("nearest_m") is not None else ""
+        await p.event("approach", c, f"⚠️ {name} 위험 구역 접근{dist}{src}", "warning", source=c.get("source"))
+    elif prev == "danger":
+        await p.event("exit", c, f"✅ {name} 위험 구역 이탈 (현재: {LEVEL_LABEL[new]})")
+
+
+async def background():
+    """1초마다 위치 목록 방송, 5초마다 신호 끊김 감시"""
+    tick = 0
+    while True:
+        await asyncio.sleep(1)
+        tick += 1
+        now = time.time()
+        for p in list(store.projects.values()):
+            if p.peers_dirty and p.client_ws:
+                p.peers_dirty = False
+                await p.to_clients({"type": "peers", "peers": p.peers(), "ts": now})
+            if tick % 300 == 0:   # 5분마다 접속 중인 사람 기록 → 서버가 갑자기 꺼져도 출입 시간이 5분 안으로 맞음
+                for c in list(p.clients.values()):
+                    p.attend(c, "seen")
+            if tick % 5:
+                continue
+            for c in list(p.clients.values()):
+                stale = now - c.get("last_seen", now) > OFFLINE_SEC and not c.get("_left")
+                if stale and not c.get("_stale"):
+                    c["_stale"] = True
+                    c["online"] = False
+                    p.peers_dirty = True
+                    sev = "critical" if c.get("level") == "danger" else "warning"
+                    p.attend(c, "out", ts=c.get("last_seen"))
+                    await p.event("offline", c, f"📵 {c['name']} 신호 끊김 ({OFFLINE_SEC}초 이상 보고 없음)", sev)
+                    await p.to_managers({"type": "client", "client": c})
+                if c.get("sim") and not c.get("online") and now - c.get("last_seen", now) > 600:
+                    p.clients.pop(c["id"], None)
+                    await p.to_managers({"type": "left", "id": c["id"]})

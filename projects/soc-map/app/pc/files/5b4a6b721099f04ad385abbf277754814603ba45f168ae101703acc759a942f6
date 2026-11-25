@@ -1,0 +1,87 @@
+"""정식 인증서 HTTPS 주소 만들기 — cloudflared 빠른 터널
+
+휴대폰에서 앱 설치(PWA)·푸시 알림·GPS 를 막힘 없이 쓰려면 브라우저가 믿는 인증서가 필요하다.
+자체 서명 인증서(--https)는 "안전하지 않음" 경고를 넘기면 GPS 는 되지만, 앱 설치와 푸시 알림은 막힌다.
+cloudflared 빠른 터널은 계정 없이 https://<임의>.trycloudflare.com 주소를 만들어 이 PC의 서버로 연결한다.
+
+v14.12: 터널이 끊기면(인터넷이 잠깐 끊김 등) 다시 연다. 빠른 터널은 다시 열면 주소가 바뀌므로 on_url 이 다시 불리고,
+        서버가 새 주소를 안내판(directory.py)에 적어 휴대폰이 따라온다.
+
+설치: winget install --id Cloudflare.cloudflared   (또는 cloudflared.exe 를 backend 폴더에 넣기)
+"""
+import logging
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+
+log = logging.getLogger("soc-map.tunnel")
+URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+
+
+def find_cloudflared():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (shutil.which("cloudflared"), os.path.join(here, "cloudflared.exe"), os.path.join(here, "cloudflared"),
+                 r"C:\Program Files (x86)\cloudflared\cloudflared.exe", r"C:\Program Files\cloudflared\cloudflared.exe"):
+        if cand and os.path.isfile(cand):
+            return cand
+    return None
+
+
+class Tunnel:
+    """cloudflared 를 띄워 두고, 끊기면 다시 띄운다. on_url(주소): 주소가 나올 때마다, on_down(): 끊겼을 때"""
+
+    def __init__(self, cmd, on_url, on_down=None, retry_s=5, max_retry_s=60, long_run_s=120):
+        self.cmd, self.on_url, self.on_down = cmd, on_url, on_down
+        self.retry_s, self.max_retry_s, self.long_run_s = retry_s, max_retry_s, long_run_s
+        self.proc, self.stopped = None, False
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        fails = 0
+        while not self.stopped:
+            started = time.monotonic()
+            try:
+                self.proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                             errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except OSError as e:
+                log.warning("cloudflared 를 실행하지 못했습니다: %s", e)
+                return
+            found = False
+            for line in self.proc.stdout:
+                m = URL_RE.search(line)
+                if m and not found:
+                    found = True
+                    self.on_url(m.group(0))
+            self.proc.wait()
+            if self.stopped:
+                return
+            if self.on_down:
+                self.on_down()
+            fails = 1 if time.monotonic() - started > self.long_run_s else fails + 1   # 오래 돌다 끊긴 것은 첫 실패로 본다
+            wait = min(self.max_retry_s, self.retry_s * 2 ** (fails - 1))
+            log.warning("인터넷 주소(터널)가 끊겼습니다. %d초 뒤 다시 엽니다.", wait)
+            end = time.monotonic() + wait
+            while time.monotonic() < end:
+                if self.stopped:
+                    return
+                time.sleep(0.1)
+
+    def stop(self):
+        self.stopped = True
+        p = self.proc
+        if p and p.poll() is None:
+            p.terminate()
+
+
+def start(port, on_url, on_down=None):
+    """터널을 띄우고 주소가 나오면 on_url(주소) 호출. 끊기면 다시 띄운다. cloudflared 가 없으면 None"""
+    exe = find_cloudflared()
+    if not exe:
+        log.warning("cloudflared 가 없어 인터넷 주소를 열지 못했습니다. 같은 와이파이의 휴대폰만 연결됩니다. "
+                    "설치: winget install --id Cloudflare.cloudflared")
+        return None
+    return Tunnel([exe, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{port}"], on_url, on_down)

@@ -1,0 +1,64 @@
+"""WGS84 국소 접평면 좌표계 (app/js/geo.js 의 LocalFrame 과 같은 계산)
+
+x = 동쪽(m), y = 남쪽(m) — 화면 좌표처럼 아래가 +y
+"""
+import math
+
+A = 6378137.0
+F = 1 / 298.257223563
+E2 = F * (2 - F)
+D2R = math.pi / 180
+
+
+def geodetic_to_ecef(lat, lon, h=0.0):
+    p, l = lat * D2R, lon * D2R
+    sp, cp = math.sin(p), math.cos(p)
+    n = A / math.sqrt(1 - E2 * sp * sp)
+    return ((n + h) * cp * math.cos(l), (n + h) * cp * math.sin(l), (n * (1 - E2) + h) * sp)
+
+
+def ecef_to_geodetic(x, y, z):
+    lon = math.atan2(y, x)
+    p = math.hypot(x, y)
+    lat = math.atan2(z, p * (1 - E2))
+    h = 0.0
+    for _ in range(6):
+        s = math.sin(lat)
+        n = A / math.sqrt(1 - E2 * s * s)
+        h = p / math.cos(lat) - n
+        lat = math.atan2(z, p * (1 - E2 * n / (n + h)))
+    return lat / D2R, lon / D2R, h
+
+
+class LocalFrame:
+    def __init__(self, lat0, lon0):
+        self.lat0, self.lon0 = lat0, lon0
+        self.o = geodetic_to_ecef(lat0, lon0)
+        p, l = lat0 * D2R, lon0 * D2R
+        self.sp, self.cp, self.sl, self.cl = math.sin(p), math.cos(p), math.sin(l), math.cos(l)
+
+    def to_local(self, lat, lon):
+        x, y, z = geodetic_to_ecef(lat, lon)
+        dx, dy, dz = x - self.o[0], y - self.o[1], z - self.o[2]
+        e = -self.sl * dx + self.cl * dy
+        n = -self.sp * self.cl * dx - self.sp * self.sl * dy + self.cp * dz
+        return e, -n
+
+    def to_latlon(self, x, y):
+        e, n, u = x, -y, 0.0
+        lat = lon = 0.0
+        for _ in range(3):
+            X = self.o[0] - self.sl * e - self.sp * self.cl * n + self.cp * self.cl * u
+            Y = self.o[1] + self.cl * e - self.sp * self.sl * n + self.cp * self.sl * u
+            Z = self.o[2] + self.cp * n + self.sp * u
+            lat, lon, h = ecef_to_geodetic(X, Y, Z)
+            u -= h
+        return lat, lon
+
+
+def valid_latlon(lat, lon):
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(lat) and math.isfinite(lon) and abs(lat) <= 90 and abs(lon) <= 180

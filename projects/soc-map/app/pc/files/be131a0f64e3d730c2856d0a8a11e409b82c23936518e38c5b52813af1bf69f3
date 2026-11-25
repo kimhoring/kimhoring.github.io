@@ -1,0 +1,67 @@
+@echo off
+chcp 65001 >nul
+setlocal
+title SOC-MAP 현장 관제
+rem ============================================================
+rem  SOC-MAP 현장 관제 (배포판) — 이 파일을 더블클릭하세요.
+rem  켤 때마다 새 버전을 자동으로 받고, 프로그램 파일이 바뀌었으면 원래대로 되돌립니다.
+rem  명령으로도: 이 파일 check  (실행 준비만 확인)
+rem ============================================================
+cd /d "%~dp0backend" 2>nul
+if not exist "%~dp0runtime\launcher.py" goto nofolder
+set "PY=venv\Scripts\python.exe"
+if not exist "%PY%" goto mkvenv
+"%PY%" -c "import sys" >nul 2>&1
+if not errorlevel 1 goto run
+echo   가상환경이 이 PC 와 맞지 않아 다시 만듭니다.
+:mkvenv
+call :findpy
+if defined BASEPY goto mkvenv2
+echo.
+echo   이 PC 에 쓸 수 있는 파이썬(3.10~3.15)이 없습니다.
+where winget >nul 2>&1
+if errorlevel 1 goto nopython
+choice /c YN /m "  지금 파이썬 3.12 를 자동으로 설치할까요"
+if errorlevel 2 goto nopython
+winget install -e --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
+call :findpy
+if not defined BASEPY goto nopython
+:mkvenv2
+echo   처음 실행 준비: 가상환경을 만듭니다... (%BASEPY%)
+%BASEPY% -m venv --clear venv
+if not exist "%PY%" goto novenv
+"%PY%" -c "import sys" >nul 2>&1
+if errorlevel 1 goto novenv
+:run
+rem  업데이트로 이 파일이 바뀌어도 안전하도록 실행과 끝내기를 한 줄에 둔다
+"%PY%" -I -X utf8 "%~dp0runtime\launcher.py" %* & echo. & pause & exit /b
+
+rem  파이썬 찾기 → BASEPY (안정 판부터). 파이썬이 없는 PC 의 python 은 스토어 바로가기라 실제로 실행해 판을 확인한다
+:findpy
+set "BASEPY="
+for %%v in (3.12 3.13 3.11 3.14 3.10 3.15) do call :trypy py -%%v
+for %%v in (312 313 311 314 310 315) do call :trypy "%LOCALAPPDATA%\Programs\Python\Python%%v\python.exe"
+for %%v in (312 313 311 314 310 315) do call :trypy "%ProgramFiles%\Python%%v\python.exe"
+call :trypy python
+call :trypy python3
+exit /b 0
+:trypy
+if defined BASEPY exit /b 0
+%* -c "import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 15) else 1)" <nul >nul 2>&1
+if not errorlevel 1 set "BASEPY=%*"
+exit /b 0
+
+:nofolder
+echo   [오류] 프로그램 폴더가 없습니다. 압축 파일 안에서 바로 실행했다면,
+echo          먼저 [압축 풀기]로 폴더를 꺼낸 뒤 그 안의 이 파일을 실행하세요.
+goto fail
+:nopython
+echo   [오류] 파이썬이 없습니다. https://www.python.org/downloads/ 에서 Python 3.12 를 설치한 뒤 다시 실행하세요.
+goto fail
+:novenv
+echo   [오류] 가상환경을 만들지 못했습니다. (%BASEPY%) backend\venv 폴더를 지우고 다시 실행해 보세요.
+goto fail
+:fail
+echo.
+pause
+exit /b 1

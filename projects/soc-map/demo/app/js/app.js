@@ -121,8 +121,8 @@ canvas.addEventListener('pointerdown', e => {
       gesture = { type: 'panOrClick', ...panStart, ip };
       return;
     }
-    case 'building': case 'road': case 'fence': case 'lasso': case 'zone': {
-      const width = S.mode === 'road' ? S.settings.roadWidth : S.settings.fenceWidth;
+    case 'building': case 'fence': case 'site': case 'zone': {
+      const width = S.settings.fenceWidth;
       S.draft = { kind: S.mode, points: [ip.x, ip.y], last: sp, width };
       gesture = { type: 'draw' };
       requestRender();
@@ -265,19 +265,19 @@ function finishDraft() {
   const pts = d.points;
   const n = pts.length / 2;
   switch (d.kind) {
-    case 'road': case 'fence':
+    case 'fence':
       if (n < 2) break;
       if (d.kind === 'fence' && fenceWillClose(pts, getT().s)) {   // 끝을 시작점에 붙여 닫는다 → 안쪽이 통행 금지 구역 (경로 탐색도 막힘)
         pts[pts.length - 2] = pts[0]; pts[pts.length - 1] = pts[1];
         toast('닫힌 울타리 — 안쪽이 통행 금지 구역이 되었습니다. 경로 안내도 이 안으로 들어가지 않습니다.', 'success', { duration: 3200 });
       }
-      (d.kind === 'road' ? S.polylines : S.fences).push({ points: pts, width: d.width });
+      S.fences.push({ points: pts, width: d.width });
       changed(); renderModeUI();
       break;
-    case 'lasso':
-      if (n < 3) { toast('보행 구역은 3개 이상의 점으로 그려야 합니다.', 'warn'); break; }
-      S.walkableAreaPolygon = pts; changed(); renderModeUI();
-      toast('보행 구역이 지정되었습니다. 경로는 이 영역 안에서만 탐색됩니다.', 'success');
+    case 'site':
+      if (n < 3) { toast('현장 경계는 3개 이상의 점으로 그려야 합니다.', 'warn'); break; }
+      S.siteBoundary = pts; changed(); renderModeUI();
+      toast('공사 현장 경계를 지정했습니다. 안전 경로는 이 안에서 찾고, 위험도 계산·주변 건물·근로자 위치 추적도 이 안(+30 m)에서만 합니다.\n휴대폰에는 「현장 공유」 뒤에 반영됩니다.', 'success', { duration: 6000 });
       break;
     case 'zone':
       if (n < 3) break;
@@ -432,6 +432,10 @@ function applyOps(m, t) {
   const k = t.dataset.ops, box = $('inspector');
   const val = (name) => (box.querySelector(`[data-ops="${name}"]`) || {}).value;
   if (k === 'opState') { if (t.value === 'work') delete m.opState; else m.opState = t.value; }
+  else if (k === 'workPad') {   // 2026-11-25 작업 구역 여유(m) — 장비 종류 기본값과 같으면 지움
+    const v = Math.round(+t.value);
+    if (t.value === '' || !Number.isFinite(v) || v === (WORK_PAD[m.type] || 0)) delete m.workPad; else m.workPad = Math.max(0, Math.min(WORK_PAD_MAX, v));
+  }
   else if (k === 'schedOn') { if (t.checked) m.schedule = { from: val('from') || '14:00', to: val('to') || '16:00' }; else delete m.schedule; }
   else if (k === 'from' || k === 'to') { if (!m.schedule) return; m.schedule = { ...m.schedule, [k]: t.value }; }
   else if (k === 'floor') { if (t.value === '') delete m.floor; else m.floor = +t.value; }
@@ -478,9 +482,8 @@ document.addEventListener('click', e => {
     duplicate: duplicateSelection,
     toggleRouteCard: () => { $('routeCard').classList.toggle('mini'); renderRouteCard(); },
     clearRoute: () => { S.route = null; renderRouteCard(); renderModeUI(); requestRender(); View3D.rebuild(); },
-    clearRoads: () => { S.polylines = []; changed(); renderModeUI(); },
     clearFences: () => { S.fences = []; changed(); renderModeUI(); },
-    clearLasso: () => { S.walkableAreaPolygon = []; changed(); renderModeUI(); },
+    clearSite: () => { S.siteBoundary = []; changed(); renderModeUI(); },
     clearMeasure: () => { S.measure = null; renderModeUI(); requestRender(); },
     regularizeAll: () => regularizeBuildings(S.contours.map((_, i) => i)),
     regularizeSel: () => { if (S.selection && S.selection.kind === 'building') regularizeBuildings([S.selection.idx]); },
@@ -602,15 +605,15 @@ function computeRoute({ quiet = false } = {}) {
 
   const field = getRiskField();
   const result = planRoute({
-    ext: docExtent(), contours: S.contours, walkable: S.walkableAreaPolygon, polylines: S.polylines, fences: S.fences,
+    ext: docExtent(), contours: S.contours, walkable: S.siteBoundary, fences: S.fences,
     field, start, end, weight: Math.pow(S.settings.safetyLevel / 10, 2),
   });
   R.result = result; R.redirect = result ? redirect : null;
   R.pieces = result ? riskPieces(result.path, field) : [];
   if (!result && !quiet) {
-    toast(S.walkableAreaPolygon.length >= 6
-      ? '경로를 찾을 수 없습니다.\n출발/도착 지점이 보행 구역 밖이거나 울타리·건물로 완전히 막혀 있습니다.'
-      : '경로를 찾을 수 없습니다.\n울타리·건물로 막혀 있거나, 도로가 서로 연결되어 있지 않습니다.', 'error');
+    toast(hasSiteBoundary()
+      ? '경로를 찾을 수 없습니다.\n출발/도착 지점이 현장 경계 밖이거나 울타리·건물로 완전히 막혀 있습니다.'
+      : '경로를 찾을 수 없습니다.\n울타리·건물로 완전히 막혀 있습니다.', 'error');
   }
   renderRouteCard(); requestRender(); View3D.rebuild();
 }
@@ -655,12 +658,6 @@ document.addEventListener('click', e => {
 $('prjSwitch').addEventListener('click', () => togglePopover('prjMenu'));
 $('prjMenu').addEventListener('click', e => { if (e.target.closest('.menu-item')) $('prjMenu').hidden = true; });
 $('layersBtn').addEventListener('click', () => togglePopover('layersPop'));
-document.querySelectorAll('input[name="basemapQuick"]').forEach(r => r.addEventListener('change', () => {
-  S.layers.basemap = r.value; S.layers.basemapUserSet = true; $('basemapSelect').value = r.value; requestRender(); updateAttribution();
-  syncViewbar(); if (S.mode === '3d') View3D.rebuild();
-}));
-$('planOpacityQuick').addEventListener('input', e => { S.plan.opacity = +e.target.value; $('planOpacity').value = e.target.value; requestRender(); });
-$('planOpacityQuick').addEventListener('change', () => changed({ risk: false }));   // 3D 도 다시 그림(onDocChanged)
 $('joinBtn').addEventListener('click', () => { renderProject(); openModal('joinModal'); watchServerInfo(); });
 $('alertBell').addEventListener('click', () => setWorkspace('monitor'));
 
@@ -701,14 +698,13 @@ $('safetySlider').addEventListener('input', e => {
   changed({ risk: false, history: true });
   if (S.route && S.route.points.length === 2) { clearTimeout(_routeTimer); _routeTimer = setTimeout(() => computeRoute({ quiet: true }), 150); }
 });
-$('basemapSelect').addEventListener('change', e => { S.layers.basemap = e.target.value; S.layers.basemapUserSet = true; syncQuickLayers(); requestRender(); updateAttribution(); if (S.mode === '3d') View3D.rebuild(); });
+$('basemapSelect').addEventListener('change', e => { S.layers.basemap = e.target.value; S.layers.basemapUserSet = true; syncQuickLayers(); requestRender(); updateAttribution(); if (S.mode === '3d') View3D.rebuild(); });   // 🗂️ 지도 설정 (2026-11-24 한 곳으로)
 function setCadastral(on) {
-  S.layers.cadastral = on; $('layerCadastral').checked = $('layerCadastralQuick').checked = on;
+  S.layers.cadastral = on; $('layerCadastral').checked = on;
   if (on && getT().s < fitScale() * 1.2 && docExtent().w > 400) toast('연속지적도는 확대(줌 15 이상)해야 보입니다.', 'info', { duration: 3000 });
   requestRender(); updateAttribution();
 }
 $('layerCadastral').addEventListener('change', e => setCadastral(e.target.checked));
-$('layerCadastralQuick').addEventListener('change', e => setCadastral(e.target.checked));
 /** 브이월드 연동 (서버 .env 에 키가 있을 때): 선택지를 보이고, 한국 현장이면 기본 배경을 브이월드 영상으로 */
 function syncVWorldUI() {
   const on = !!VWORLD.key;
@@ -721,11 +717,10 @@ function syncVWorldUI() {
   if (!on && BASEMAPS[S.layers.basemap] && BASEMAPS[S.layers.basemap].vworld) S.layers.basemap = 'satellite';
   $('basemapSelect').value = S.layers.basemap; syncQuickLayers(); requestRender(); updateAttribution();
 }
-$('planOpacity').addEventListener('input', e => { S.plan.opacity = +e.target.value; $('planOpacityQuick').value = e.target.value; requestRender(); });
+$('planOpacity').addEventListener('input', e => { S.plan.opacity = +e.target.value; requestRender(); });
 function syncQuickLayers() {
-  document.querySelectorAll('input[name="basemapQuick"]').forEach(r => { r.checked = r.value === S.layers.basemap; });
+  $('basemapSelect').value = S.layers.basemap; $('planOpacity').value = S.plan.opacity ?? 0.85;
   if (typeof syncViewbar === 'function') syncViewbar();
-  $('planOpacityQuick').value = S.plan.opacity ?? 0.85;
 }
 $('planOpacity').addEventListener('change', () => changed({ risk: false }));
 function updateAttribution() {
@@ -763,13 +758,12 @@ View3D.onBuilt = (sun) => {
 View3D.onPick = (idx) => select(idx != null ? { kind: 'building', idx } : null);
 syncSunUI();
 
-const layerInputs = { layerBg: 'bg', layerHeat: 'heat', layerZones: 'zones', layerShortest: 'shortest' };
+const layerInputs = { layerShortest: 'shortest' };   // 나머지(배치도·위험 구역·히트맵·인원)는 보기 막대
 for (const [id, key] of Object.entries(layerInputs)) {
   $(id).addEventListener('change', e => { S.layers[key] = e.target.checked; syncLayerUI(); requestRender(); if (S.mode === '3d') View3D.rebuild(); if (S.mode === 'aipick') renderModeUI(); });
 }
 function syncLayerUI() {
   for (const [id, key] of Object.entries(layerInputs)) $(id).checked = S.layers[key];
-  $('tbHeat').classList.toggle('on', S.layers.heat);
   syncViewbar();
 }
 
@@ -944,7 +938,6 @@ $('tbRedo').addEventListener('click', redo);
 $('tbZoomIn').addEventListener('click', () => zoomAt(CW / 2, CH / 2, 1.25));
 $('tbZoomOut').addEventListener('click', () => zoomAt(CW / 2, CH / 2, 0.8));
 $('tbFit').addEventListener('click', fitView);
-$('tbHeat').addEventListener('click', toggleHeat);
 $('tbPng').addEventListener('click', exportPng);
 $('helpBtn').addEventListener('click', () => openModal('helpModal'));
 $('tbSidebar').addEventListener('click', () => { document.querySelector('.app').classList.toggle('collapsed'); });
@@ -1015,7 +1008,7 @@ async function checkBackend() {
     S.backendOnline = true;
     if (!VWORLD.key) loadVWorld(BACKEND_URL).then(syncVWorldUI);
     dot.className = 'dot online';
-    txt.textContent = backendInfo.model_loaded ? '서버 연결됨' : '서버 연결됨 (AI 모델 준비 중)';
+    txt.textContent = backendInfo.model_exists === false ? '서버 연결됨 (AI 모델 없음)' : '서버 연결됨';   // AI 모델은 처음 쓸 때 불러옴
     txt.style.color = '';
   } catch (e) {
     S.backendOnline = false; backendInfo = null;
@@ -1360,7 +1353,7 @@ async function loadSample() {
       eq('concretePumpCar', 1230, 560, 0, { r_boom: 18 }),
       { id: newId('m'), type: 'hole', ...(([x, y]) => ({ x, y }))(M(880, 300)), radius: 2.8, label: '개구부/낙하', icon: '🕳️', riskLevel: 4, isEquipment: false },
     ],
-    polylines: [], walkableAreaPolygon: [],
+    siteBoundary: flat([[30, 30], [1570, 30], [1570, 990], [30, 990]]),   // 공사 현장 경계 = 걸어 다닐 수 있는 구역
     fences: [{ points: flat([[880, 420], [960, 420], [960, 560]]), width: 0.4 }],
     siteEnvironment: { windSpeed: 4, envZones: [
       { id: newId('z'), type: 'softGround', polygon: flat([[470, 600], [700, 600], [710, 900], [460, 900]]) },

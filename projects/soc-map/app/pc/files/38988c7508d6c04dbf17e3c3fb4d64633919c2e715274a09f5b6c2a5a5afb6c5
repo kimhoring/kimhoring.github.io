@@ -1,0 +1,13 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+opencv-python>=4.8
+numpy>=1.24
+ultralytics>=8.1
+requests>=2.31
+cryptography>=41
+ezdxf>=1.4,<1.5        # v14.7 CAD 원본(DXF) 배치도 (MIT)
+# v14.7 DXF 도형 계산 (BSD). 2.2 는 Python 3.11 이상, 2.1 은 3.14 까지만 → 파이썬 판에 따라 나눔
+# (2026-11-22: 다른 PC 의 최신 파이썬 3.15 에서 shapely<2.2 를 받지 못해 설치가 멈췄음)
+shapely>=2.0,<2.2; python_version < "3.11"
+shapely>=2.0; python_version >= "3.11"

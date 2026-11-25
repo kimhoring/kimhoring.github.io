@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0f1c">
+<title>SOC-MAP 현장 들어가기</title>
+<!-- 고정 초대 주소: 홈페이지 projects/soc-map/go/ 에 올라간다(sync-demo.ps1). 지금 켜져 있는 서버를 찾아 넘겨 준다.
+     QR·초대 링크가 이 주소라서 노트북을 다시 켜도 같은 QR 을 계속 쓸 수 있다. -->
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0f1c; color: #e6ecf7; font-family: "Pretendard", "Segoe UI", "Malgun Gothic", -apple-system, sans-serif; }
+  main { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; box-sizing: border-box; text-align: center; }
+  .spin { width: 38px; height: 38px; border-radius: 50%; border: 4px solid #1a2640; border-top-color: #3b82f6; animation: s .9s linear infinite; }
+  @keyframes s { to { transform: rotate(360deg); } }
+  h1 { font-size: 20px; margin: 4px 0 0; }
+  p { font-size: 14.5px; line-height: 1.6; color: #b6c2d9; margin: 0; max-width: 320px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="spin" id="spin"></div>
+  <h1 id="title">현장 서버를 찾는 중…</h1>
+  <p id="msg">잠시만 기다려 주세요.</p>
+</main>
+<script src="directory.js"></script>
+<script>
+'use strict';
+const code = (new URLSearchParams(location.search).get('c') || '').toUpperCase();
+const $ = (id) => document.getElementById(id);
+async function go() {
+  if (!/^[A-Z0-9]{6}$/.test(code)) {
+    $('spin').hidden = true; $('title').textContent = '초대 주소가 올바르지 않습니다';
+    $('msg').textContent = '관리자에게 QR이나 초대 링크를 다시 받으세요.';
+    return;
+  }
+  const url = await Directory.find();
+  if (url) { location.replace(`${url}/j/${code}`); return; }
+  $('title').textContent = '현장 서버를 기다리는 중…';
+  $('msg').textContent = '노트북이 켜지면 저절로 넘어갑니다. 이 화면을 그대로 두세요.';
+  setTimeout(go, 10000);
+}
+go();
+</script>
+</body>
+</html>

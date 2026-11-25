@@ -1,0 +1,250 @@
+"""YOLO 세그멘테이션 모델로 배치도에서 건축물 외곽선을 추출한다.
+
+v12.1 검출 성능 개선
+  - 입력 해상도 선택 (기본 1024; 학습은 640이었지만 큰 도면에서 작은 건물이 뭉개지는 것을 줄임)
+  - 타일 분할 추론: 큰 도면을 겹치게 잘라 원본 해상도로 추론한 뒤 전체 추론 결과와 병합
+  - TTA(좌우·상하 반전 추론 후 다수결 병합), 고해상도 마스크(retina_masks), 선명도 보정 전처리 옵션
+    (Ultralytics 의 augment=True 는 세그멘테이션 모델에서 무시되므로 직접 구현)
+  - 외곽선은 masks.xy(원본 좌표)를 사용 → 이전 버전의 레터박스 여백 때문에 생기던 좌표 어긋남 수정
+"""
+import os
+import threading
+import time
+
+import cv2
+import numpy as np
+
+MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+MODEL_PATH = os.path.join(MODEL_DIR, "best.pt")
+
+MAX_IMAGE_SIDE = 6000        # 이보다 크면 축소 후 추론 (좌표는 원본으로 복원)
+MIN_CONTOUR_AREA = 100
+SIMPLIFY_RATIO = 0.004       # 외곽선 단순화 (둘레 대비)
+TILE_OVERLAP = 0.25
+MAX_TILES = 36
+MERGE_OVERLAP = 0.3          # 교집합 / 작은 쪽 넓이 가 이 이상이면 같은 건물로 병합
+
+DEFAULT_OPTIONS = {"conf": 0.25, "imgsz": 1024, "tiling": "auto", "tta": False, "enhance": False}
+
+_model = None
+_model_lock = threading.Lock()
+_infer_lock = threading.Lock()   # ultralytics 모델은 동시 호출에 안전하지 않음
+
+
+def load_model():
+    global _model
+    if _model is not None:
+        return _model
+    with _model_lock:
+        if _model is None:
+            if not os.path.exists(MODEL_PATH):
+                raise FileNotFoundError(f"YOLO 모델을 찾을 수 없습니다: {MODEL_PATH}")
+            from ultralytics import YOLO
+            _model = YOLO(MODEL_PATH)
+    return _model
+
+
+def reload_model():
+    """재학습 후 models/best.pt 를 교체했을 때 사용"""
+    global _model
+    with _model_lock:
+        _model = None
+    return load_model()
+
+
+def model_info():
+    return {
+        "model_path": MODEL_PATH,
+        "model_exists": os.path.exists(MODEL_PATH),
+        "model_loaded": _model is not None,
+        "task": getattr(_model, "task", None),
+        "defaults": DEFAULT_OPTIONS,
+    }
+
+
+def decode_image(image_bytes):
+    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("이미지를 해석할 수 없습니다. PNG/JPG 파일인지 확인하세요.")
+    return img
+
+
+def enhance_image(img):
+    """선 도면용 보정: 밝기 대비 균일화(CLAHE) + 약한 언샤프 마스크"""
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+    out = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+    blur = cv2.GaussianBlur(out, (0, 0), 1.2)
+    return cv2.addWeighted(out, 1.5, blur, -0.5, 0)
+
+
+# ─────────────────────────────────────────────
+#  추론
+# ─────────────────────────────────────────────
+
+def _predict_once(model, img, imgsz, conf):
+    """한 장(또는 타일) 추론 → [(polygon Nx2 float, conf)]"""
+    res = model.predict(img, imgsz=imgsz, conf=conf, retina_masks=True, verbose=False)
+    out = []
+    if not res or res[0].boxes is None or len(res[0].boxes) == 0:
+        return out
+    det = res[0]
+    confs = det.boxes.conf.cpu().numpy()
+    if det.masks is not None and len(det.masks) > 0:
+        for poly, c in zip(det.masks.xy, confs):   # masks.xy: 원본 이미지 좌표의 외곽선
+            if len(poly) >= 3:
+                out.append((np.asarray(poly, dtype=np.float32), float(c)))
+    else:
+        for (x1, y1, x2, y2), c in zip(det.boxes.xyxy.cpu().numpy(), confs):
+            out.append((np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32), float(c)))
+    return out
+
+
+def _predict(model, img, imgsz, conf, tta):
+    """tta=True 이면 원본·좌우반전·상하반전 3회 추론 후 좌표를 되돌려 합친다 (병합 단계에서 다수결)"""
+    out = _predict_once(model, img, imgsz, conf)
+    if tta:
+        h, w = img.shape[:2]
+        for poly, c in _predict_once(model, np.ascontiguousarray(img[:, ::-1]), imgsz, conf):
+            poly = poly.copy(); poly[:, 0] = w - 1 - poly[:, 0]; out.append((poly, c))
+        for poly, c in _predict_once(model, np.ascontiguousarray(img[::-1, :]), imgsz, conf):
+            poly = poly.copy(); poly[:, 1] = h - 1 - poly[:, 1]; out.append((poly, c))
+    return out
+
+
+def _tiles(w, h, size):
+    """겹치는 타일 좌표 목록. 타일 수가 너무 많으면 타일을 키운다."""
+    while True:
+        step = max(1, int(size * (1 - TILE_OVERLAP)))
+        xs = list(range(0, max(1, w - size), step)) + [max(0, w - size)]
+        ys = list(range(0, max(1, h - size), step)) + [max(0, h - size)]
+        xs, ys = sorted(set(xs)), sorted(set(ys))
+        if len(xs) * len(ys) <= MAX_TILES:
+            return [(x, y, min(w, x + size), min(h, y + size)) for y in ys for x in xs]
+        size = int(size * 1.25)
+
+
+class _Det:
+    __slots__ = ("poly", "conf", "bbox", "area")
+
+    def __init__(self, poly, conf):
+        self.poly = poly.astype(np.int32).reshape(-1, 1, 2)
+        self.conf = conf
+        x, y, w, h = cv2.boundingRect(self.poly)
+        self.bbox = (x, y, x + w, y + h)
+        self.area = max(1.0, cv2.contourArea(self.poly))
+
+
+def _merge(dets):
+    """겹치는 검출(전체 추론 + 타일 추론, 타일 경계에서 잘린 조각)을 하나로 합친다 (union-find)"""
+    n = len(dets)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        a = dets[i]
+        for j in range(i + 1, n):
+            b = dets[j]
+            x1, y1 = max(a.bbox[0], b.bbox[0]), max(a.bbox[1], b.bbox[1])
+            x2, y2 = min(a.bbox[2], b.bbox[2]), min(a.bbox[3], b.bbox[3])
+            if x2 <= x1 or y2 <= y1:
+                continue
+            # 겹치는 bbox 영역에서만 래스터화해 교집합 넓이 계산
+            w, h = x2 - x1, y2 - y1
+            ma = np.zeros((h, w), np.uint8)
+            mb = np.zeros((h, w), np.uint8)
+            cv2.fillPoly(ma, [a.poly - [x1, y1]], 1)
+            cv2.fillPoly(mb, [b.poly - [x1, y1]], 1)
+            inter = int(np.count_nonzero(ma & mb))
+            if inter / min(a.area, b.area) >= MERGE_OVERLAP:
+                parent[find(i)] = find(j)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(dets[i])
+
+    merged = []
+    for members in groups.values():
+        if len(members) == 1:
+            merged.append((members[0].poly, members[0].conf))
+            continue
+        x1 = min(d.bbox[0] for d in members); y1 = min(d.bbox[1] for d in members)
+        x2 = max(d.bbox[2] for d in members); y2 = max(d.bbox[3] for d in members)
+        # 픽셀 투표: 같은 건물을 여러 번 본 경우(TTA·전체+타일)는 과반수, 2개뿐이면 합집합
+        votes = np.zeros((y2 - y1 + 1, x2 - x1 + 1), np.uint8)
+        for d in members:
+            m = np.zeros_like(votes)
+            cv2.fillPoly(m, [d.poly - [x1, y1]], 1)
+            votes += m
+        need = 1 if len(members) <= 2 else (len(members) + 1) // 2
+        mask = np.where(votes >= need, 255, 0).astype(np.uint8)
+        found, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not found:
+            continue
+        c = max(found, key=cv2.contourArea) + [x1, y1]
+        merged.append((c.astype(np.int32), max(d.conf for d in members)))
+    return merged
+
+
+def extract_buildings_yolo(image_bytes, conf=0.25, imgsz=1024, tiling="auto", tta=False, enhance=False):
+    """
+    반환 dict
+      nodes    : [{cx, cy, confidence}]
+      contours : OpenCV 형식 외곽선 [[[x, y]], ...] 목록
+      width, height, inference_ms, meta
+    """
+    model = load_model()
+    img = decode_image(image_bytes)
+    h, w = img.shape[:2]
+
+    scale = 1.0
+    if max(h, w) > MAX_IMAGE_SIDE:
+        scale = MAX_IMAGE_SIDE / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    if enhance:
+        img = enhance_image(img)
+    ih, iw = img.shape[:2]
+
+    use_tiles = tiling == "on" or (tiling == "auto" and max(ih, iw) > imgsz * 1.5)
+
+    t0 = time.perf_counter()
+    raw = []
+    with _infer_lock:
+        raw += _predict(model, img, imgsz, conf, tta)      # 전체 이미지: 큰 건물
+        tiles = _tiles(iw, ih, imgsz) if use_tiles else []
+        for (x1, y1, x2, y2) in tiles:                      # 타일: 작은 건물
+            for poly, c in _predict(model, img[y1:y2, x1:x2], imgsz, conf, tta):
+                raw.append((poly + [x1, y1], c))
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    dets = [_Det(p, c) for p, c in raw]
+    dets = [d for d in dets if d.area >= MIN_CONTOUR_AREA]
+    merged = _merge(dets) if (tiles or tta) else [(d.poly, d.conf) for d in dets]
+
+    nodes, contours = [], []
+    for contour, c in sorted(merged, key=lambda t: -t[1]):
+        if cv2.contourArea(contour) < MIN_CONTOUR_AREA:
+            continue
+        simplified = cv2.approxPolyDP(contour, SIMPLIFY_RATIO * cv2.arcLength(contour, True), True)
+        if len(simplified) >= 3:
+            contour = simplified
+        if scale != 1.0:
+            contour = np.round(contour.astype(np.float32) / scale).astype(np.int32)
+        m = cv2.moments(contour)
+        if m["m00"] == 0:
+            continue
+        nodes.append({"cx": int(m["m10"] / m["m00"]), "cy": int(m["m01"] / m["m00"]), "confidence": round(c, 3)})
+        contours.append(contour.reshape(-1, 1, 2).tolist())
+
+    return {
+        "nodes": nodes, "contours": contours, "width": w, "height": h,
+        "inference_ms": round(elapsed_ms, 1),
+        "meta": {"imgsz": imgsz, "conf": conf, "tiles": len(tiles), "tta": tta, "enhance": enhance,
+                 "raw_detections": len(raw), "merged": len(contours)},
+    }

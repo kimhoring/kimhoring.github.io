@@ -156,7 +156,7 @@ function transformLayout(fn, rot = 0, withPlan = false) {
   for (const m of S.markers) { const q = fn(m); m.x = +q.x.toFixed(3); m.y = +q.y.toFixed(3); if (m.isEquipment) m.heading = (m.heading || 0) + rot; }
   for (const n of S.nodes) { const q = fn({ x: n.cx, y: n.cy }); n.cx = q.x; n.cy = q.y; }
   S.contours = S.contours.map(c => c.map(pt => { const a = Array.isArray(pt[0]) ? pt[0] : pt, q = fn({ x: +a[0], y: +a[1] }); return [[+q.x.toFixed(3), +q.y.toFixed(3)]]; }));
-  S.polylines.forEach(l => flat(l.points)); S.fences.forEach(l => flat(l.points)); flat(S.walkableAreaPolygon);
+  S.fences.forEach(l => flat(l.points)); flat(S.siteBoundary);
   S.siteEnvironment.envZones.forEach(z => { flat(z.polygon); delete z._bbox; });
   if (S.route) { S.route.points = S.route.points.map(fn); S.route.result = null; }
   if (withPlan && S.plan.transform) {
@@ -267,8 +267,21 @@ $('prjInfoBtn').addEventListener('click', () => {
 //  현장 배치 공유 (휴대폰이 받아가는 데이터)
 // ═══════════════════════════════════════════════
 
+/** 2026-11-24 가볍게: 현장 경계가 있으면 휴대폰에는 경계 + 60 m 안 건물만 보낸다 (주변 실제 건물 수백 동을 다 보내지 않음).
+ *  건물 번호가 바뀌므로 buildingData(이름·층수·현관 출입 불가)도 같은 번호로 다시 매김 */
+const PHONE_BLDG_M = 60;
+function trimForPhones(doc) {
+  if (!hasSiteBoundary()) return doc;
+  const polys = getContourPolys(), keep = [];
+  polys.forEach((p, i) => { if (p.length >= 6) { const c = polygonCentroid(p); if (siteContains(S.siteBoundary, null, c.x, c.y, PHONE_BLDG_M)) keep.push(i); } });
+  if (keep.length === polys.length) return doc;
+  const bd = {};
+  keep.forEach((i, j) => { if (doc.buildingData && doc.buildingData[i]) bd[j] = doc.buildingData[i]; });
+  return { ...doc, contours: keep.map(i => doc.contours[i]), buildingData: bd };
+}
+
 function sitePayload(includePlan) {
-  const doc = JSON.parse(serializeDoc());
+  const doc = trimForPhones(JSON.parse(serializeDoc()));
   const site = { doc, extent: docExtent(), planImage: 'keep' };
   if (includePlan) {
     if (S.bgImage && S.plan.transform) {
@@ -432,8 +445,10 @@ function updateLive(c) {
   const prev = S.live[c.equipment], online = c.online !== false;
   // 같은 장비에 연결된 다른 운전원이 접속 중이면, 끊긴 쪽 정보로 덮어쓰지 않는다
   if (prev && prev.cid !== c.id && prev.online && !online) return;
-  S.live[c.equipment] = { cid: c.id, x: c.x, y: c.y, heading: c.heading != null ? bearingToHeading(c.heading) : undefined, ts: c.last_seen, online, by: c.name,
-    opState: OP_STATES[c.op_state] ? c.op_state : undefined, v: { vx: +c.vx || 0, vy: +c.vy || 0 } };
+  // 2026-11-25 운전원이 내려 걸으면(도보) 장비는 마지막으로 탔던 자리(eq_x, eq_y — 서버가 기억)에 정지, 운전원은 근로자로 표시
+  const P = equipPoseOf(c, S.markers.find(mm => mm.id === c.equipment));
+  S.live[c.equipment] = { cid: c.id, x: P.x, y: P.y, heading: P.heading, ts: c.last_seen, at: performance.now(), online, by: c.name,
+    opState: OP_STATES[c.op_state] ? c.op_state : undefined, v: P.v, workAt: P.workAt };
   invalidateRisk();
 }
 
@@ -683,7 +698,7 @@ function renderMonitor() {
     (b.online !== false) - (a.online !== false) || LEVELS[b.level || 'safe'].rank - LEVELS[a.level || 'safe'].rank || String(a.name).localeCompare(b.name));
   const online = list.filter(c => c.online !== false);
   const danger = online.filter(c => c.level === 'danger').length;
-  const ops = online.filter(c => c.role === 'operator').length;
+  const ops = online.filter(isDriving).length;   // 장비에서 내린 운전원은 작업자로 셈
   const warn = online.filter(c => c.level === 'warning').length;
   $('monStatus').innerHTML = !S.project.id ? '<div class="alert info">서버 프로젝트를 열면 현장 앱으로 합류한 인원이 여기에 표시됩니다.</div>'
     : !PRJ.connected ? '<div class="alert warn">현장 서버에 연결하는 중입니다…</div>'
@@ -698,14 +713,15 @@ function renderMonitor() {
   $('workerList').innerHTML = list.length ? list.map(c => {
     const lv = LEVELS[c.level || 'safe'], off = c.online === false;
     const eqName = c.role === 'operator' ? (S.markers.find(m => m.id === c.equipment) || {}).label || '장비 미지정' : '';
+    const drive = isDriving(c), walkOp = c.role === 'operator' && !drive;
     const detail = off ? `신호 끊김 · ${ago(c.last_seen)}`
-      : c.role === 'operator'
+      : drive
         ? `🚜 ${eqName}${OP_STATES[c.op_state] ? ` · ${OP_STATES[c.op_state].icon} ${OP_STATES[c.op_state].label}` : ''}${(c.intrusions || []).length ? ` · <b style="color:#fca5a5">반경 내 ${(c.intrusions || []).length}명</b>` : ''}${c.speed ? ` · ${(c.speed * 3.6).toFixed(1)}km/h` : ''}`
-        : `${c.inside_site === false ? '현장 밖' : lv.label}${c.floor != null ? ` · 🏢 ${floorText(c.floor)}` : ''}${c.nearest_m != null && c.level !== 'danger' ? ` · 위험구역 ${c.nearest_m}m` : ''}`;
+        : `${walkOp ? `🚶 하차 · 도보 (${esc(eqName)} 정지) · ` : ''}${c.inside_site === false ? '현장 밖' : lv.label}${c.floor != null ? ` · 🏢 ${floorText(c.floor)}` : ''}${c.nearest_m != null && c.level !== 'danger' ? ` · 위험구역 ${c.nearest_m}m` : ''}`;
     const acc = c.sigma != null ? ` · ±${c.sigma.toFixed(1)}m` : c.acc ? ` · ±${Math.round(c.acc)}m` : '';
-    return `<div class="worker-item ${off ? 'off' : ''} lv-${c.level || 'safe'}" style="--c:${off ? '#64748b' : c.role === 'operator' ? '#f59e0b' : lv.color}" data-wid="${esc(c.id)}">
+    return `<div class="worker-item ${off ? 'off' : ''} lv-${c.level || 'safe'}" style="--c:${off ? '#64748b' : drive ? '#f59e0b' : lv.color}" data-wid="${esc(c.id)}">
       <span class="wdot"></span>
-      <div class="flex1" style="min-width:0"><b>${c.role === 'operator' ? '🚜' : '👷'} ${esc(c.name)}</b>${c.sim ? ' <span class="label-sm">가상</span>' : ''}<div class="label-sm wdetail">${detail}${off ? '' : acc}</div></div>
+      <div class="flex1" style="min-width:0"><b>${drive ? '🚜' : walkOp ? '🚶' : '👷'} ${esc(c.name)}</b>${c.sim ? ' <span class="label-sm">가상</span>' : ''}<div class="label-sm wdetail">${detail}${off ? '' : acc}</div></div>
       <button class="icon-btn" data-wact="focus" title="지도에서 보기">📍</button>
       <button class="icon-btn" data-wact="msg" title="메시지" ${off ? 'disabled' : ''}>💬</button>
     </div>`;
@@ -837,8 +853,9 @@ function drawMonitorLayer(ctx, s) {
   }
   // 현장 인원 (보기 막대 「👷 인원」으로 켜고 끔)
   const t = performance.now() / 1000;
-  if (S.layers.people !== false) for (const c of PRJ.clients.values()) {
-    if (c.x == null || c.role === 'operator') continue;
+  if (S.layers.people !== false) for (const c0 of PRJ.clients.values()) {
+    if (c0.x == null || isDriving(c0)) continue;   // 장비에서 내린 운전원(도보)은 근로자처럼
+    const dp = LiveMotion.track(c0.id, c0.x, c0.y), c = { ...c0, x: dp.x, y: dp.y };   // 1초 보고 사이를 부드럽게
     const off = c.online === false, color = off ? '#64748b' : LEVELS[c.level || 'safe'].color;
     if (!off && c.level === 'danger') {
       const k = t % 1;
@@ -847,15 +864,16 @@ function drawMonitorLayer(ctx, s) {
     if (c.sigma && !c.sim) { ctx.beginPath(); ctx.arc(c.x, c.y, c.sigma, 0, Math.PI * 2); ctx.fillStyle = 'rgba(96,165,250,0.12)'; ctx.fill(); }
     ctx.beginPath(); ctx.arc(c.x, c.y, px(11), 0, Math.PI * 2);
     ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = c.id === PRJ.focusId ? '#60a5fa' : '#fff'; ctx.lineWidth = px(c.id === PRJ.focusId ? 4 : 2.5); ctx.stroke();
-    emoji('👷', c.x, c.y, px(13));
-    label(c.name + (off ? ' (끊김)' : ''), c.x, c.y - px(19), px(11), off ? '#cbd5e1' : '#fff');
+    emoji(c.role === 'operator' ? '🚶' : '👷', c.x, c.y, px(13));
+    label(c.name + (c.role === 'operator' ? ' (운전원·도보)' : '') + (off ? ' (끊김)' : ''), c.x, c.y - px(19), px(11), off ? '#cbd5e1' : '#fff');
   }
   // 운전원과 연결된 장비 표시
-  if (S.layers.people !== false) for (const [id, lv] of Object.entries(S.live)) {
+  if (S.layers.people !== false) for (const [id, lv0] of Object.entries(S.live)) {
     const m = S.markers.find(mm => mm.id === id); if (!m) continue;
+    const dp = LiveMotion.pose(id), lv = dp ? { ...lv0, x: dp.x, y: dp.y } : lv0;   // 장비 아이콘과 함께 움직임
     ctx.beginPath(); ctx.arc(lv.x, lv.y, px(19), 0, Math.PI * 2);
     ctx.strokeStyle = lv.online ? '#f59e0b' : '#64748b'; ctx.lineWidth = px(2.5); ctx.setLineDash([px(4), px(3)]); ctx.stroke(); ctx.setLineDash([]);
-    label(`🚜 ${lv.by}${lv.online ? '' : ' (마지막 위치)'}`, lv.x, lv.y + px(30), px(10.5), '#fcd34d');
+    label(lv.opState === 'walk' && lv.online ? `🅿 정지 · ${lv.by} 하차` : `🚜 ${lv.by}${lv.online ? '' : ' (마지막 위치)'}`, lv.x, lv.y + px(30), px(10.5), '#fcd34d');
   }
 }
 setInterval(() => {
@@ -1127,8 +1145,8 @@ class SimClient {
   pickTarget() {
     const e = docExtent(), field = getRiskField();
     this.leg++;
-    if (this.role === 'operator') {   // 장비: 원래 위치 주변 ±12m 를 천천히 왕복
-      this.target = { x: this.home.x + (Math.random() - 0.5) * 24, y: this.home.y + (Math.random() - 0.5) * 24 };
+    if (this.role === 'operator') {   // 장비: 작업 구역 안(원래 위치 ±3 m)에서 조금씩 옮기며 작업 — 위험 구역은 작업 구역에 고정 (2026-11-25)
+      this.target = { x: this.home.x + (Math.random() - 0.5) * 6, y: this.home.y + (Math.random() - 0.5) * 6 };
     } else if (field.equipments.length && this.leg % 4 === 0) {
       const eq = field.equipments[Math.floor(Math.random() * field.equipments.length)];
       this.target = { x: eq.xc + (Math.random() - 0.5) * 6, y: eq.yc + (Math.random() - 0.5) * 6 };
@@ -1147,8 +1165,9 @@ class SimClient {
       // 내 장비 위험 반경 안에 있는 작업자
       const m = S.markers.find(mm => mm.id === this.equipment);
       if (m) {
-        const eq = createEquipment({ ...m, x: this.x, y: this.y, heading: this.heading }, S.siteEnvironment);
-        msg.intrusions = [...PRJ.clients.values()].filter(c => c.role !== 'operator' && c.online !== false && c.x != null && ['full', 'red', 'orange'].includes(eq.zoneAt(c.x, c.y))).map(c => c.id);
+        const eq = createEquipment({ ...m, x: this.x, y: this.y, heading: this.heading, _plan: { x: m.x, y: m.y }, _liveState: 'work' }, S.siteEnvironment);
+        msg.op_state = 'work';
+        msg.intrusions = [...PRJ.clients.values()].filter(c => !isDriving(c) && c.online !== false && c.x != null && ['full', 'red', 'orange'].includes(eq.zoneAt(c.x, c.y))).map(c => c.id);
       }
       msg.level = 'safe';
     } else {
@@ -1171,7 +1190,7 @@ $('simWorkersBtn').addEventListener('click', async () => {
   const movable = S.markers.find(m => m.isEquipment && ['excavator', 'mobileCrane', 'concretePumpCar'].includes(m.type));
   PRJ.sims = ['가상 A', '가상 B', '가상 C'].map((n, i) => new SimClient(n, i, 'worker'));
   if (movable) PRJ.sims.push(new SimClient(`가상 운전원 (${movable.label})`, 0, 'operator', movable.id));
-  toast(`가상 작업자 3명${movable ? `과 ${movable.label} 운전원 1명` : ''}이 투입되었습니다.\n장비가 움직이면 위험 반경도 함께 움직입니다.`, 'info', { duration: 6000 });
+  toast(`가상 작업자 3명${movable ? `과 ${movable.label} 운전원 1명` : ''}이 투입되었습니다.\n작업 중인 장비는 움직여도 위험 반경이 작업 구역에 고정됩니다.`, 'info', { duration: 6000 });
   renderMonitor();
 });
 
@@ -1203,7 +1222,7 @@ async function wxRefresh(force = false) {
   }
   if (!WX.enabled) { renderWeather(); return; }
   const key = `${o.lat.toFixed(4)},${o.lon.toFixed(4)}`;
-  if (!force && WX.key === key && Date.now() - WX.at < 9 * 60e3) return;   // 서버도 10분 캐시
+  if (!force && WX.key === key && Date.now() - WX.at < 30 * 60e3) return;   // 새 발표는 서버가 WebSocket 으로 보내 줌 — 화면은 30분에 한 번만 직접
   WX.loading = true; renderWeather();
   try {
     const r = await fetch(`${BACKEND_URL}/api/weather?lat=${o.lat}&lon=${o.lon}`, { cache: 'no-store' });
@@ -1309,7 +1328,7 @@ setInterval(() => wxRefresh(), 60e3);   // 위치가 바뀌었거나 9분이 지
 
 // 3D 보기: 현장 인원 실시간 표시 (View3D 가 0.3초마다 읽음)
 View3D.peopleSource = () => [...PRJ.clients.values()].filter(c => c.x != null).map(c => ({
-  id: c.id, x: c.x, y: c.y, name: c.name, role: c.role, online: c.online !== false, level: c.level || 'safe',
+  id: c.id, x: c.x, y: c.y, name: c.name, role: c.role, online: c.online !== false, level: c.level || 'safe', equipment: c.equipment || null,
   color: c.online === false ? '#64748b' : c.role === 'operator' ? '#f59e0b' : (LEVELS[c.level || 'safe'] || LEVELS.safe).color,
 }));
 
@@ -1337,8 +1356,14 @@ function realBldgReady() {
   if (!VWORLD.key) { toast('브이월드 인증키가 없어 실제 건물을 불러올 수 없습니다. backend/.env 에 SOCMAP_VWORLD_KEY 를 넣으세요.', 'warn'); return false; }
   return true;
 }
-/** 조회 범위: 지금 배치 범위 + 여유(최소 반경 250 m, 최대 ±600 m) */
-function realBldgBox(minHalf = 250, pad = 80) {
+/** 조회 범위: 지금 배치 범위 + 여유(최소 반경 250 m, 최대 ±600 m).
+ *  2026-11-24 현장 경계가 있으면 경계 + 100 m 만 (현장 둘레 건물만 있으면 됨 — 많이 불러올수록 무거움). 도면 자동 맞추기는 near=false */
+const SITE_NEAR_M = 100;
+function realBldgBox(minHalf = 250, pad = 80, near = true) {
+  if (near && hasSiteBoundary()) {
+    const b = polygonBBox(S.siteBoundary);
+    return { minX: b.minX - SITE_NEAR_M, maxX: b.maxX + SITE_NEAR_M, minY: b.minY - SITE_NEAR_M, maxY: b.maxY + SITE_NEAR_M };
+  }
   const E = docExtent(), cx = (E.minX + E.maxX) / 2, cy = (E.minY + E.maxY) / 2;
   const hx = Math.min(600, Math.max(minHalf, (E.maxX - E.minX) / 2 + pad)), hy = Math.min(600, Math.max(minHalf, (E.maxY - E.minY) / 2 + pad));
   return { minX: cx - hx, maxX: cx + hx, minY: cy - hy, maxY: cy + hy };
@@ -1352,6 +1377,7 @@ function realBldgData(b) {
   if (b.use) bd.use = b.use;
   if (b.structure_name) bd.structureName = b.structure_name;
   if (b.approved) bd.approved = b.approved;
+  if (b.note) bd.realNote = b.note;   // 2026-11-24 대장 이름이 도로명주소와 다름 등 — 인스펙터에 표시
   return bd;
 }
 
@@ -1360,13 +1386,13 @@ async function importRealBuildings() {
   setLoading('브이월드에서 실제 건물을 불러오는 중…');
   try {
     const F = getFrame(), list = await fetchRealBuildings(F, realBldgBox());
-    const polys = getContourPolys(), more = [];
+    const polys = getContourPolys().slice(), more = [];
     let added = 0, dup = 0, tiny = 0;
     for (const b of list) {
       if (b.areaM < 15) { tiny++; continue; }   // 경비실·변전실 같은 아주 작은 부속 건물
       if (polys.some(p => p.length >= 6 && isPointInPolygon(b.c.x, b.c.y, p))) { dup++; continue; }   // 이미 그린(인식한) 건물 자리
       S.buildingData[S.contours.length + more.length] = realBldgData(b);
-      more.push(toContour(b.poly));
+      more.push(toContour(b.poly)); polys.push(b.poly);   // 같은 자리에 두 번 오면 한 번만
       added++;
     }
     // 배열을 새로 만든다 — getContourPolys() 캐시가 배열 객체 기준이라 push 로 늘리면 옛 목록이 그대로 쓰였음
@@ -1397,7 +1423,7 @@ async function autoAlignWithBuildings() {
   if (S.plan.refs.length && !confirm(`기준점 ${S.plan.refs.length}개를 지우고 실제 건물로 자동 정합할까요?\n(Ctrl+Z 로 되돌릴 수 있습니다)`)) return;
   setLoading('실제 건물과 도면 건물을 짝 짓는 중…');
   try {
-    const real = await fetchRealBuildings(F, realBldgBox(400, 200));
+    const real = await fetchRealBuildings(F, realBldgBox(400, 200, false));
     const dst = real.filter(b => b.areaM >= 30).map(b => ({ x: b.c.x, y: b.c.y, area: b.areaM, b }));
     const k = S.plan.knownMpp > 0 ? S.plan.knownMpp : null;
     const m = matchFootprints(src, dst, { scaleRange: k ? [k * 0.92, k * 1.08] : [0.003, 3] });
@@ -1426,7 +1452,8 @@ async function autoAlignWithBuildings() {
     toast('자동 맞추기에 실패했습니다: ' + e.message, 'error');
   } finally { setLoading(null); }
 }
-$('realBldgBtn').addEventListener('click', importRealBuildings);
+// 2026-11-24 「현장 주변 불러오기」 한 단추: 실제 건물 + (인허가 키가 있으면) 주변 공사 현장
+$('realBldgBtn').addEventListener('click', async () => { await importRealBuildings(); if (realBldgReady()) await findPermitSites({ quiet: true }); });
 $('autoAlignBtn').addEventListener('click', autoAlignWithBuildings);
 
 // ═══════════════════════════════════════════════
@@ -1645,3 +1672,156 @@ function scheduleWatch(force) {
   _schedSig = sig;
 }
 setInterval(() => scheduleWatch(false), 20000);
+
+
+// ═══════════════════════════════════════════════
+//  2026-11-22 건축 인허가 — 주변 공사 현장 찾기 (서버 permits.py · 국토교통부 건축HUB · 브이월드 지적도)
+//  허가·착공은 났고 사용승인 전 = 공사 중. 필지 경계로 지도에 표시, 누르면 동별 층수 · 구조
+// ═══════════════════════════════════════════════
+const PERMIT = { sites: [], sel: null, detail: null, meta: null };
+const PERMIT_COLOR = { building: '#f97316', permitted: '#eab308' };
+const fmtDay = (d) => (d ? d.replace(/-/g, '.') : '-');
+const permitTitle = (s) => s.name || [s.use, s.kind].filter(Boolean).join(' ') || '건축 공사';
+
+async function findPermitSites(opts = {}) {
+  if (!realBldgReady()) return;
+  let cfg = {};
+  try { cfg = await (await fetch(`${BACKEND_URL}/api/permits/config`, { cache: 'no-store' })).json(); } catch (e) { /* noop */ }
+  if (!cfg.enabled && opts.quiet) {   // 「현장 주변 불러오기」 — 키가 없으면 건물만, 안내는 한 줄
+    $('permitInfo').innerHTML = '<div class="hint">🏗️ 주변 공사 현장(건축 인허가)은 공공데이터포털 키(backend/.env SOCMAP_DATA_GO_KR_KEY)가 있으면 함께 표시됩니다.</div>';
+    return;
+  }
+  if (!cfg.enabled) {
+    toast('공공데이터포털 인증키가 없어 건축 인허가를 볼 수 없습니다. 공공데이터포털 → 「국토교통부_건축HUB_건축인허가정보 서비스」 활용신청 → 일반 인증키(Decoding)를 backend/.env 의 SOCMAP_DATA_GO_KR_KEY 에 넣고 서버를 다시 켜세요.', 'warn', { duration: 12000 });
+    return;
+  }
+  const F = getFrame(), E = docExtent(), cx = (E.minX + E.maxX) / 2, cy = (E.minY + E.maxY) / 2;
+  // 지적도 조회 한도(약 400 m) 안. 현장 경계가 있으면 경계 + 60 m (공사 현장 바로 옆 필지만)
+  const h = hasSiteBoundary() ? Math.min(180, Math.max(E.w, E.h) / 2 - SITE_MARGIN + 60) : 180;
+  const a = F.toLatLon(cx - h, cy + h), b = F.toLatLon(cx + h, cy - h);
+  const q = `minlat=${Math.min(a.lat, b.lat).toFixed(7)}&minlon=${Math.min(a.lon, b.lon).toFixed(7)}&maxlat=${Math.max(a.lat, b.lat).toFixed(7)}&maxlon=${Math.max(a.lon, b.lon).toFixed(7)}`;
+  setLoading('건축 인허가에서 주변 공사 현장을 찾는 중…');
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/permits/area?${q}`, { cache: 'no-store' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+    PERMIT.sites = d.sites.map(s => ({ ...s, polys: (s.rings || []).map(ring => ring.flatMap(([la, lo]) => { const p = F.toLocal(la, lo); return [p.x, p.y]; })).filter(p => p.length >= 6) }));
+    PERMIT.sel = null; PERMIT.detail = null; PERMIT.meta = d;
+    renderPermitInfo(d);
+    requestRender();
+    toast(PERMIT.sites.length ? `주변 공사 현장 ${PERMIT.sites.filter(s => s.status === 'building').length}곳 · 착공 전 ${PERMIT.sites.filter(s => s.status === 'permitted').length}곳을 찾았습니다.` : `주변 약 ${Math.round(h)} m 안에 진행 중인 건축 인허가가 없습니다.`, PERMIT.sites.length ? 'success' : 'info');
+  } catch (e) {
+    toast('건축 인허가를 불러오지 못했습니다: ' + e.message, 'error', { duration: 8000 });
+  } finally { setLoading(null); }
+}
+
+function renderPermitInfo(meta) {
+  const el = $('permitInfo');
+  if (!PERMIT.sites.length) { el.innerHTML = meta ? `<div class="hint">필지 ${meta.parcels}개를 확인했습니다 — 공사 중 · 착공 전 인허가 없음.</div>` : ''; return; }
+  el.innerHTML = `<div class="hint">🏗️ 건축 인허가 (국토교통부 건축HUB) · 필지 ${meta ? meta.parcels : ''}개 확인${meta && meta.partial && meta.partial.length ? ' · <b>인허가가 많은 동은 일부만 확인</b>' : ''}</div>
+    <div class="list">${PERMIT.sites.map((s, i) => `<div class="list-item permit-item${PERMIT.sel === i ? ' on' : ''}" style="--c:${PERMIT_COLOR[s.status]}" data-permit="${i}">
+      <span><b>${s.status === 'building' ? '🏗️ 공사 중' : '📄 착공 전'}</b> ${esc(permitTitle(s))}<br>
+      <small class="label-sm">${esc(s.parcel_addr || s.addr || '')} · 허가 ${fmtDay(s.permit_day)}${s.start_day ? ` · 착공 ${fmtDay(s.start_day)}` : s.start_sched ? ` · 착공 예정 ${fmtDay(s.start_sched)}` : ''}${s.tot_area ? ` · 연면적 ${fmt(s.tot_area, 0)} m²` : ''}${s.main_bld_cnt ? ` · ${s.main_bld_cnt}동` : ''}</small></span></div>`).join('')}</div>
+    <div id="permitDetail"></div>`;
+}
+
+async function openPermit(i) {
+  const s = PERMIT.sites[i];
+  if (!s) return;
+  PERMIT.sel = i; renderPermitInfo(PERMIT.meta);
+  if (s.polys[0]) { const c = polygonCentroid(s.polys[0]); centerOn(c.x, c.y); }
+  requestRender();
+  const box = $('permitDetail');
+  box.innerHTML = '<div class="hint">동별 층수를 불러오는 중…</div>';
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/permits/parcel?pnu=${encodeURIComponent(s.pnu)}`, { cache: 'no-store' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+    const p = d.permits.find(x => x.pk === s.pk) || d.permits[0] || s;
+    PERMIT.detail = p;
+    const dongs = p.dongs || [];
+    box.innerHTML = `<div class="permit-card">
+      <b>${esc(permitTitle(p))}</b> <span class="badge" style="background:${PERMIT_COLOR[p.status] || '#64748b'}33;color:${PERMIT_COLOR[p.status] || '#cbd5e1'}">${esc(p.status_label || '')}</span>
+      <div class="label-sm">${esc(p.addr || '')}<br>허가 ${fmtDay(p.permit_day)} · 착공 ${fmtDay(p.start_day || p.start_sched)} · 대지 ${p.plat_area ? fmt(p.plat_area, 0) + ' m²' : '-'} · 건축면적 ${p.arch_area ? fmt(p.arch_area, 0) + ' m²' : '-'}${p.hhld ? ` · ${p.hhld}세대` : ''}</div>
+      ${dongs.length ? `<table class="permit-dongs"><tr><th>동</th><th>지상</th><th>지하</th><th>구조</th></tr>${dongs.map(x => `<tr><td>${esc(x.name || '-')}</td><td>${x.ground || '-'}</td><td>${x.basement || '-'}</td><td>${esc(x.structure || '-')}</td></tr>`).join('')}</table>` : '<div class="hint">동별 개요가 아직 없습니다.</div>'}
+      <div class="row-gap" style="margin-top:6px">
+        ${dongs.length ? '<button class="btn btn-xs flex1" data-permit-act="floors" title="이 필지 안에 그린 건물에 층수·지하·구조를 넣음 (이름이 같은 동끼리)">🏢 동별 층수를 건물에</button>' : ''}
+        <button class="btn btn-xs flex1" data-permit-act="fence" title="필지 경계를 가설 울타리로 (마지막 변은 출입구로 비워 둠)">🚧 필지 경계를 울타리로</button>
+      </div></div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="alert warn">동별 개요를 불러오지 못했습니다: ${esc(e.message)}</div>`;
+  }
+}
+
+/** 공공 자료의 구조 이름 → 앱 구조 형식 (철골 → 철골조, 철근콘크리트 + 공동주택 → 벽식, 그 밖 콘크리트 → 라멘조) */
+function permitStructure(strct, use) {
+  const s = String(strct || '');
+  if (/철골/.test(s) && !/철근/.test(s)) return 'steel';
+  if (/콘크리트/.test(s)) return /공동주택|아파트/.test(String(use || '')) ? 'wall' : 'frame';
+  return null;
+}
+
+/** 이 필지 안에 그린 건물(무게중심이 필지 안)에 동별 층수 적용 — 이름이 같은 동끼리, 동이 하나뿐이거나 모든 동의 층수가 같으면 모두에 */
+function applyPermitFloors() {
+  const s = PERMIT.sites[PERMIT.sel], p = PERMIT.detail;
+  if (!s || !p || !(p.dongs || []).length) return;
+  const polys = getContourPolys(), inside = [];
+  polys.forEach((poly, i) => { const c = polygonCentroid(poly); if (s.polys.some(pp => isPointInPolygon(c.x, c.y, pp))) inside.push(i); });
+  if (!inside.length) { toast('이 필지 안에 그린 건물이 없습니다. 먼저 건물을 그리거나 AI로 따세요.', 'warn'); return; }
+  const norm = (x) => String(x || '').replace(/\s/g, '');
+  const same = p.dongs.every(d => d.ground === p.dongs[0].ground && d.basement === p.dongs[0].basement);
+  let n = 0;
+  const skipped = [];
+  for (const i of inside) {
+    const bd = S.buildingData[i] || (S.buildingData[i] = {});
+    const dong = p.dongs.find(d => d.name && norm(d.name) === norm(bd.name)) || (p.dongs.length === 1 || same ? p.dongs[0] : null);
+    if (!dong || !dong.ground) { skipped.push(bd.name || `건물 #${i + 1}`); continue; }
+    bd.floors = dong.ground;
+    if (dong.basement) bd.basements = Math.min(8, dong.basement); else delete bd.basements;
+    const st = permitStructure(dong.structure, dong.use || p.use);
+    if (st) bd.structure = st;
+    if (!bd.name && dong.name && p.dongs.length === 1) bd.name = dong.name;
+    if (p.status === 'building' && !bd.stage) bd.stage = 'frame';
+    n++;
+  }
+  changed(); renderInspector(); requestRender();
+  toast(n ? `건물 ${n}개에 인허가 층수를 넣었습니다${skipped.length ? ` · 못 맞춘 건물: ${skipped.join(', ')} (건물 이름을 「101동」처럼 동 이름과 같게)` : ''} (Ctrl+Z 되돌리기)`
+    : `이름이 같은 동을 찾지 못했습니다. 건물 이름을 ${p.dongs.map(d => d.name).filter(Boolean).slice(0, 3).join('·')} 처럼 맞춰 주세요.`, n ? 'success' : 'warn', { duration: 8000 });
+}
+
+/** 필지 경계 → 가설 울타리 (닫지 않음: 마지막 변 = 출입구 — 닫으면 안쪽이 통행 금지 구역이 됨) */
+function permitFence() {
+  const s = PERMIT.sites[PERMIT.sel];
+  if (!s || !s.polys[0]) return;
+  let pts = s.polys[0].slice();
+  if (Math.hypot(pts[0] - pts[pts.length - 2], pts[1] - pts[pts.length - 1]) < 0.5) pts = pts.slice(0, -2);   // 닫는 점 빼기
+  S.fences = [...S.fences, { points: pts, width: S.settings.fenceWidth }];
+  changed(); renderModeUI(); requestRender();
+  toast('필지 경계를 가설 울타리로 넣었습니다. 마지막 변은 출입구로 비워 두었습니다 — 「울타리」 도구로 고칠 수 있습니다. (Ctrl+Z 되돌리기)', 'success', { duration: 7000 });
+}
+
+function drawPermitLayer(ctx, s) {
+  if (!PERMIT.sites.length) return;
+  const px = (n) => n / s;
+  PERMIT.sites.forEach((site, i) => {
+    const col = PERMIT_COLOR[site.status] || '#94a3b8', on = PERMIT.sel === i;
+    for (const p of site.polys) {
+      ctx.beginPath(); ctx.moveTo(p[0], p[1]);
+      for (let k = 2; k < p.length; k += 2) ctx.lineTo(p[k], p[k + 1]);
+      ctx.closePath();
+      ctx.fillStyle = col + (on ? '33' : '1a'); ctx.fill();
+      ctx.setLineDash([px(10), px(6)]); ctx.strokeStyle = col; ctx.lineWidth = px(on ? 3.5 : 2); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (site.polys[0]) {
+      const c = polygonCentroid(site.polys[0]);
+      label(`${site.status === 'building' ? '🏗️ 공사 중' : '📄 착공 전'} · ${permitTitle(site)}`, c.x, c.y - px(26), px(11), col);   // 건물 이름 글자와 안 겹치게 위로
+    }
+  });
+}
+
+$('permitInfo').addEventListener('click', e => {
+  const act = e.target.closest('[data-permit-act]');
+  if (act) { if (act.dataset.permitAct === 'floors') applyPermitFloors(); else permitFence(); return; }
+  const it = e.target.closest('[data-permit]');
+  if (it) openPermit(+it.dataset.permit);
+});

@@ -1,0 +1,303 @@
+{
+ "files": {
+  "SOC-MAP 실행.bat": {
+   "sha256": "be131a0f64e3d730c2856d0a8a11e409b82c23936518e38c5b52813af1bf69f3",
+   "size": 2881
+  },
+  "SOC_MAP.html": {
+   "sha256": "606f03c29fac1a69a97dd0aaf0054540e51365ea2dc7242b2d69b98ce69eff46",
+   "size": 36458
+  },
+  "app/download.html": {
+   "sha256": "19f1fc830b4b2bef8aa731b001fbe67f30a672c634c8a4c8a7db54f337132a9f",
+   "size": 13190
+  },
+  "app/download/SOC-MAP_supervisor.apk": {
+   "sha256": "98ca6be9ceb74a01ace3dd849938670dac66732e79db30fc8baadec33bff8ecd",
+   "size": 144396
+  },
+  "app/download/SOC-MAP_worker.apk": {
+   "sha256": "554b96a7b1c1af719612d301a54e85d70a96c6297e0e2fc7b702adacf1ae9b6b",
+   "size": 132108
+  },
+  "app/download/apps.json": {
+   "sha256": "7c56fa592ad1f989eff4eac3298414720b2e9f6712c48e24135cbfc714fe7249",
+   "size": 552
+  },
+  "app/download/shell/directory.js": {
+   "sha256": "9026926a4c19d758a72415ce27d8f67806140cf447a8fbe96be3f7f3e12ffa8e",
+   "size": 3219
+  },
+  "app/download/shell/jsQR.js": {
+   "sha256": "bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859",
+   "size": 256885
+  },
+  "app/download/shell/shell.json": {
+   "sha256": "ce1ea2c9dd363fb376cd78750fce44df5cf72cae994f6d790be58c43b1c8b97e",
+   "size": 488
+  },
+  "app/download/shell/start.html": {
+   "sha256": "f48bddd2762d0f4a23e2fd631ad8a1c041205d4f06d0d59205f49b44060e4b54",
+   "size": 6236
+  },
+  "app/download/shell/start.js": {
+   "sha256": "fdc1f68b66e1f6f12783b6a1bdc19e51aae6cd5e07152d7e4047852d574164c0",
+   "size": 15787
+  },
+  "app/download/shell/version.js": {
+   "sha256": "ed1597abef41f470debb50fda768a30b52a2bc11001fdb6a77f2c2b51f5d201f",
+   "size": 458
+  },
+  "app/field.css": {
+   "sha256": "008d86f787e93a03715c749e335899eb049212ec7c0ed987fcd941a38a6ac7ce",
+   "size": 20684
+  },
+  "app/field.html": {
+   "sha256": "3d990c0f2eec373ee5ae91d0ad3ee0e3331409c3ef72a7f97e940d696b48cbab",
+   "size": 14615
+  },
+  "app/go.html": {
+   "sha256": "dcf96306b6bfbe907ec71c9f866b4cfa740ae34f281b45faac9c8ff74e43f64e",
+   "size": 2157
+  },
+  "app/js/app.js": {
+   "sha256": "859853d659301883ab5734ab0977142bf62eb180bde57a90e31f166aa1c4565e",
+   "size": 80862
+  },
+  "app/js/basemap.js": {
+   "sha256": "b85b10fc14080693c6c0be531e3063171ff182087003ceefde80ed5ff295ba35",
+   "size": 11363
+  },
+  "app/js/costmap.js": {
+   "sha256": "d524bdf89a636fa20a699317305e4e29621294b55ce6aec2a194c0bbf9d28043",
+   "size": 40972
+  },
+  "app/js/detection.js": {
+   "sha256": "3f760316f3678b18eb8b48e3d2c766f1dd09050e898e6d1457837fbaf53868f8",
+   "size": 30752
+  },
+  "app/js/directory.js": {
+   "sha256": "9026926a4c19d758a72415ce27d8f67806140cf447a8fbe96be3f7f3e12ffa8e",
+   "size": 3219
+  },
+  "app/js/field.js": {
+   "sha256": "cda9fbc0f86e932057d69c0e7d650a1011c82fa24f851966cecdc7c32aaecd62",
+   "size": 85056
+  },
+  "app/js/geo.js": {
+   "sha256": "536cef6970d8162bcc0e94b7eb3888366056e8c8a74398220a72fbe71c85d6da",
+   "size": 40364
+  },
+  "app/js/hazardviz.js": {
+   "sha256": "59ec3086593e36f25464781b15672aebfbd8fce8a579848384054c7dc8682004",
+   "size": 23349
+  },
+  "app/js/pathfinding.js": {
+   "sha256": "13df3b4efe678f9464027c2890082602cf6e78136e36fccd609b9bcffb42b181",
+   "size": 12867
+  },
+  "app/js/project.js": {
+   "sha256": "55accc0ed75c19c58bd74d7df372d3907dbd0b369172f74f570d5b286471e4ef",
+   "size": 136823
+  },
+  "app/js/pwa.js": {
+   "sha256": "1d6261b74c087270d855716d33c63624dec1fd9e7abfeda262bc279dacfb220e",
+   "size": 13035
+  },
+  "app/js/render2d.js": {
+   "sha256": "0196c22c8cb0f0997be9a5f824426b71a30bcb996b7c8e88f750f475ab41d3ac",
+   "size": 26130
+  },
+  "app/js/sitemap.js": {
+   "sha256": "1858b69e61168deeed0a2b2ec522e114330c9740d89ae1d23ad9748d593da3a6",
+   "size": 16458
+  },
+  "app/js/state.js": {
+   "sha256": "0f21ee4d0df39fa7a78222498b1ba1bca13905a9aac3df56e7a57f9e46b3ab44",
+   "size": 18221
+  },
+  "app/js/structure.js": {
+   "sha256": "4dc98df611c1e00f73619d5fce6ba34c4406357784dfcc2dc0cfda868a752f2c",
+   "size": 21951
+  },
+  "app/js/supervisor.js": {
+   "sha256": "56a3297543ccd547912fcb01678cc243ad8e09171df70ed2aa37b9731bf2648b",
+   "size": 63871
+  },
+  "app/js/ui.js": {
+   "sha256": "6dfe2e0e936599d9fc8e7f10785c71d66f2c50ce9d69395126f256ddf1a2fbdb",
+   "size": 38973
+  },
+  "app/js/version.js": {
+   "sha256": "ed1597abef41f470debb50fda768a30b52a2bc11001fdb6a77f2c2b51f5d201f",
+   "size": 458
+  },
+  "app/js/view3d.js": {
+   "sha256": "9d46bae64f6852dbc8fb024e30afa20071652d59d933647d7a76b7e22e6ec68b",
+   "size": 53843
+  },
+  "app/pwa/icons/supervisor-192.png": {
+   "sha256": "6c43292036f4a49153549573dcef49a2888c7b9239b492e6f3a0c6db04506d4e",
+   "size": 9689
+  },
+  "app/pwa/icons/supervisor-512.png": {
+   "sha256": "49ad80214b9d1e4676cb45f25d32846d53ec8d2697416c76919d460ea5b674a4",
+   "size": 26972
+  },
+  "app/pwa/icons/supervisor-apple-180.png": {
+   "sha256": "3fb81f2a363b30666d20160f565aaa453c32bf7cf8121af0ac2509a831ce1cb6",
+   "size": 4960
+  },
+  "app/pwa/icons/supervisor-maskable-512.png": {
+   "sha256": "07b6c04146ed0d1c17fcde8324575bbb4a8595a05b1b39e3a133c015a4c90f29",
+   "size": 15415
+  },
+  "app/pwa/icons/worker-192.png": {
+   "sha256": "8f4874682fe7225e9df66cd11c069690ad30b8ceda0ad83eb965f95ec10f2c48",
+   "size": 6783
+  },
+  "app/pwa/icons/worker-512.png": {
+   "sha256": "64ef6394ce01dba012722fa37419bd96bcd7a068733f77f436ff1f84be553e20",
+   "size": 18992
+  },
+  "app/pwa/icons/worker-apple-180.png": {
+   "sha256": "ccb408011c6e384aa4a24d0d0e648ccf539ad66026ed590e029c2a9804bbec8b",
+   "size": 2956
+  },
+  "app/pwa/icons/worker-maskable-512.png": {
+   "sha256": "1655609d74f58675538bc0a247daf8427a4045120c375cf2fb4c0e4c7119951e",
+   "size": 8844
+  },
+  "app/pwa/supervisor.webmanifest": {
+   "sha256": "e2041fa18d14ddec38ba8d3b992b57e76e579073bcf6ae6c46c1f236154afa36",
+   "size": 815
+  },
+  "app/pwa/worker.webmanifest": {
+   "sha256": "c7f7883610e5e21366767d55b2d46ef1317b2ca39c6af857b5ceed521da7c7b4",
+   "size": 770
+  },
+  "app/style.css": {
+   "sha256": "afb5e8c9962c1ed2b5b7edc8b09a36e37ae3443a94f506d676c7505b0065197e",
+   "size": 46188
+  },
+  "app/supervisor.css": {
+   "sha256": "006622f328d8b1c7d8e5fa5a5c8c5b7a8addf19c1930c05af3b3e4f2ea91f926",
+   "size": 8378
+  },
+  "app/supervisor.html": {
+   "sha256": "fdd080011b7636b4d52babef2f03657e8ff43dd836543198dd854f3a627970bf",
+   "size": 15907
+  },
+  "app/sw.js": {
+   "sha256": "bf32dd12a1419741c5ad0413baa2a7b583c2ca6fa430997dc9d821868a100a21",
+   "size": 5382
+  },
+  "backend/.env.example": {
+   "sha256": "d00deaa6922972a3bbfda11f044fa7e589c72884010f97515bfc1628a7237c51",
+   "size": 768
+  },
+  "backend/aerial_model.json": {
+   "sha256": "439b925b35d4291b14307c1e51ca11157642b66a1cf24fd3d92e158b14dd3d2c",
+   "size": 961
+  },
+  "backend/certs.py": {
+   "sha256": "a03a54b83ec1f74a21451fd33dc7fca554c24087f730fb393c7d07e602cf0188",
+   "size": 2026
+  },
+  "backend/dataset.py": {
+   "sha256": "d5882ebaa5580ac8686f422c8ca63e2a5444b75f9896637503e86ad8529a78a8",
+   "size": 4007
+  },
+  "backend/directory.py": {
+   "sha256": "df98e2b344d110bca250050bae25e04371549c39a67edd23070373c2473cbc58",
+   "size": 6043
+  },
+  "backend/dxf_import.py": {
+   "sha256": "35176f4d459f41a5480c30be65fd60c3262253556e65eac88b2f06eba15d3b96",
+   "size": 10648
+  },
+  "backend/fieldops.py": {
+   "sha256": "aa5612f6fd62f4e1d3a63ba383c3098fc1b034ae814f8b7b4be187bbfe39b7da",
+   "size": 7146
+  },
+  "backend/geo.py": {
+   "sha256": "e374f590a9c323a74659006d70b0cee274997e7bfbd54fb34ce2b2bfd4310463",
+   "size": 2065
+  },
+  "backend/main.py": {
+   "sha256": "61db853084b7b7d7f835fcd4446acf064b31b040648bd1a408d3ed0af5992e0e",
+   "size": 27531
+  },
+  "backend/models/best.pt": {
+   "sha256": "61cf7d4b77942c8e54378549501f5f76f43c41cd46302c1ca631216400deb1b1",
+   "size": 6782196
+  },
+  "backend/permits.py": {
+   "sha256": "db7e3f7359efac41307367210de720b472392cb224f6ee99388c511eae69fbd8",
+   "size": 10573
+  },
+  "backend/polyops.py": {
+   "sha256": "8a9ff1af47b5e0c993d06913c6cf24bd9d9a9b154f59d45431749e52734dc7ac",
+   "size": 2272
+  },
+  "backend/projects.py": {
+   "sha256": "636df89f634abe16977de38da3c361e78e584f62cb51d5cabce45c6da2be9b2e",
+   "size": 58449
+  },
+  "backend/report.py": {
+   "sha256": "b7c8efa3809c90c8c36f470630db411d2985e1d9612b357ef035e1b329db9d0e",
+   "size": 9002
+  },
+  "backend/requirements.txt": {
+   "sha256": "38988c7508d6c04dbf17e3c3fb4d64633919c2e715274a09f5b6c2a5a5afb6c5",
+   "size": 529
+  },
+  "backend/sam_inference.py": {
+   "sha256": "dbbecc44f61be20068ccbe8c63f69109610783f734844d4c0141a99eaf4c9d98",
+   "size": 22113
+  },
+  "backend/tunnel.py": {
+   "sha256": "5b4a6b721099f04ad385abbf277754814603ba45f168ae101703acc759a942f6",
+   "size": 4068
+  },
+  "backend/vworld.py": {
+   "sha256": "dc3c85f3bdcd8c54901fc388b09575f59629b9c5ebc27f503ffaaf153ee4ea12",
+   "size": 21200
+  },
+  "backend/weather.py": {
+   "sha256": "0615b1f9c54054e4a5f7154ef6f5d8422ce327d22e7c58d27b9cc87836f479e8",
+   "size": 27157
+  },
+  "backend/webpush.py": {
+   "sha256": "130fadadd2acc1aa5e0bf33a77119c51c70dcae85cb809ebe2028cf270de215d",
+   "size": 6147
+  },
+  "backend/yolo_inference.py": {
+   "sha256": "d337d10a5f02dd078c80b0beb289592e53228991d128ce863295e966657024a2",
+   "size": 10533
+  },
+  "runtime/ed25519.py": {
+   "sha256": "2e31038ba211dfab9d18774a44906a29c4a9ce64274e7da2c5fb1d85ae6bc312",
+   "size": 2481
+  },
+  "runtime/launcher.py": {
+   "sha256": "ccff1c6a1206cd6c05273db12678d30b5793a20b0e014f2fe9502f23e4f0e95e",
+   "size": 4835
+  },
+  "runtime/release_key.pub": {
+   "sha256": "1fd13ab4db8c3486840a04c08a911f3aaec7e12cd22067c820f9f1ef5d6a7092",
+   "size": 65
+  },
+  "runtime/updater.py": {
+   "sha256": "942e16b929413f559554eee1c088f57e696eaa0bc6b037341990ee868bee45e9",
+   "size": 12136
+  },
+  "사용 안내.txt": {
+   "sha256": "4284437d48db9d10d7179b273084029f397fa7e02cab811c450b1dcab9336e39",
+   "size": 1130
+  }
+ },
+ "name": "SOC-MAP PC",
+ "serial": 1795587693,
+ "version": "14.18"
+}

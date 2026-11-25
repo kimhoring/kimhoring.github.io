@@ -1,0 +1,249 @@
+"""건축 인허가 (2026-11-22) — 국토교통부 건축HUB_건축인허가정보 서비스 (공공데이터포털 15136267)
+
+공사 현장 파악: 허가·착공은 났고 사용승인 전 = 「공사 중」. 필지(PNU) ↔ 인허가를 이어 지도에 그린다.
+  PNU 19자리 = 시군구 5 + 법정동 5 + 대지 구분 1(1 일반, 2 산) + 본번 4 + 부번 4
+  인허가 조회 = sigunguCd · bjdongCd (+ platGbCd 0 대지 / 1 산 · bun · ji)
+기능: 기본개요(getApBasisOulnInfo) · 동별개요(getApDongOulnInfo) · 층별개요(getApFlrOulnInfo — 동별 지상·지하 층수)
+키: backend/.env 의 SOCMAP_DATA_GO_KR_KEY (공공데이터포털 일반 인증키, Decoding — Encoding 키면 풀어서 씀)
+시험: test_permits.py (가짜 서버, SOCMAP_PERMIT_URL)
+"""
+import datetime
+import json
+import logging
+import os
+import re
+import threading
+import time
+from urllib.parse import unquote
+
+import requests
+from fastapi import APIRouter, HTTPException
+
+import vworld
+
+log = logging.getLogger("soc-map.permits")
+router = APIRouter()
+
+KEY = os.environ.get("SOCMAP_DATA_GO_KR_KEY", "").strip()
+if "%" in KEY:
+    KEY = unquote(KEY)
+URL = os.environ.get("SOCMAP_PERMIT_URL", "https://apis.data.go.kr/1613000/ArchPmsHubService").rstrip("/")
+OPS = {"basis": "getApBasisOulnInfo", "dong": "getApDongOulnInfo", "floor": "getApFlrOulnInfo"}
+PAGE = 100               # 건축HUB 는 한 쪽에 100건까지
+MAX_DONG_ROWS = 3000     # 법정동 하나에서 받을 기본개요 최대 (오래된 동은 수천 건)
+STALE_YEARS = 5          # 허가 뒤 이 기간 넘게 착공이 없으면 「장기 미착공」(건축법상 허가 실효 가능)
+CACHE_S = 6 * 3600
+_cache, _lock = {}, threading.Lock()
+_session = requests.Session()
+STATUS_LABEL = {"building": "공사 중", "permitted": "허가 · 착공 전", "stale": "장기 미착공", "done": "사용승인(완공)", "unknown": "확인 필요"}
+
+
+class PermitError(Exception):
+    pass
+
+
+def enabled():
+    return bool(KEY)
+
+
+def parse_pnu(pnu):
+    s = re.sub(r"\D", "", str(pnu or ""))
+    if len(s) != 19:
+        raise ValueError("필지 번호(PNU)는 19자리입니다.")
+    return {"sigunguCd": s[:5], "bjdongCd": s[5:10], "platGbCd": "1" if s[10] == "2" else "0", "bun": s[11:15], "ji": s[15:19]}
+
+
+def _items(resp_text):
+    """공공데이터포털 응답 → (항목 목록, 전체 수). 오류면 PermitError"""
+    try:
+        d = json.loads(resp_text)
+    except ValueError:
+        m = re.search(r"<(returnAuthMsg|resultMsg|errMsg)>([^<]+)<", resp_text or "")
+        raise PermitError(f"공공데이터포털 오류: {m.group(2) if m else (resp_text or '')[:80]}")
+    r = d.get("response") or {}
+    h = r.get("header") or {}
+    if str(h.get("resultCode", "00")) not in ("00", "0", "000"):
+        raise PermitError(f"공공데이터포털 오류 {h.get('resultCode')}: {h.get('resultMsg')}")
+    b = r.get("body") or {}
+    items = b.get("items") or {}
+    it = items.get("item", []) if isinstance(items, dict) else []
+    if isinstance(it, dict):
+        it = [it]
+    return it, int(b.get("totalCount") or len(it))
+
+
+def _call(op, params, page):
+    if not KEY:
+        raise PermitError("NO_KEY")
+    q = {"serviceKey": KEY, "_type": "json", "numOfRows": PAGE, "pageNo": page, **params}
+    try:
+        r = _session.get(f"{URL}/{OPS[op]}", params=q, timeout=20)
+    except requests.RequestException as e:
+        raise PermitError(f"공공데이터포털에 연결하지 못했습니다: {e.__class__.__name__}")
+    if r.status_code != 200:
+        raise PermitError(f"공공데이터포털 응답 {r.status_code}")
+    return _items(r.text)
+
+
+def fetch_all(op, params, max_rows=MAX_DONG_ROWS):
+    """쪽을 넘겨 가며 모두 (6시간 기억). 반환 (항목, 다 받았는지)"""
+    key = (op, tuple(sorted(params.items())))
+    with _lock:
+        hit = _cache.get(key)
+        if hit and time.time() - hit[0] < CACHE_S:
+            return hit[1], hit[2]
+    rows, page, total = [], 1, None
+    while True:
+        it, total = _call(op, params, page)
+        rows += it
+        if not it or len(rows) >= total or len(rows) >= max_rows:
+            break
+        page += 1
+    complete = total is None or len(rows) >= total
+    with _lock:
+        _cache[key] = (time.time(), rows, complete)
+    return rows, complete
+
+
+def ymd(v):
+    s = re.sub(r"\D", "", str(v or ""))
+    return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if len(s) >= 8 and s[:8] != "00000000" else None
+
+
+def status(row, today=None):
+    today = today or datetime.date.today()
+    if ymd(row.get("useAprDay")):
+        return "done"
+    if ymd(row.get("realStcnsDay")):
+        return "building"
+    p = ymd(row.get("archPmsDay"))
+    if p:
+        return "stale" if (today - datetime.date.fromisoformat(p)).days > STALE_YEARS * 365 else "permitted"
+    return "unknown"
+
+
+def _num(v):
+    try:
+        return round(float(v), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _lot(row):
+    """(대지 구분, 본번, 부번) — 필지와 맞출 때"""
+    return (str(row.get("platGbCd") or "0").strip() or "0", int(re.sub(r"\D", "", str(row.get("bun") or "0")) or 0),
+            int(re.sub(r"\D", "", str(row.get("ji") or "0")) or 0))
+
+
+def summarize(row, today=None):
+    st = status(row, today)
+    return {
+        "pk": row.get("mgmPmsrgstPk"), "addr": row.get("platPlc"), "name": (row.get("bldNm") or "").strip() or None,
+        "kind": row.get("archGbCdNm") or None, "use": row.get("mainPurpsCdNm") or None,
+        "plat_area": _num(row.get("platArea")), "arch_area": _num(row.get("archArea")), "tot_area": _num(row.get("totArea")),
+        "main_bld_cnt": int(_num(row.get("mainBldCnt")) or 0), "hhld": int(_num(row.get("hhldCnt")) or 0),
+        "permit_day": ymd(row.get("archPmsDay")), "start_sched": ymd(row.get("stcnsSchedDay")),
+        "start_day": ymd(row.get("realStcnsDay")), "use_apr_day": ymd(row.get("useAprDay")),
+        "status": st, "status_label": STATUS_LABEL[st],
+    }
+
+
+def dongs_of(pk, dong_rows, floor_rows):
+    """인허가 한 건의 동별 지상·지하 층수 · 구조 · 용도 (층별개요의 층 번호 중 가장 큰 것)"""
+    out = {}
+    for d in dong_rows:
+        if d.get("mgmPmsrgstPk") == pk:
+            out[d.get("mgmDongOulnPk")] = {"name": (d.get("bldNm") or "").strip() or None, "structure": d.get("strctCdNm") or None,
+                                           "use": d.get("mainPurpsCdNm") or None, "arch_area": _num(d.get("archArea")),
+                                           "ground": 0, "basement": 0}
+    for f in floor_rows:
+        if f.get("mgmPmsrgstPk") != pk:
+            continue
+        dk = f.get("mgmDongOulnPk")
+        d = out.setdefault(dk, {"name": None, "structure": f.get("strctCdNm") or None, "use": f.get("mainPurpsCdNm") or None,
+                                "arch_area": None, "ground": 0, "basement": 0})
+        n = int(_num(f.get("flrNo")) or 0)
+        gb = str(f.get("flrGbCd") or "").strip()
+        nm = str(f.get("flrGbCdNm") or "")
+        if gb == "10" or "지하" in nm:
+            d["basement"] = max(d["basement"], n)
+        elif gb == "20" or nm.strip() == "지상":
+            d["ground"] = max(d["ground"], n)
+        if not d.get("structure"):
+            d["structure"] = f.get("strctCdNm") or None
+    return sorted(out.values(), key=lambda d: (d["name"] or ""))
+
+
+def _need():
+    if not KEY:
+        raise HTTPException(status_code=503, detail="공공데이터포털 인증키가 없습니다 — backend/.env 에 SOCMAP_DATA_GO_KR_KEY=… "
+                            "(공공데이터포털 → 「국토교통부_건축HUB_건축인허가정보 서비스」 활용신청 → 일반 인증키 Decoding)")
+
+
+def _wrap(fn):
+    try:
+        return fn()
+    except PermitError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/permits/config")
+def config():
+    return {"enabled": enabled(), "source": "국토교통부 건축HUB 건축인허가정보 (공공데이터포털)"}
+
+
+@router.get("/api/permits/parcel")
+def parcel(pnu: str):
+    """필지 하나의 인허가 (최근 것부터) + 진행 중 건은 동별 층수"""
+    _need()
+    try:
+        p = parse_pnu(pnu)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    q = {k: p[k] for k in ("sigunguCd", "bjdongCd", "platGbCd", "bun", "ji")}
+
+    def run():
+        rows, _ = fetch_all("basis", q, 500)
+        perms = sorted((summarize(r) for r in rows), key=lambda x: x["permit_day"] or "", reverse=True)
+        active = [x for x in perms if x["status"] in ("building", "permitted")]
+        if active:
+            drows, _ = fetch_all("dong", q, 500)
+            frows, _ = fetch_all("floor", q, 3000)
+            for x in active:
+                x["dongs"] = dongs_of(x["pk"], drows, frows)
+        return {"pnu": pnu, "parcel": p, "permits": perms[:20]}
+    return _wrap(run)
+
+
+def sites_in(parcels, today=None, max_rows=MAX_DONG_ROWS):
+    """필지 목록(브이월드) → 그 필지들의 진행 중 인허가 (법정동마다 기본개요를 한 번에 받아 번지로 맞춤)"""
+    by_dong = {}
+    for pc in parcels:
+        try:
+            p = parse_pnu(pc.get("pnu"))
+        except ValueError:
+            continue
+        by_dong.setdefault((p["sigunguCd"], p["bjdongCd"]), []).append((pc, (p["platGbCd"], int(p["bun"]), int(p["ji"]))))
+    sites, partial = [], []
+    for (sg, bd), plist in by_dong.items():
+        rows, complete = fetch_all("basis", {"sigunguCd": sg, "bjdongCd": bd}, max_rows)
+        if not complete:
+            partial.append(f"{sg}{bd}")
+        idx = {}
+        for r in rows:
+            s = summarize(r, today)
+            if s["status"] in ("building", "permitted"):
+                idx.setdefault(_lot(r), []).append(s)
+        for pc, lot in plist:
+            for s in idx.get(lot, []):
+                sites.append({**s, "pnu": pc.get("pnu"), "parcel_addr": pc.get("addr"), "rings": pc.get("rings")})
+    sites.sort(key=lambda x: (x["status"] != "building", x["permit_day"] or ""), reverse=False)
+    return {"sites": sites, "dongs": len(by_dong), "partial": partial}
+
+
+@router.get("/api/permits/area")
+def area(minlat: float, minlon: float, maxlat: float, maxlon: float):
+    """범위(약 400 m 안)의 공사 중 · 착공 전 인허가 필지"""
+    _need()
+    pcs = vworld.parcels(minlat, minlon, maxlat, maxlon)["parcels"]
+    return _wrap(lambda: {**sites_in(pcs), "parcels": len(pcs), "source": "국토교통부 건축HUB 건축인허가정보 · 브이월드 연속지적도"})

@@ -1,0 +1,19 @@
+{
+  "id": "/supervisor",
+  "name": "SOC-MAP 관리감독자",
+  "short_name": "SOC 관리감독",
+  "description": "공사 현장 인원 실시간 위치 · 위험 구역 진입 알림 · 대피 지시",
+  "lang": "ko",
+  "start_url": "/supervisor?source=pwa",
+  "scope": "/supervisor",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0f1c",
+  "theme_color": "#0b1120",
+  "categories": ["productivity", "business"],
+  "icons": [
+    { "src": "/app/pwa/icons/supervisor-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/app/pwa/icons/supervisor-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/app/pwa/icons/supervisor-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

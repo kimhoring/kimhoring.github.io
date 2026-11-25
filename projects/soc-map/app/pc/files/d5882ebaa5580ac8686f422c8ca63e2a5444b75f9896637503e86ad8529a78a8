@@ -1,0 +1,94 @@
+"""앱에서 수정한 건물 외곽선을 YOLO 세그멘테이션 학습 데이터로 쌓는다.
+
+구조 (Ultralytics 형식)
+  dataset/
+    data.yaml
+    images/train/*.jpg   images/val/*.jpg
+    labels/train/*.txt   labels/val/*.txt     한 줄 = "0 x1 y1 x2 y2 ..." (0~1 정규화 좌표)
+"""
+import hashlib
+import os
+import re
+from datetime import datetime
+
+import cv2
+import numpy as np
+
+DATASET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset")
+VAL_RATIO = 15  # % — 파일 내용 해시로 결정하므로 같은 도면은 항상 같은 쪽에 들어감
+IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+
+def ensure_layout(root=DATASET_DIR):
+    for sub in ("images/train", "images/val", "labels/train", "labels/val"):
+        os.makedirs(os.path.join(root, sub), exist_ok=True)
+    yaml_path = os.path.join(root, "data.yaml")
+    if not os.path.exists(yaml_path):
+        with open(yaml_path, "w", encoding="utf-8") as f:
+            f.write(f"path: {root.replace(os.sep, '/')}\ntrain: images/train\nval: images/val\nnames:\n  0: building\n")
+    return yaml_path
+
+
+def contours_to_yolo_lines(contours, width, height):
+    """OpenCV 형식([[x,y]] 또는 [x,y]) 외곽선 목록 → YOLO-seg 라벨 줄"""
+    lines = []
+    for c in contours:
+        pts = np.asarray(c, dtype=np.float64).reshape(-1, 2)
+        if len(pts) < 3:
+            continue
+        pts[:, 0] = np.clip(pts[:, 0] / width, 0, 1)
+        pts[:, 1] = np.clip(pts[:, 1] / height, 0, 1)
+        lines.append("0 " + " ".join(f"{v:.6f}" for v in pts.reshape(-1)))
+    return lines
+
+
+def yolo_lines_to_polygons(lines, width, height):
+    polys = []
+    for line in lines:
+        vals = line.split()
+        if len(vals) < 7:
+            continue
+        pts = np.array(vals[1:], dtype=np.float64).reshape(-1, 2)
+        pts[:, 0] *= width
+        pts[:, 1] *= height
+        polys.append(np.round(pts).astype(np.int32))
+    return polys
+
+
+def save_sample(image_bytes, filename, contours, root=DATASET_DIR):
+    """이미지 + 라벨 저장. 같은 이미지는 덮어써서 최신 수정본만 남긴다."""
+    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("이미지를 해석할 수 없습니다.")
+    h, w = img.shape[:2]
+    ensure_layout(root)
+
+    digest = hashlib.sha1(image_bytes).hexdigest()
+    split = "val" if int(digest[:8], 16) % 100 < VAL_RATIO else "train"
+    stem = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", os.path.splitext(filename or "plan")[0])[:40] or "plan"
+    name = f"{stem}_{digest[:10]}"
+
+    # cv2.imwrite 는 Windows 에서 한글 경로를 쓰지 못하므로 인코딩 후 직접 기록
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    with open(os.path.join(root, "images", split, name + ".jpg"), "wb") as f:
+        f.write(buf.tobytes())
+    lines = contours_to_yolo_lines(contours, w, h)
+    with open(os.path.join(root, "labels", split, name + ".txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + ("\n" if lines else ""))   # 빈 라벨 = 건물 없는 이미지(오탐 방지용)
+    return {"name": name, "split": split, "buildings": len(lines), "width": w, "height": h,
+            "saved_at": datetime.now().isoformat(timespec="seconds")}
+
+
+def stats(root=DATASET_DIR):
+    out = {"path": root}
+    for split in ("train", "val"):
+        d = os.path.join(root, "images", split)
+        imgs = [f for f in os.listdir(d) if f.lower().endswith(IMG_EXTS)] if os.path.isdir(d) else []
+        n_obj = 0
+        for f in imgs:
+            lp = os.path.join(root, "labels", split, os.path.splitext(f)[0] + ".txt")
+            if os.path.exists(lp):
+                with open(lp, encoding="utf-8") as fh:
+                    n_obj += sum(1 for line in fh if line.strip())
+        out[split] = {"images": len(imgs), "buildings": n_obj}
+    return out

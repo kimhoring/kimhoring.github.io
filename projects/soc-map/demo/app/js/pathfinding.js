@@ -1,8 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════
  *  SOC-MAP v13 — 위험도 가중 A* 경로 탐색 (단위 m)
  *
- *  - 그리드 모드 : 보행 가능 구역(올가미)이 있거나 도로가 없을 때. 건물·울타리는 래스터화하여 통과 불가.
- *  - 도로 모드   : 올가미 없이 도로(자유 곡선)만 그렸을 때. 도로 그래프 위에서만 이동.
+ *  - 격자 탐색 : 현장 경계(= 보행 구역) 안, 없으면 현장 전체. 건물·울타리는 래스터화하여 통과 불가.
+ *    (2026-11-24 도로 선 그래프 모드는 없앰 — 현장 전체가 걸어 다닐 수 있는 곳)
  *
  *  간선 비용 = 거리 × (1 + w × R)   (R: 0~100)  →  w=0 이면 최단 거리, w=1 이면 R=100 구간이 101배 비용.
  *  v11 대비: 이진 힙 + 타입 배열(수십~수백 배 빠름), 해상도 무관 비용, 경로 평활화, 최단 경로 비교 지표.
@@ -258,87 +258,13 @@ function gridRoute(grid, start, end, w) {
 }
 
 // ═══════════════════════════════════════════════
-//  도로(그래프) 모드
-// ═══════════════════════════════════════════════
-
-function buildRoadGraph({ polylines, contourPolys, excluded, fences, field, link = 3 }) {
-  const nodes = [];
-  const segs = fenceSegments(fences);
-  const insideBuilding = (x, y) => contourPolys.some((p, i) => !excluded.has(i) && isPointInPolygon(x, y, p));
-  const addEdge = (a, b) => {
-    if (a.edges.includes(b.id)) return;
-    if (crossesFence(a.x, a.y, b.x, b.y, segs)) return;
-    a.edges.push(b.id); b.edges.push(a.id);
-  };
-
-  polylines.forEach((line, li) => {
-    const pts = line.points || line;
-    let prev = null;
-    for (let i = 0; i < pts.length; i += 2) {
-      const x = +pts[i], y = +pts[i + 1];
-      if (prev && Math.hypot(x - prev.x, y - prev.y) < 0.6 && i < pts.length - 2) continue;
-      const node = { id: nodes.length, x, y, line: li, edges: [], blocked: insideBuilding(x, y), risk: field.at(x, y) };
-      nodes.push(node);
-      if (prev) addEdge(prev, node);
-      prev = node;
-    }
-  });
-
-  // 가까운 점끼리 연결 (공간 해시로 O(n))
-  const hash = new Map(), key = (cx, cy) => cx + ',' + cy;
-  for (const n of nodes) {
-    const k = key(Math.floor(n.x / link), Math.floor(n.y / link));
-    (hash.get(k) || hash.set(k, []).get(k)).push(n);
-  }
-  for (const n of nodes) {
-    const cx = Math.floor(n.x / link), cy = Math.floor(n.y / link);
-    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-      for (const m of hash.get(key(cx + dx, cy + dy)) || []) {
-        if (m.id <= n.id) continue;
-        if (Math.hypot(n.x - m.x, n.y - m.y) < link) addEdge(n, m);
-      }
-    }
-  }
-  return nodes;
-}
-
-function roadRoute(nodes, start, end, w) {
-  const free = nodes.filter(n => !n.blocked);
-  if (!free.length) return null;
-  const nearest = (p) => free.reduce((b, n) => (Math.hypot(n.x - p.x, n.y - p.y) < Math.hypot(b.x - p.x, b.y - p.y) ? n : b));
-  const s = nearest(start), e = nearest(end);
-  const g = new Float64Array(nodes.length).fill(Infinity), came = new Int32Array(nodes.length).fill(-1);
-  const heap = new MinHeap();
-  const h = (n) => Math.hypot(n.x - e.x, n.y - e.y);
-  g[s.id] = 0; heap.push(h(s), s.id);
-  while (heap.size) {
-    const id = heap.pop(), cur = nodes[id];
-    if (id === e.id) break;
-    for (const nid of cur.edges) {
-      const nb = nodes[nid];
-      if (nb.blocked) continue;
-      const tg = g[id] + Math.hypot(nb.x - cur.x, nb.y - cur.y) * (1 + w * (cur.risk + nb.risk) / 2);
-      if (tg < g[nid]) { g[nid] = tg; came[nid] = id; heap.push(tg + h(nb), nid); }
-    }
-  }
-  if (s.id !== e.id && came[e.id] === -1) return null;
-  const ids = [];
-  for (let c = e.id; c !== -1; c = came[c]) ids.push(c);
-  ids.reverse();
-  const pts = [start.x, start.y];
-  for (const id of ids) pts.push(nodes[id].x, nodes[id].y);
-  pts.push(end.x, end.y);
-  return { pts, snapDist: Math.max(Math.hypot(s.x - start.x, s.y - start.y), Math.hypot(e.x - end.x, e.y - end.y)) };
-}
-
-// ═══════════════════════════════════════════════
 //  통합 진입점
 // ═══════════════════════════════════════════════
 
 /**
- * @returns {{ path, shortest, metrics, shortestMetrics, method, cellSize, ms, snapDist } | null}
+ * @returns {{ path, shortest, metrics, shortestMetrics, method, cellSize, ms } | null}
  */
-function planRoute({ ext, contours, walkable, polylines, fences, field, start, end, weight }) {
+function planRoute({ ext, contours, walkable, fences, field, start, end, weight }) {
   const t0 = performance.now();
   const contourPolys = (contours || []).map(flattenContour);
   // 출발/도착 지점이 건물 안이면 그 건물은 장애물에서 제외 (건물에서 나가고 들어가는 경로 허용)
@@ -347,30 +273,19 @@ function planRoute({ ext, contours, walkable, polylines, fences, field, start, e
     if (isPointInPolygon(start.x, start.y, p) || isPointInPolygon(end.x, end.y, p)) excluded.add(i);
   });
 
-  const useRoads = !(walkable && walkable.length >= 6) && polylines.some(l => (l.points || l).length >= 4);
-  let path, shortest, cellSize = null, snapDist = 0;
-
-  if (useRoads) {
-    const nodes = buildRoadGraph({ polylines, contourPolys, excluded, fences, field });
-    const r = roadRoute(nodes, start, end, weight);
-    if (!r) return null;
-    path = r.pts; snapDist = r.snapDist;
-    const s = roadRoute(nodes, start, end, 0);
-    shortest = s ? s.pts : null;
-  } else {
-    const grid = buildNavGrid({ ext, contourPolys, excluded, walkable, fences, field });
-    cellSize = grid.cs;
-    path = gridRoute(grid, start, end, weight);
-    if (!path) return null;
-    shortest = gridRoute(grid, start, end, 0);
-  }
+  // 2026-11-24 도로 선 모드 삭제 — 현장 경계(= 보행 구역) 안 격자 탐색 하나로
+  const grid = buildNavGrid({ ext, contourPolys, excluded, walkable, fences, field });
+  const cellSize = grid.cs;
+  const path = gridRoute(grid, start, end, weight);
+  if (!path) return null;
+  const shortest = gridRoute(grid, start, end, 0);
 
   return {
     path, shortest,
     metrics: measurePath(path, field),
     shortestMetrics: shortest ? measurePath(shortest, field) : null,
-    method: useRoads ? 'road' : (walkable && walkable.length >= 6 ? 'grid-walkable' : 'grid-open'),
-    cellSize, snapDist,
+    method: walkable && walkable.length >= 6 ? 'grid-walkable' : 'grid-open',
+    cellSize,
     ms: performance.now() - t0,
   };
 }

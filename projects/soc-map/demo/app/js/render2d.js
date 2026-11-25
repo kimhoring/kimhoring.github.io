@@ -68,11 +68,14 @@ function getContourPolys() {
   return p;
 }
 
-let _heat = { key: '', canvas: null, ext: null };
+let _heat = { key: '', canvas: null, ext: null, extKey: '', at: 0 };
 function getHeatCanvas() {
   const e = docExtent();
-  const key = riskVersion() + ':' + [e.minX, e.minY, e.w, e.h].map(v => v.toFixed(1)).join(',');
+  const extKey = [e.minX, e.minY, e.w, e.h].map(v => v.toFixed(1)).join(','), key = riskVersion() + ':' + extKey;
   if (_heat.key === key) return _heat;
+  // 2026-11-24 가볍게: 실시간 장비가 움직이면 위험도가 1초마다 바뀐다 → 히트맵(최대 약 10만 점)은 1초에 한 번만 다시 계산
+  const since = performance.now() - _heat.at;
+  if (_heat.canvas && _heat.extKey === extKey && since < 1000) { if (!_heat.pending) { _heat.pending = true; setTimeout(() => { _heat.pending = false; requestRender(); }, 1000 - since + 10); } return _heat; }
   const cols = Math.min(400, Math.max(20, Math.ceil(e.w / 0.4))), rows = Math.max(1, Math.round(cols * e.h / e.w));
   const c = _heat.canvas || document.createElement('canvas');
   c.width = cols; c.height = rows;
@@ -85,7 +88,7 @@ function getHeatCanvas() {
     }
   }
   g.putImageData(img, 0, 0);
-  _heat = { key, canvas: c, ext: e };
+  _heat = { key, canvas: c, ext: e, extKey, at: performance.now() };
   return _heat;
 }
 
@@ -107,7 +110,18 @@ function hatchPattern(scale) {
 //  렌더
 // ═══════════════════════════════════════════════
 
+/** 실시간 장비: 실제 자세(m) → 화면 자세(LiveMotion) 로 옮겨 그리기. 실시간이 아니면 그대로 */
+function withLivePose(m, draw) {
+  const d = m && m._live ? LiveMotion.pose(m.id) : null;
+  if (!d) { draw(); return; }
+  ctx.save();
+  ctx.translate(d.x, d.y); ctx.rotate(d.h - (m.heading || 0)); ctx.translate(-m.x, -m.y);
+  draw();
+  ctx.restore();
+}
+
 function render() {
+  const liveMoving = LiveMotion.step();
   const T = getT(), s = T.s, px = (n) => n / s;
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.fillStyle = '#05080f'; ctx.fillRect(0, 0, CW, CH);
@@ -142,14 +156,18 @@ function render() {
   const polys = getContourPolys();
   const tracePoly = (p) => { ctx.moveTo(p[0], p[1]); for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]); ctx.closePath(); };
 
-  // 보행 가능 구역 (건물은 구멍으로)
-  const wap = S.walkableAreaPolygon;
-  if (wap.length >= 6) {
-    ctx.beginPath(); tracePoly(wap); polys.forEach(p => p.length >= 6 && tracePoly(p));
-    ctx.fillStyle = 'rgba(16,185,129,0.13)'; ctx.fill('evenodd');
-    ctx.beginPath(); tracePoly(wap);
-    ctx.strokeStyle = '#10b981'; ctx.lineWidth = px(2.5); ctx.setLineDash([px(10), px(6)]); ctx.stroke(); ctx.setLineDash([]);
+  // 2026-11-24 공사 현장 경계 — 밖은 살짝 어둡게(계산 밖), 테두리는 주황 점선
+  if (hasSiteBoundary()) {
+    const sb = S.siteBoundary, BIG = 1e5;
+    ctx.beginPath(); ctx.rect(-BIG, -BIG, 2 * BIG, 2 * BIG); tracePoly(sb);
+    ctx.fillStyle = 'rgba(2,6,23,0.30)'; ctx.fill('evenodd');
+    ctx.beginPath(); tracePoly(sb);
+    ctx.strokeStyle = '#f97316'; ctx.lineWidth = px(3); ctx.setLineDash([px(14), px(7)]); ctx.stroke(); ctx.setLineDash([]);
+    let top = 0;
+    for (let i = 3; i < sb.length; i += 2) if (sb[i] < sb[top + 1]) top = i - 1;
+    label('🏗️ 공사 현장', sb[top], sb[top + 1] - px(14), px(12), '#f97316');
   }
+
 
   // 환경 구역 — 종류마다 무늬가 다르다 (hazardviz.js: 연약지반 진흙 물결 · 급경사 꺾쇠 · 고압선 노랑·검정 띠 · 침수 물결)
   for (const z of S.siteEnvironment.envZones) {
@@ -168,13 +186,23 @@ function render() {
   const field = getRiskField();
   if (S.layers.zones) {
     for (const eq of field.equipments) {
-      if (eq.isFullControl()) {
-        ctx.beginPath(); ctx.arc(eq.xc, eq.yc, eq.getMaxRadius(), 0, Math.PI * 2);
-        ctx.fillStyle = hatchPattern(s); ctx.fill();
-        ctx.strokeStyle = '#ef4444'; ctx.lineWidth = px(3); ctx.stroke();
-      } else {
-        eq.getZoneShapes().forEach(sh => drawZoneShape(sh, s));
-      }
+      const draw = () => {
+        if (eq.isFullControl()) {
+          ctx.beginPath(); ctx.arc(eq.xc, eq.yc, eq.getMaxRadius(), 0, Math.PI * 2);
+          ctx.fillStyle = hatchPattern(s); ctx.fill();
+          ctx.strokeStyle = '#ef4444'; ctx.lineWidth = px(3); ctx.stroke();
+        } else {
+          eq.getZoneShapes().forEach(sh => drawZoneShape(sh, s));
+        }
+      };
+      // 2026-11-25 작업 중 = 작업 구역 고정(장비가 움직여도 그대로) + 「출입 금지」 표지. 이동·정지는 장비와 함께 움직임
+      if (eq.fixedZone && !eq.isFullControl()) {
+        draw();
+        if (!eq.padZone()) continue;   // 표지는 원 전체가 출입 금지인 장비만 (크레인 등은 모양이 그대로라 표지 없이)
+        const ty = eq.yc - eq.getMaxRadius();
+        hzSign(ctx, 'noEntry', eq.xc, ty - px(15), px(28));
+        hzTag(ctx, '작업 구역 · 출입 금지', eq.xc, ty + px(3), px, '#b91c1c', '#fff', 11);
+      } else withLivePose(eq.marker, draw);
     }
     // 2026-11-22 장비끼리 간섭: 두 장비를 잇는 점선 + 가운데 「⚠ 간섭」
     for (const c of equipmentConflicts(field.equipments)) {
@@ -186,7 +214,6 @@ function render() {
   }
 
   // 도로
-  for (const line of S.polylines) strokePolyline(line.points, '#10b981', Math.max(px(2), line.width || 3), null, 0.55);
   // 울타리 — 가설 울타리처럼 빨강·흰 줄무늬 띠 + 기둥 (표지는 아래 글자 층에서)
   for (const f of S.fences) hzFence(ctx, f, px, { signs: false });
 
@@ -199,7 +226,10 @@ function render() {
     ctx.beginPath(); tracePoly(p);
     ctx.fillStyle = bd.entranceBlocked ? 'rgba(239,68,68,0.55)' : 'rgba(239,68,68,0.38)';
     ctx.fill();
-    ctx.strokeStyle = isSel ? '#60a5fa' : '#ef4444'; ctx.lineWidth = px(isSel ? 3.5 : 1.8); ctx.stroke();
+    // 2026-11-25 외곽선이 위성 사진에 묻히지 않게 어두운 테두리 위에 굵게
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(15,23,42,0.75)'; ctx.lineWidth = px(isSel ? 7 : 5); ctx.stroke();
+    ctx.strokeStyle = isSel ? '#60a5fa' : '#ef4444'; ctx.lineWidth = px(isSel ? 3.5 : 2.5); ctx.stroke();
   });
 
   // 경로
@@ -248,8 +278,10 @@ function render() {
   }
 
   // 장비 (운전원 휴대폰과 연동된 장비는 실시간 위치)
-  for (const m of markersNow) {
-    if (!m.isEquipment) continue;
+  for (const m0 of markersNow) {
+    if (!m0.isEquipment) continue;
+    const lp = m0._live ? LiveMotion.pose(m0.id) : null;
+    const m = lp ? { ...m0, x: lp.x, y: lp.y, heading: lp.h } : m0;   // 실시간 장비는 화면 자세(부드럽게)
     const isSel = sel && sel.kind === 'marker' && sel.id === m.id;
     const h = m.heading || 0, al = px(isSel ? 46 : 30);
     drawArrow(m.x, m.y, m.x + al * Math.cos(h), m.y + al * Math.sin(h), px(9), isSel ? '#93c5fd' : 'rgba(255,255,255,0.85)', px(2.2));
@@ -278,6 +310,7 @@ function render() {
   drawMeasure(s);
 
   // 현장 인원 위치 · 정합 기준점 (project.js)
+  if (typeof drawPermitLayer === 'function') drawPermitLayer(ctx, s);   // 2026-11-22 건축 인허가 공사 현장
   if (typeof drawMonitorLayer === 'function') drawMonitorLayer(ctx, s);
 
   // 장비·위험물 배치 중: 놓일 모습을 마우스 위치에 미리 보여 줌 (app.js)
@@ -286,9 +319,9 @@ function render() {
   // 그리는 중
   const d = S.draft;
   if (d && d.points.length >= 2) {
-    const col = d.kind === 'road' ? '#10b981' : d.kind === 'lasso' ? '#10b981' : d.kind === 'aibox' ? '#a78bfa' : (ENV_ZONE_TYPES[S.envZoneType] || {}).color;
-    if (d.kind === 'road') strokePolyline(d.points, col, Math.max(px(2), d.width), null, 1);
-    else if (d.kind === 'fence') {
+    // 2026-11-25 건물을 그릴 때 색이 없어(구역 색을 찾다 undefined) 바로 전에 쓴 흰 얇은 선으로 그려졌음 → 종류마다 색을 정함
+    const col = { site: '#f97316', aibox: '#a78bfa', building: '#facc15' }[d.kind] || (ENV_ZONE_TYPES[S.envZoneType] || {}).color || '#38bdf8';
+    if (d.kind === 'fence') {
       hzFence(ctx, { points: d.points, width: d.width }, px, { signs: false });
       // 시작점 가까이 오면 「놓으면 닫힘 → 통행 금지 구역」 안내
       if (fenceWillClose(d.points, s)) {
@@ -299,13 +332,21 @@ function render() {
     } else {
       ctx.beginPath(); ctx.moveTo(d.points[0], d.points[1]);
       for (let i = 2; i < d.points.length; i += 2) ctx.lineTo(d.points[i], d.points[i + 1]);
-      ctx.closePath(); ctx.fillStyle = col + '22'; ctx.fill();
-      ctx.strokeStyle = col; ctx.lineWidth = px(2.5); ctx.setLineDash([px(10), px(6)]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.closePath(); ctx.fillStyle = col + '2e'; ctx.fill();
+      // 위성 사진 위에서도 보이게: 어두운 테두리 + 굵은 색 점선 + 꼭짓점
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(15,23,42,0.85)'; ctx.lineWidth = px(7); ctx.stroke();
+      ctx.strokeStyle = col; ctx.lineWidth = px(3.5); ctx.setLineDash([px(10), px(6)]); ctx.stroke(); ctx.setLineDash([]);
+      for (let i = 0; i < d.points.length && d.points.length <= 80; i += 2) {   // 끌어 그린 곡선(점이 많음)은 꼭짓점 생략
+        ctx.beginPath(); ctx.arc(d.points[i], d.points[i + 1], px(i === 0 ? 6 : 4.5), 0, Math.PI * 2);
+        ctx.fillStyle = col; ctx.fill(); ctx.strokeStyle = 'rgba(15,23,42,0.9)'; ctx.lineWidth = px(2); ctx.stroke();
+      }
     }
   }
 
   drawScaleBar(s);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (liveMoving) requestRender();   // 2026-11-24 실시간 장비·사람이 움직이는 동안 계속 그림 (멈추면 그침)
 }
 
 /** 축척에 맞춰 1·5·10·50·100m 간격 격자 */

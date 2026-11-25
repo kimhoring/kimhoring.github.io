@@ -1,0 +1,103 @@
+"""SOC-MAP PC 실행기 — 「SOC-MAP 실행.bat」 이 부른다 (파이썬 표준 라이브러리만).
+
+  1) 자동 업데이트 · 파일 확인(updater.py)
+  2) 필요한 프로그램(pip) — 처음 한 번, 또는 업데이트로 requirements.txt 가 바뀌었을 때만
+  3) 현장 관제 서버 + 관리자 화면
+
+  python launcher.py [start|check] [서버에 넘길 인자...]
+"""
+import hashlib
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+BACKEND = os.path.join(ROOT, "backend")
+sys.path.insert(0, HERE)
+import updater  # noqa: E402
+
+IMPORTS = "import fastapi, uvicorn, multipart, cryptography, cv2, ultralytics, ezdxf, shapely"
+MARK = os.path.join(sys.prefix, "socmap-requirements.sha256")   # 이 가상환경에 설치한 requirements 의 지문
+
+
+def say(msg=""):
+    print(msg, flush=True)
+
+
+def requirements():
+    req = os.path.join(BACKEND, "requirements.txt")
+    with open(req, "rb") as f:
+        want = hashlib.sha256(f.read()).hexdigest()
+    try:
+        with open(MARK, encoding="ascii") as f:
+            have = f.read().strip()
+    except OSError:
+        have = ""
+    ok = subprocess.run([sys.executable, "-c", IMPORTS], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if ok and have == want:
+        return True
+    if os.environ.get("SOCMAP_SKIP_PIP") == "1":
+        return ok
+    say("  필요한 프로그램을 설치합니다. 처음에는 몇 분 걸리고 약 1 GB 를 내려받습니다...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if subprocess.run([sys.executable, "-m", "pip", "install", "-r", req]).returncode != 0:
+        say("  [오류] 필요한 프로그램 설치에 실패했습니다. 인터넷 연결을 확인하고 다시 실행하세요.")
+        return False
+    with open(MARK, "w", encoding="ascii") as f:
+        f.write(want)
+    return True
+
+
+def server_env():
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+    args = sys.argv[1:]
+    mode = args.pop(0) if args and args[0] in ("start", "check") else "start"
+
+    say("  업데이트를 확인합니다...")
+    r = updater.run(log=say)
+    if r.updated_from:
+        say(f"  ✔ 새 버전 v{r.version} 으로 업데이트했습니다 (이전 v{r.updated_from}, 파일 {len(r.changed)}개).")
+    elif r.online and r.ok:
+        say(f"  ✔ 최신 버전입니다 (v{r.version}).")
+    if r.repaired:
+        say(f"  ✔ 바뀌었거나 없어진 프로그램 파일 {len(r.repaired)}개를 원래대로 되돌렸습니다.")
+    if r.removed:
+        say(f"  ✔ 프로그램 폴더의 필요 없는 파일 {len(r.removed)}개를 정리했습니다.")
+    if r.note:
+        say("  알림: " + r.note)
+    if not r.ok and not r.version:
+        return 1
+    if r.self_changed and os.environ.get("SOCMAP_RELAUNCHED") != "1":
+        say("  업데이트 프로그램이 바뀌어 다시 시작합니다...")
+        env = dict(os.environ, SOCMAP_RELAUNCHED="1")
+        return subprocess.call([sys.executable, "-I", "-X", "utf8", os.path.abspath(__file__), mode, *args], env=env)
+
+    if not requirements():
+        return 1
+    if not os.path.isfile(os.path.join(BACKEND, ".env")):
+        say("  알림: 인증키 설정(backend\\.env)이 없어 지도 검색 · 실제 건물 · 날씨 · 건축 인허가는 꺼집니다.")
+        say("        필요하면 backend\\.env.example 을 .env 로 복사해 키를 넣으세요. 나머지 기능은 그대로 됩니다.")
+    if mode == "check":
+        say(f"  ✔ 실행 준비 완료 (SOC-MAP v{r.version}, 파이썬 {sys.version.split()[0]})")
+        return 0
+    if not os.path.isfile(os.path.join(BACKEND, "models", "mobile_sam.pt")) and os.environ.get("SOCMAP_SKIP_MODEL") != "1":
+        # 관제를 기다리게 하지 않도록 뒤에서 받는다 (못 받으면 「AI 건물 따기」를 처음 쓸 때 다시 받음)
+        say("  AI 건물 따기 모델(약 40 MB)을 뒤에서 내려받습니다. 관제는 바로 시작합니다.")
+        subprocess.Popen([sys.executable, "-c", "import sam_inference as s; s._ensure_weights()"], cwd=BACKEND,
+                         env=server_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    say(f"  SOC-MAP v{r.version} 현장 관제를 켭니다. 방화벽 창이 뜨면 [개인 네트워크 허용]을 누르세요.")
+    say()
+    serve = args or ["--host", "0.0.0.0", "--https", "--tunnel", "--open", "--quiet"]
+    return subprocess.call([sys.executable, "main.py", *serve], cwd=BACKEND, env=server_env())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

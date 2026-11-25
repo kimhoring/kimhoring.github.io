@@ -12,7 +12,7 @@ const APP_VERSION = 14;
 const AUTOSAVE_KEY = 'socmap.v13.doc';
 const AUTOSAVE_BG_KEY = 'socmap.v13.bg';
 
-const DEFAULT_SETTINGS = { buildingHeight: 18, safetyLevel: 10, roadWidth: 3, fenceWidth: 0.4, showUnderground: true };
+const DEFAULT_SETTINGS = { buildingHeight: 18, safetyLevel: 10, fenceWidth: 0.4, showUnderground: true };
 
 const S = {
   // ── 문서(저장 대상) ──
@@ -23,7 +23,8 @@ const S = {
   //   knownMpp·knownMppSrc(도면 축척 m/px — PDF 1/N 또는 치수), dimCheck({pa, pb, real}), refs[].check(검증점)
   bgImage: null, bgImageSrc: null,                           // 배치도 이미지 (px)
   nodes: [], contours: [],
-  markers: [], polylines: [], fences: [], walkableAreaPolygon: [],
+  markers: [], fences: [],
+  siteBoundary: [],   // 공사 현장 경계 [x0,y0,…] (m) = 걸어 다닐 수 있는 구역(경로 탐색) + 계산·주변 건물·근로자 추적 범위(+30 m). 2026-11-24 보행 구역과 합침, 도로 선 없앰
   customItems: [],
   buildingData: {},
   siteEnvironment: { windSpeed: 0, envZones: [] },
@@ -50,12 +51,13 @@ const S = {
 let _idSeq = Date.now();
 function newId(prefix = 'id') { return `${prefix}_${(_idSeq++).toString(36)}`; }
 
-const DOC_KEYS = ['project', 'plan', 'nodes', 'contours', 'markers', 'polylines', 'fences', 'walkableAreaPolygon',
+const DOC_KEYS = ['project', 'plan', 'nodes', 'contours', 'markers', 'fences', 'siteBoundary',
   'customItems', 'buildingData', 'siteEnvironment', 'settings'];
 
 function serializeDoc() {
   const doc = { version: APP_VERSION, units: 'm' };
   for (const k of DOC_KEYS) doc[k] = S[k];
+  doc.walkableAreaPolygon = S.siteBoundary;   // 예전 앱·백업 호환 (경로 탐색 구역)
   return JSON.stringify(doc, (key, val) => (key.startsWith('_') ? undefined : val));
 }
 
@@ -90,9 +92,10 @@ function applyDoc(doc) {
   S.nodes = Array.isArray(doc.nodes) ? doc.nodes : [];
   S.contours = Array.isArray(doc.contours) ? doc.contours : [];
   S.markers = (Array.isArray(doc.markers) ? doc.markers : []).map(m => ({ ...m, id: m.id || newId('m') }));
-  S.polylines = (doc.polylines || []).map(l => (Array.isArray(l) ? { points: l, width: DEFAULT_SETTINGS.roadWidth } : l));
   S.fences = (doc.fences || []).map(l => (Array.isArray(l) ? { points: l, width: DEFAULT_SETTINGS.fenceWidth } : l));
-  S.walkableAreaPolygon = Array.isArray(doc.walkableAreaPolygon) ? doc.walkableAreaPolygon : [];
+  // 현장 경계 = 보행 구역 (2026-11-24 합침) — 예전 문서의 보행 구역은 현장 경계로 읽는다. 예전 도로 선(polylines)은 쓰지 않음
+  const okPoly = (p) => Array.isArray(p) && p.length >= 6;
+  S.siteBoundary = okPoly(doc.siteBoundary) ? doc.siteBoundary : okPoly(doc.walkableAreaPolygon) ? doc.walkableAreaPolygon : [];
   S.customItems = Array.isArray(doc.customItems) ? doc.customItems : [];
   S.buildingData = doc.buildingData && typeof doc.buildingData === 'object' ? doc.buildingData : {};
   const env = doc.siteEnvironment || {};
@@ -146,7 +149,7 @@ function migratePixelDoc(doc) {
   const line = (l, w) => { const pts = Array.isArray(l) ? l : l.points; return { points: flat(pts), width: w }; };
   out.polylines = (doc.polylines || []).map(l => line(l, Math.max(1, ((l.thickness || 6) * k))));
   out.fences = (doc.fences || []).map(l => line(l, DEFAULT_SETTINGS.fenceWidth));
-  out.walkableAreaPolygon = flat(doc.walkableAreaPolygon || []);
+  out.siteBoundary = flat(doc.siteBoundary || doc.walkableAreaPolygon || []);
   out.siteEnvironment = { ...(doc.siteEnvironment || {}), envZones: ((doc.siteEnvironment || {}).envZones || []).map(z => ({ ...z, polygon: flat(z.polygon || []) })) };
   out.customItems = (doc.customItems || []).map(c => ({ ...c, defaultRadius: +((c.defaultRadius || 30) * k).toFixed(1) }));
   out.settings = { ...DEFAULT_SETTINGS, safetyLevel: (doc.settings || {}).safetyLevel ?? 10 };
@@ -160,16 +163,25 @@ function migratePixelDoc(doc) {
 let _extent = null;
 function invalidateExtent() { _extent = null; }
 
+const hasSiteBoundary = () => Array.isArray(S.siteBoundary) && S.siteBoundary.length >= 6;
 function docExtent() {
   if (_extent) return _extent;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const add = (x, y) => { if (!isFinite(x) || !isFinite(y)) return; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; };
+  if (hasSiteBoundary()) {
+    // 2026-11-24 현장 경계가 있으면 그 안 + 30 m 만 계산한다 — 위험도 지도·경로 격자·근로자 앱 범위가 현장 크기로 (주변 실제 건물은 그려도 계산 밖)
+    for (let i = 0; i + 1 < S.siteBoundary.length; i += 2) add(S.siteBoundary[i], S.siteBoundary[i + 1]);
+    for (const m of S.markers) if (siteContains(S.siteBoundary, null, m.x, m.y, 60)) add(m.x, m.y);   // 경계 바로 밖에 둔 장비도
+    minX -= SITE_MARGIN; minY -= SITE_MARGIN; maxX += SITE_MARGIN; maxY += SITE_MARGIN;
+    _extent = { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY };
+    return _extent;
+  }
   const T = planTransform();
   if (T && S.plan.width) for (const [x, y] of [[0, 0], [S.plan.width, 0], [S.plan.width, S.plan.height], [0, S.plan.height]]) { const p = T.apply({ x, y }); add(p.x, p.y); }
   for (const c of S.contours) for (const pt of c) { const q = Array.isArray(pt[0]) ? pt[0] : pt; add(+q[0], +q[1]); }
   for (const m of S.markers) { const r = m.isEquipment ? 15 : (m.radius || 3); add(m.x - r, m.y - r); add(m.x + r, m.y + r); }
   const flat = (a) => { for (let i = 0; i + 1 < a.length; i += 2) add(a[i], a[i + 1]); };
-  S.polylines.forEach(l => flat(l.points)); S.fences.forEach(l => flat(l.points)); flat(S.walkableAreaPolygon);
+  S.fences.forEach(l => flat(l.points));
   S.siteEnvironment.envZones.forEach(z => flat(z.polygon));
   if (!isFinite(minX)) { minX = -100; maxX = 100; minY = -60; maxY = 60; }
   const pad = Math.max(10, 0.05 * Math.max(maxX - minX, maxY - minY));
@@ -237,9 +249,52 @@ const Autosave = {
 function liveMarkers() {
   const live = S.live;
   if (!Object.keys(live).length) return S.markers;
+  // _plan = 관리자가 배치한 작업 위치, _workAt = 운전원이 정한 작업 위치 → 작업 중이면 위험 구역은 여기에 고정 (2026-11-25)
   return S.markers.map(m => (live[m.id] ? { ...m, x: live[m.id].x, y: live[m.id].y, heading: live[m.id].heading ?? m.heading, _live: live[m.id],
+    _plan: { x: m.x, y: m.y }, _workAt: live[m.id].workAt || undefined,
     _liveState: live[m.id].online ? live[m.id].opState : undefined, _v: live[m.id].online ? live[m.id].v : undefined } : m));
 }
+
+/** 2026-11-24 실시간 장비 움직임을 「화면에서만」 부드럽게 — 위험도·경보는 실제 보고 위치(S.live) 그대로 쓴다.
+ *  보고는 1초 간격이라 그대로 그리면 뚝뚝 끊긴다 → 보고 사이를 보고된 속도로 이어(최대 1초 앞) 그리고,
+ *  위치는 0.25초 · 방향은 0.35초 시간 상수로 따라간다(프레임 속도와 무관). 2D(render2d)·3D(view3d) 가 같이 쓴다 */
+const LiveMotion = {
+  d: {}, last: 0, p: {}, a: 1, pMoving: false,
+  /** 사람(근로자) 화면 위치 — 그릴 때 부름. step() 이 정한 이번 프레임 비율로 따라감 */
+  track(key, x, y) {
+    const d = this.p[key] || (this.p[key] = { x, y });
+    d.x += (x - d.x) * this.a; d.y += (y - d.y) * this.a; d.seen = this.last;
+    if (Math.hypot(x - d.x, y - d.y) > 0.02) this.pMoving = true;
+    return d;
+  },
+  target(L, m) {
+    const v = L.online && L.v ? L.v : { vx: 0, vy: 0 };
+    const age = Math.min(1, Math.max(0, (performance.now() - (L.at || 0)) / 1000));
+    return { x: L.x + (v.vx || 0) * age, y: L.y + (v.vy || 0) * age, h: L.heading != null ? L.heading : (m.heading || 0) };
+  },
+  /** 한 걸음 — 아직 움직이는 중이면 true (다음 프레임도 그려야 함) */
+  step(now = performance.now()) {
+    const dt = Math.min(0.1, Math.max(0, (now - (this.last || now)) / 1000));
+    this.last = now;
+    const a = 1 - Math.exp(-dt / 0.25), ah = 1 - Math.exp(-dt / 0.35);
+    let moving = this.pMoving;
+    this.a = a; this.pMoving = false;
+    for (const k of Object.keys(this.p)) if (now - this.p[k].seen > 5000) delete this.p[k];
+    for (const id of Object.keys(this.d)) if (!S.live[id]) delete this.d[id];
+    for (const [id, L] of Object.entries(S.live)) {
+      const m = S.markers.find(mm => mm.id === id);
+      if (!m) continue;
+      const t = this.target(L, m), d = this.d[id] || (this.d[id] = { ...t });
+      d.x += (t.x - d.x) * a; d.y += (t.y - d.y) * a;
+      const dh = Math.atan2(Math.sin(t.h - d.h), Math.cos(t.h - d.h));
+      d.h += dh * ah;
+      if (Math.hypot(t.x - d.x, t.y - d.y) > 0.02 || Math.abs(dh) > 0.003 || (L.online && L.v && Math.hypot(L.v.vx || 0, L.v.vy || 0) > 0.05)) moving = true;
+    }
+    return moving;
+  },
+  /** 화면에 그릴 자세 — 실제 자세(x, y, heading)에서 이 자세로 옮기는 변환에 씀. 실시간이 아니면 null */
+  pose(id) { return this.d[id] || null; },
+};
 
 let _riskVersion = 0, _riskField = null, _riskFieldVersion = -1;
 function invalidateRisk() { _riskVersion++; invalidateExtent(); }

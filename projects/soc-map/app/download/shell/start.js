@@ -29,7 +29,9 @@ if (N && typeof N.updateNow === 'function') {
   b.onclick = () => updateNow();
   $('foot').after(b);
 }
-$('foot').textContent = `앱 v${info.version || '-'}${patchAt ? ` · 화면 ${two(patchAt.getMonth() + 1)}-${two(patchAt.getDate())} ${two(patchAt.getHours())}:${two(patchAt.getMinutes())}` : ''}${info.model ? ` · ${info.model}` : ''}`;
+// SOC-MAP 버전은 화면 패치(version.js)가 정함 — 앱 본체(APK)는 휴대폰 기능 코드가 바뀔 때만 올라가 둘이 다를 수 있다
+const socmapV = window.SOCMAP_VERSION || info.version || '-';
+$('foot').textContent = `SOC-MAP v${socmapV}${patchAt ? ` · 화면 ${two(patchAt.getMonth() + 1)}-${two(patchAt.getDate())} ${two(patchAt.getHours())}:${two(patchAt.getMinutes())}` : ''}${info.version && info.version !== socmapV ? ` · 본체 v${info.version}` : ''}${info.model ? ` · ${info.model}` : ''}`;
 // 지난 서버가 안 보이면(노트북을 껐다 켰으면) 안내판으로 찾아 들어간다. 서버가 켜질 때까지 기다리므로 누를 것이 없다
 const autoFind = info.lost && Directory.enabled();
 if (info.error && !autoFind) showErr(info.error);

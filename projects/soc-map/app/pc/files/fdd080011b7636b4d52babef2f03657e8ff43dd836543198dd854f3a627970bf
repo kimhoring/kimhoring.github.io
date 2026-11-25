@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b1120">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="SOC 관리감독">
+<title>SOC-MAP 관리감독자</title>
+<link rel="manifest" href="/manifest/supervisor.webmanifest">
+<link rel="icon" href="/app/pwa/icons/supervisor-192.png">
+<link rel="apple-touch-icon" href="/app/pwa/icons/supervisor-apple-180.png">
+<link rel="stylesheet" href="/app/field.css">
+<link rel="stylesheet" href="/app/supervisor.css">
+</head>
+<body class="sv">
+
+<!-- ═════════ 로그인 ═════════ -->
+<section class="screen onboard" id="login">
+  <header class="ob-head">
+    <div class="brand"><img src="/app/pwa/icons/supervisor-192.png" alt=""><b>SOC-MAP 관리감독자</b></div>
+  </header>
+  <div class="ob-step">
+    <h1>현장 관제 로그인</h1>
+    <p class="lead">노트북 화면의 <b>📱 현장 합류 → 🦺 관리감독자 앱</b> QR을 찍으면 바로 로그인됩니다. 한 번 로그인하면 다음부터는 앱을 열기만 하면 됩니다.</p>
+    <button class="btn-primary" id="scanHomeBtn" hidden>📷 QR 찍기</button>
+    <div class="err" id="loginErr"></div>
+    <details class="advanced" id="manualLogin">
+      <summary>QR을 찍을 수 없을 때 — 관리자 키로 로그인</summary>
+      <label class="label">현장</label>
+      <div class="cards" id="prjList"><div class="empty">현장 목록을 불러오는 중…</div></div>
+      <label class="label" for="keyInput">관리자 키</label>
+      <input id="keyInput" class="input" placeholder="관리자 PC 「프로젝트 정보」의 관리자 키" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="ob-actions"><button class="btn-primary" id="loginBtn" disabled>로그인</button></div>
+    </details>
+    <button class="install-card" id="obInstall" hidden><span class="ic">📲</span><span><b>앱으로 설치하기</b><small id="obInstallHint"></small></span></button>
+    <a class="install-card" id="obApk" href="/supervisor.apk" hidden><span class="ic">🤖</span><span><b>안드로이드 앱으로 받기</b><small>누르면 앱 파일이 바로 내려받아집니다 → 열기 → 설치. 화면이 꺼져도 위험 진입·SOS 알림을 받습니다.</small></span></a>
+    <a class="btn-link" id="obOpenApp" hidden>이미 설치했다면 → 앱으로 열기</a>
+  </div>
+</section>
+
+<!-- ═════════ 메인 ═════════ -->
+<section class="screen main" id="main" hidden>
+  <header class="appbar">
+    <div class="ab-title"><b id="abProject">현장</b><small id="abSub">관리감독자</small></div>
+    <div class="ab-ind">
+      <span class="ind" id="indWx" title="기상청 날씨 — 더보기에서 자세히" hidden><i></i><span></span></span>
+      <span class="ind" id="indPush" title="휴대폰 알림"><i></i><span>알림</span></span>
+      <span class="ind" id="indConn" title="서버 연결"><i></i><span>연결</span></span>
+    </div>
+  </header>
+
+  <button class="status sv-status" id="status" type="button">
+    <div class="lv" id="lvText">연결 중…</div>
+    <div class="sv-kpis" id="kpis"></div>
+  </button>
+  <div class="sv-evac" id="svEvac" hidden></div>
+
+  <div class="content">
+    <!-- 지도 -->
+    <div class="tab-pane map-pane" data-tab="map">
+      <canvas id="map"></canvas>
+      <div class="map-chip" id="chip" hidden></div>
+      <div class="map-tools">
+        <button id="fitBtn" title="현장 전체" data-label="현장 전체">🗺️</button>
+        <button id="meBtn" title="내 위치" data-label="내 위치">📍</button>
+        <button id="layerBtn" title="배경 지도" data-label="배경">🛰️</button>
+        <button id="zoomInBtn" title="확대">＋</button>
+        <button id="zoomOutBtn" title="축소">－</button>
+      </div>
+      <div class="map-legend" id="legend"></div>
+      <div class="attr" id="attr"></div>
+    </div>
+
+    <!-- 인원 -->
+    <div class="tab-pane list-pane" data-tab="people" hidden>
+      <div class="pane-head"><h2>인원 · 장비</h2><p id="peopleSummary"></p></div>
+      <div class="cards" id="peopleList"></div>
+    </div>
+
+    <!-- 경보 -->
+    <div class="tab-pane list-pane" data-tab="alerts" hidden>
+      <div class="pane-head row-head"><div><h2>경보</h2><p>위험 진입 · SOS · 신호 끊김 · 메시지 기록</p></div><button class="btn-sm danger" id="ackAllBtn" hidden></button></div>
+      <div class="cards" id="eventList"></div>
+    </div>
+
+    <!-- 더보기 -->
+    <div class="tab-pane list-pane" data-tab="more" hidden>
+      <div class="pane-head"><h2>더보기</h2><p id="moreSub"></p></div>
+
+      <div id="wxSection" hidden>
+        <div class="section-title">기상청 날씨 <small id="wxMeta"></small></div>
+        <div class="wx-box" id="wxBox"></div>
+      </div>
+
+      <div class="section-title">근로자 앱 정책 <small>근로자는 바꿀 수 없습니다</small></div>
+      <div class="menu">
+        <label class="menu-row"><span><b>🔒 경보음·진동 잠금</b><small>근로자가 경보 소리·진동을 끌 수 없게 합니다</small></span><span class="switch"><input type="checkbox" id="polAlarm"><span class="sl"></span></span></label>
+        <label class="menu-row"><span><b>🎓 시연 모드 허용</b><small>GPS 대신 지도를 눌러 위치를 정하는 교육·발표용 모드</small></span><span class="switch"><input type="checkbox" id="polSim"><span class="sl"></span></span></label>
+        <label class="menu-row"><span><b>📍 GPS 위치로 합류</b><small>현장 근처 휴대폰이 참여 코드 없이 합류</small></span><span class="switch"><input type="checkbox" id="polGps"><span class="sl"></span></span></label>
+      </div>
+
+      <div class="section-title">대피 장소 · 목적지 <small>근로자 안전 경로의 목적지</small></div>
+      <div class="cards" id="placeList"></div>
+      <div class="row-btns"><button class="btn-ghost" id="placeMapBtn">🗺️ 지도에서 추가</button><button class="btn-ghost" id="placeHereBtn">📍 내 위치에 추가</button></div>
+
+      <div class="section-title">알림</div>
+      <div class="menu">
+        <label class="menu-row"><span><b>📲 휴대폰 알림</b><small id="pushHint">앱을 닫아도 위험 진입·SOS 알림</small></span><span class="switch"><input type="checkbox" id="pushToggle"><span class="sl"></span></span></label>
+        <label class="menu-row"><span><b>🔊 경보음</b><small>앱을 보고 있을 때 사이렌</small></span><span class="switch"><input type="checkbox" id="soundToggle"><span class="sl"></span></span></label>
+        <label class="menu-row"><span><b>📳 진동</b><small>지원하는 휴대폰만</small></span><span class="switch"><input type="checkbox" id="vibeToggle"><span class="sl"></span></span></label>
+        <label class="menu-row"><span><b>🔆 화면 켜두기</b><small>관제 중 화면이 꺼지지 않게</small></span><span class="switch"><input type="checkbox" id="wakeToggle"><span class="sl"></span></span></label>
+        <button class="menu-row" id="testBtn"><span><b>🔔 알림 시험</b><small>알림음 → SOS 사이렌 순서로 · 진동 · 휴대폰 알림</small></span><span class="chev">›</span></button>
+      </div>
+
+      <div class="section-title">현장 도구</div>
+      <div class="menu">
+        <button class="menu-row" id="qrBtn"><span><b>🔳 근로자 합류 QR</b><small>근로자가 이 화면의 QR을 찍어 근로자 앱으로 합류</small></span><span class="chev">›</span></button>
+        <button class="menu-row" id="refBtn"><span><b>📡 기준점 보정</b><small id="refHint">위치를 아는 기준점에 이 휴대폰을 두면 근로자 휴대폰의 GPS 오차를 줄입니다</small></span><span class="chev">›</span></button>
+        <button class="menu-row" id="surveyBtn"><span><b>📐 GPS 측량</b><small>도면 정합 기준점 — 60초 평균해 관리자 PC로 전송</small></span><span class="chev">›</span></button>
+        <label class="menu-row"><span><b>🧭 내 위치 표시</b><small>지도에 내 위치 표시 (서버로 보내지 않음)</small></span><span class="switch"><input type="checkbox" id="meToggle"><span class="sl"></span></span></label>
+        <button class="menu-row" id="layerMenuBtn"><span><b>🛰️ 배경 지도</b><small id="layerName">위성 영상</small></span><span class="chev">›</span></button>
+        <button class="menu-row" id="installRow"><span><b>📲 앱 설치</b><small id="installHint"></small></span><span class="chev">›</span></button>
+        <a class="menu-row" id="apkRow" href="/supervisor.apk" hidden><span><b>🤖 안드로이드 앱(APK) 받기</b><small>화면이 꺼져도 경보를 받는 앱</small></span><span class="chev">›</span></a>
+        <button class="menu-row" id="homeRow" hidden><span><b>🔁 다른 현장 서버 연결</b><small>노트북 서버를 다시 켰을 때 새 QR 찍기</small></span><span class="chev">›</span></button>
+        <button class="menu-row" id="updateRow" hidden><span><b>🔄 앱 업데이트 확인</b><small id="updateHint"></small></span><span class="chev">›</span></button>
+      </div>
+      <button class="btn-leave" id="logoutBtn">로그아웃</button>
+      <p class="foot" id="footNote">SOC-MAP 관리감독자 · 화면을 끄거나 다른 앱을 쓰는 동안에도 경보를 받으려면 「휴대폰 알림」을 켜세요.</p>
+    </div>
+
+    <button class="bc-fab" id="bcBtn" aria-label="전체 알림 · 대피 지시"><span>📢</span><small>알림</small></button>
+  </div>
+
+  <nav class="tabbar">
+    <button class="tab on" data-tab="map"><span class="ti">🗺️</span>지도</button>
+    <button class="tab" data-tab="people"><span class="ti">👷</span>인원<i class="tab-badge" id="peopleBadge" hidden></i></button>
+    <button class="tab" data-tab="alerts"><span class="ti">🔔</span>경보<i class="tab-badge" id="alertBadge" hidden></i></button>
+    <button class="tab" data-tab="more"><span class="ti">☰</span>더보기</button>
+  </nav>
+</section>
+
+<div class="toasts" id="toasts"></div>
+
+<!-- ═════════ 긴급 경보 ═════════ -->
+<div class="overlay sos-ov" id="alarmOv" hidden>
+  <div class="dialog">
+    <h2 id="alarmTitle">🆘 긴급 호출</h2>
+    <p class="sos-where" id="alarmText"></p>
+    <small class="alarm-meta" id="alarmMeta"></small>
+    <button class="btn-primary" id="alarmLocate">📍 지도에서 위치 보기</button>
+    <button class="btn-ghost" id="alarmAck">확인 — 근로자에게 「확인됨」 알림</button>
+  </div>
+</div>
+
+<!-- ═════════ 시트 ═════════ -->
+<div class="sheet-wrap" id="personSheet" hidden>
+  <div class="sheet">
+    <div class="grip"></div>
+    <div id="personBody"></div>
+    <div class="row-btns"><button class="btn-primary" id="personMsg">💬 메시지</button><button class="btn-danger" id="personLocate">📍 지도에서 보기</button></div>
+    <button class="btn-ghost" data-close-sheet>닫기</button>
+  </div>
+</div>
+
+<div class="sheet-wrap" id="msgSheet" hidden>
+  <div class="sheet">
+    <div class="grip"></div>
+    <h2 id="msgTitle">📢 전체 알림</h2>
+    <button class="evac-hold" id="evacHold"><span id="evacLabel">🚨 전체 대피 지시</span><small>길게 눌러 보내기 · 근로자 앱이 가까운 대피 장소로 경로를 안내합니다</small></button>
+    <label class="label" for="msgText">메시지</label>
+    <input class="input" id="msgText" maxlength="200" placeholder="예: 14시부터 타워크레인 양중 — 3번 구역 접근 금지">
+    <div class="quick" id="msgQuick"></div>
+    <button class="btn-primary" id="msgSend">보내기</button>
+    <button class="btn-ghost" data-close-sheet>닫기</button>
+  </div>
+</div>
+
+<div class="sheet-wrap" id="placeSheet" hidden>
+  <div class="sheet">
+    <div class="grip"></div>
+    <h2>📍 장소 추가</h2>
+    <div class="choice two" id="placeKind"><button data-kind="assembly" class="on">🟢 대피 장소</button><button data-kind="dest">📍 목적지</button><button data-kind="ref" title="위치를 정확히 아는 점 — 기준점 보정용">📡 기준점</button></div>
+    <input class="input" id="placeName" maxlength="20" placeholder="이름 (예: 정문 집결지)">
+    <div class="err" id="placeErr"></div>
+    <button class="btn-primary" id="placeSave">추가</button>
+    <button class="btn-ghost" data-close-sheet>취소</button>
+  </div>
+</div>
+
+<div class="sheet-wrap" id="qrSheet" hidden>
+  <div class="sheet center">
+    <div class="grip"></div>
+    <h2>🔳 근로자 합류</h2>
+    <div class="qr" id="qrBox"></div>
+    <div class="join-code" id="joinCode"></div>
+    <div class="join-url" id="joinUrl"></div>
+    <p class="lead">근로자가 휴대폰 카메라로 QR을 찍으면 근로자 앱이 열립니다.</p>
+    <button class="btn-ghost" data-close-sheet>닫기</button>
+  </div>
+</div>
+
+<div class="sheet-wrap" id="surveySheet" hidden>
+  <div class="sheet">
+    <div class="grip"></div>
+    <h2>📐 GPS 측량</h2>
+    <p class="lead">도면에서 위치를 알 수 있는 지점(건물 모서리, 측량 말뚝 등)에 휴대폰을 대고 <b>움직이지 말고</b> 기다리세요. 여러 번 측정해 평균합니다.</p>
+    <input class="input" id="surveyName" maxlength="20" placeholder="지점 이름 (예: 101동 북서 모서리)">
+    <div class="bar"><i id="surveyBar"></i></div>
+    <div class="survey-stat" id="surveyStat">대기 중</div>
+    <button class="btn-primary" id="surveyStart">측정 시작 (60초)</button>
+    <button class="btn-primary" id="surveySend" hidden>관리자 PC로 전송</button>
+    <button class="btn-ghost" data-close-sheet>닫기</button>
+  </div>
+</div>
+
+<div class="sheet-wrap" id="refSheet" hidden>
+  <div class="sheet">
+    <div class="grip"></div>
+    <h2>📡 기준점 보정</h2>
+    <p class="lead">관리자 PC가 지도에 찍은 기준점(위치를 정확히 아는 점) 위에 이 휴대폰을 두고 켜 두세요. 이 휴대폰이 잰 GPS 오차를 근처 근로자 휴대폰이 빼서 씁니다. 휴대폰을 움직이면 보정이 틀려집니다.</p>
+    <div class="choice" id="refChoice"></div>
+    <p class="lead" id="refStat"></p>
+    <button class="btn-ghost" id="refStop" hidden>보정 끄기</button>
+    <button class="btn-ghost" data-close-sheet>닫기</button>
+  </div>
+</div>
+
+<div class="sheet-wrap" id="layerSheet" hidden>
+  <div class="sheet">
+    <div class="grip"></div>
+    <h2>🛰️ 배경 지도</h2>
+    <div class="choice" id="layerChoice">
+      <button data-layer="vworld" data-vw hidden>🛰️ 브이월드 영상 <small>국토교통부 정사영상</small></button>
+      <button data-layer="vworldBase" data-vw hidden>🗺️ 브이월드 지도</button>
+      <button data-layer="satellite">🛰️ 위성 영상 (Esri)</button>
+      <button data-layer="street">🗺️ 일반 지도 (OSM)</button>
+      <button data-layer="none">⬛ 끄기</button>
+    </div>
+    <button class="btn-ghost" data-close-sheet>닫기</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer></script>
+<script src="/app/js/costmap.js"></script>
+<script src="/app/js/hazardviz.js"></script>
+<script src="/app/js/geo.js"></script>
+<script src="/app/js/basemap.js"></script>
+<script src="/app/js/sitemap.js"></script>
+<script src="/app/js/version.js"></script>
+<script src="/app/js/directory.js"></script>
+<script src="/app/js/pwa.js"></script>
+<script src="/app/js/supervisor.js"></script>
+</body>
+</html>

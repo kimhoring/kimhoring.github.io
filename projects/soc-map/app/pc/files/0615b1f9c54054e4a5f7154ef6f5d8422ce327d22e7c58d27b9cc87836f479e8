@@ -1,0 +1,493 @@
+"""기상청 날씨 연동 — 단기예보 조회서비스(VilageFcstInfoService_2.0): 초단기실황 · 초단기예보 · 단기예보
+
+인증키 (backend/.env, git 제외) — 둘 중 하나만 있으면 된다:
+  SOCMAP_KMA_KEY      공공데이터포털(data.go.kr) 「기상청_단기예보 ((구)_동네예보) 조회서비스」 일반 인증키 (Decoding·Encoding 둘 다 됨)
+  SOCMAP_KMA_HUB_KEY  기상청 API허브(apihub.kma.go.kr) 인증키 — 같은 서비스
+  (시험용) SOCMAP_KMA_URL 로 기상청 대신 가짜 서버 주소를 줄 수 있다.
+없으면 날씨 기능만 꺼지고 풍속은 지금처럼 손으로 넣는다.
+
+현장 위치(프로젝트 원점 — 브이월드 주소 검색·📍 위치로 지정) → 기상청 5 km 격자(nx, ny):
+  지금   초단기실황   기온 · 1시간 강수량 · 습도 · 강수형태 · 풍향 · 풍속(평균)
+  6시간  초단기예보   + 하늘상태 · 낙뢰
+  24시간 단기예보     + 1시간 신적설 · 강수확률
+
+판정 (관리자 화면 · 관리감독자 앱이 그대로 표시, 근거 3단 구분):
+  - 안전보건규칙 제37조② [법정] 타워크레인 순간풍속 10 m/s 초과 → 설치·수리·점검·해체 중지, 15 m/s 초과 → 운전 중지.
+      기상청 풍속은 평균풍속이므로 순간풍속 = 평균풍속 × 돌풍계수 GUST_FACTOR 로 추정한다 [설계값].
+      판단은 장비에 단 풍속계의 순간풍속이 우선이다(격자 5 km · 지상 10 m 값이라 높은 지브의 바람보다 작을 수 있음).
+  - 안전보건규칙 제383조 [법정] 철골작업 중지 — 풍속 10 m/s 이상 · 강우량 1 mm/h 이상 · 강설량 1 cm/h 이상.
+  - 안전보건규칙 제559조·별표 13의2 [법정, 2025 개정] 체감온도 31 ℃ 이상 폭염작업 조치, 33 ℃ 이상 2시간마다 20분 이상 휴식.
+      측정이 어려우면 기상청 체감온도로 대체할 수 있다 → 기상청 여름철 체감온도 식(습구온도: Stull 2011)으로 계산.
+  - 낙뢰 예보 [참고] — 법정 수치 기준 없음(제37조① 일반 의무).
+"""
+import asyncio
+import datetime as dt
+import logging
+import math
+import os
+import re
+import threading
+import time
+from typing import Optional
+from urllib.parse import unquote
+
+import requests
+from fastapi import APIRouter, Header, HTTPException
+
+import projects
+
+log = logging.getLogger("soc-map.weather")
+router = APIRouter()
+_session = requests.Session()
+
+KST = dt.timezone(dt.timedelta(hours=9))
+DATA_GO_KR = "https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0"
+API_HUB = "https://apihub.kma.go.kr/api/typ02/openApi/VilageFcstInfoService_2.0"
+
+# 돌풍계수(3초 순간풍속 / 10분 평균풍속) — 설계값.
+# Harper·Kepert·Ginger(2008, WMO 열대저기압 풍속 환산 지침 초안) 지상 10 m 「내륙(in-land)」 노출 1.66, 해안 1.52.
+# 크레인 안전 판단이므로 큰 쪽(내륙)을 쓴다. 현장 풍속계가 있으면 그 값이 우선.
+GUST_FACTOR = 1.66
+TOWER_RUN_MS = 15       # 제37조② 운전작업 중지 (초과)
+TOWER_ERECT_MS = 10     # 제37조② 설치·수리·점검·해체 중지 (초과)
+STEEL_WIND_MS = 10      # 제383조 (이상)
+STEEL_RAIN_MM = 1       # 제383조 (이상)
+STEEL_SNOW_CM = 1       # 제383조 (이상)
+HEAT_CAUTION_C = 31     # 제559조④·별표 13의2 폭염작업
+HEAT_REST_C = 33        # 별표 13의2 휴식 의무
+# 2026-11-24 가볍게: 기상청 자료는 발표 시각에만 바뀐다(실황·초단기예보 1시간, 단기예보 3시간) → 가진 자료가 최신 발표면 다시 받지 않음.
+# 최신 발표가 아직 안 올라와 지난 발표를 쓰고 있으면 RETRY_S 뒤에 다시 시도. 위험도 판정(풍속·강수·낙뢰·더위)에는 이 주기로 충분.
+RETRY_S = 10 * 60
+
+OP_LABEL = {"getUltraSrtNcst": "초단기실황(지금)", "getUltraSrtFcst": "초단기예보(6시간·낙뢰)", "getVilageFcst": "단기예보(24시간)"}
+PTY = {0: "없음", 1: "비", 2: "비/눈", 3: "눈", 4: "소나기", 5: "빗방울", 6: "빗방울눈날림", 7: "눈날림"}
+SKY = {1: "맑음", 3: "구름많음", 4: "흐림"}
+
+
+def _settings():
+    """키는 vworld.py 가 이미 .env 를 환경 변수로 읽어 둔다 (main.py 가 vworld 를 먼저 import)"""
+    import vworld  # noqa: F401  (.env 로드)
+    key = os.environ.get("SOCMAP_KMA_KEY", "").strip()
+    hub = os.environ.get("SOCMAP_KMA_HUB_KEY", "").strip()
+    if key and "%" in key:          # 공공데이터포털 「Encoding」 키 → 원래 값으로 (requests 가 다시 인코딩)
+        key = unquote(key)
+    url = os.environ.get("SOCMAP_KMA_URL", "").strip().rstrip("/")
+    if key:
+        return {"provider": "data.go.kr", "url": url or DATA_GO_KR, "param": "serviceKey", "key": key}
+    if hub:
+        return {"provider": "apihub", "url": url or API_HUB, "param": "authKey", "key": hub}
+    return None
+
+
+CONF = _settings()
+if CONF:
+    log.info(f"기상청 날씨 연동 켜짐 ({CONF['provider']})")
+
+
+class KmaError(Exception):
+    pass
+
+
+# ───────────────────────── 좌표 → 기상청 격자 ─────────────────────────
+def latlon_to_grid(lat, lon):
+    """위경도 → 기상청 단기예보 격자(nx, ny). 람베르트 정각원추도법 (기상청 공개 변환식: 5 km, 표준위도 30·60°, 기준 126°E 38°N)"""
+    RE, GRID, SLAT1, SLAT2, OLON, OLAT, XO, YO = 6371.00877, 5.0, 30.0, 60.0, 126.0, 38.0, 43, 136
+    D = math.pi / 180.0
+    re_ = RE / GRID
+    s1, s2, olon, olat = SLAT1 * D, SLAT2 * D, OLON * D, OLAT * D
+    sn = math.log(math.cos(s1) / math.cos(s2)) / math.log(math.tan(math.pi * 0.25 + s2 * 0.5) / math.tan(math.pi * 0.25 + s1 * 0.5))
+    sf = math.tan(math.pi * 0.25 + s1 * 0.5) ** sn * math.cos(s1) / sn
+    ro = re_ * sf / math.tan(math.pi * 0.25 + olat * 0.5) ** sn
+    ra = re_ * sf / math.tan(math.pi * 0.25 + lat * D * 0.5) ** sn
+    theta = lon * D - olon
+    if theta > math.pi:
+        theta -= 2 * math.pi
+    if theta < -math.pi:
+        theta += 2 * math.pi
+    theta *= sn
+    return int(math.floor(ra * math.sin(theta) + XO + 0.5)), int(math.floor(ro - ra * math.cos(theta) + YO + 0.5))
+
+
+def in_korea(lat, lon):
+    return 32.0 <= lat <= 39.6 and 123.5 <= lon <= 132.0
+
+
+# ───────────────────────── 발표 시각 ─────────────────────────
+def ncst_bases(now):
+    """초단기실황: 매시 정시 자료, 몇십 분 뒤 제공 → 40분 전 정시부터, 없으면 한 시간 전"""
+    t = (now - dt.timedelta(minutes=40)).replace(minute=0, second=0, microsecond=0)
+    return [t, t - dt.timedelta(hours=1)]
+
+
+def ufcst_bases(now):
+    """초단기예보: 매시 30분 발표, 약 15분 뒤 제공 → 45분 전 기준 가장 최근 HH:30, 없으면 한 시간 전"""
+    t = now - dt.timedelta(minutes=45)
+    b = t.replace(minute=30, second=0, microsecond=0)
+    if t.minute < 30:
+        b -= dt.timedelta(hours=1)
+    return [b, b - dt.timedelta(hours=1)]
+
+
+def vfcst_bases(now):
+    """단기예보: 02·05·08·11·14·17·20·23시 발표, 10분 뒤 제공 → 가장 최근 발표, 없으면 그 전 발표"""
+    t = now - dt.timedelta(minutes=10)
+    h = max([x for x in (2, 5, 8, 11, 14, 17, 20, 23) if x <= t.hour], default=None)
+    b = t.replace(hour=h, minute=0, second=0, microsecond=0) if h is not None else \
+        (t - dt.timedelta(days=1)).replace(hour=23, minute=0, second=0, microsecond=0)
+    return [b, b - dt.timedelta(hours=3)]
+
+
+# ───────────────────────── 값 해석 ─────────────────────────
+def num(v):
+    """관측·예보 숫자. 기상청은 ±900 이상을 결측으로 쓴다"""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if x >= 900 or x <= -900 else x
+
+
+def amount(v):
+    """강수량(RN1·PCP)·신적설(SNO) 글자 → 수치(하한).
+    '강수없음'·'적설없음' → 0, '1mm 미만'·'0.5cm 미만' → 0(기준 1 미만), '1.5mm'·'1.5' → 1.5,
+    '30.0~50.0mm' → 30, '50.0mm 이상' → 50"""
+    s = str(v if v is not None else "").strip()
+    if not s or "없음" in s or s == "-":
+        return 0.0
+    if "미만" in s:
+        return 0.0
+    m = re.findall(r"\d+(?:\.\d+)?", s)
+    if not m:
+        return 0.0
+    x = float(m[0])
+    return 0.0 if x >= 900 else x
+
+
+def amount_text(v, unit):
+    s = str(v if v is not None else "").strip()
+    if not s or "없음" in s or s in ("0", "0.0", "-"):
+        return "없음"
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return f"{float(s):g} {unit}"
+    return s
+
+
+def wet_bulb(t, rh):
+    """습구온도(℃) — Stull(2011) 식, 기상청 체감온도 산출에 쓰는 형태(상수 4.686035)"""
+    return (t * math.atan(0.151977 * math.sqrt(rh + 8.313659)) + math.atan(t + rh) - math.atan(rh - 1.676331)
+            + 0.00391838 * rh ** 1.5 * math.atan(0.023101 * rh) - 4.686035)
+
+
+def feels_like(t, rh, wind_ms, month):
+    """기상청 체감온도. 5~9월은 여름철 식(기온·습도), 그 밖에는 겨울철 식(기온 10 ℃ 이하·풍속 1.3 m/s 이상일 때)"""
+    if t is None:
+        return None, None
+    if 5 <= month <= 9:
+        if rh is None:
+            return None, "summer"
+        tw = wet_bulb(t, rh)
+        return round(-0.2442 + 0.55399 * tw + 0.45535 * t - 0.0022 * tw * tw + 0.00278 * tw * t + 3.0, 1), "summer"
+    if wind_ms is not None and t <= 10 and wind_ms >= 1.3:
+        v = (wind_ms * 3.6) ** 0.16
+        return round(13.12 + 0.6215 * t - 11.37 * v + 0.3965 * t * v, 1), "winter"
+    return round(t, 1), None
+
+
+def gust(wind):
+    return None if wind is None else round(wind * GUST_FACTOR, 1)
+
+
+# ───────────────────────── 기상청 호출 ─────────────────────────
+def _call(op, base, nx, ny, rows):
+    if not CONF:
+        raise KmaError("기상청 인증키가 없습니다 (backend/.env 의 SOCMAP_KMA_KEY).")
+    params = {"pageNo": 1, "numOfRows": rows, "dataType": "JSON", "base_date": base.strftime("%Y%m%d"),
+              "base_time": base.strftime("%H%M"), "nx": nx, "ny": ny, CONF["param"]: CONF["key"]}
+    try:
+        r = _session.get(f"{CONF['url']}/{op}", params=params, timeout=12)
+    except requests.RequestException as e:
+        raise KmaError(f"기상청에 연결하지 못했습니다: {e.__class__.__name__}")
+    try:
+        return parse_response(r.status_code, r.text)
+    except KmaError as e:
+        # API허브는 기능(주소)마다 따로 활용신청 — 2026-11-02 실제 사례: 초단기실황만 승인, 예보 둘은 403
+        if CONF.get("provider") == "apihub" and "활용신청" in str(e):
+            raise KmaError(f"기상청 API허브: 「{OP_LABEL.get(op, op)}」({op}) 활용신청이 필요합니다 — "
+                           f"API허브에서 typ02/openApi/VilageFcstInfoService_2.0/{op} 주소를 신청하세요") from None
+        raise
+
+
+def parse_response(status, text):
+    """기상청 응답 → item 목록. 자료 없음(03)이면 None. 인증·서비스 오류는 KmaError"""
+    import json
+    try:
+        d = json.loads(text)
+    except ValueError:
+        m = re.search(r"<returnAuthMsg>([^<]+)</returnAuthMsg>", text or "") or re.search(r"<errMsg>([^<]+)</errMsg>", text or "")
+        raise KmaError(f"기상청 응답 오류: {m.group(1) if m else f'HTTP {status}'}")
+    if "OpenAPI_ServiceResponse" in d:       # 공공데이터포털 게이트웨이 오류 (인증키 등)
+        h = d["OpenAPI_ServiceResponse"].get("cmmMsgHeader", {})
+        code = str(h.get("returnReasonCode", ""))
+        hint = {"30": " — 공공데이터포털에서 활용신청한 키인지, 발급 직후라면 1~2시간 뒤 다시 시도", "22": " — 일일 호출 한도 초과",
+                "20": " — 서비스 접근 거부(활용신청 확인)"}.get(code, "")
+        raise KmaError(f"기상청 인증 오류: {h.get('returnAuthMsg') or h.get('errMsg') or code}{hint}")
+    if "result" in d and isinstance(d["result"], dict) and "response" not in d:   # API허브 오류
+        msg = str(d["result"].get("message", d["result"].get("status")))
+        # 2026-11-02 실제 사례: 같은 「단기예보」 분류의 「단기예보 구역」만 신청해 키는 맞는데 403 — 신청할 API 를 정확히 알려 줌
+        hint = (" — API허브에서 요청 주소가 typ02/openApi/VilageFcstInfoService_2.0 인 「단기예보 조회서비스」"
+                "(초단기실황·초단기예보·단기예보)를 활용신청하세요" if "활용신청" in msg or "허용되지" in msg else "")
+        raise KmaError(f"기상청 API허브 오류: {msg}{hint}")
+    resp = d.get("response", {})
+    hdr = resp.get("header", {})
+    code = str(hdr.get("resultCode", ""))
+    if code == "03":
+        return None
+    if code != "00":
+        raise KmaError(f"기상청 오류 {code}: {hdr.get('resultMsg', '')}")
+    items = (resp.get("body", {}).get("items") or {}).get("item") or []
+    return items if isinstance(items, list) else [items]
+
+
+def _first(op, bases, nx, ny, rows):
+    for b in bases:
+        items = _call(op, b, nx, ny, rows)
+        if items:
+            return b, items
+    raise KmaError(f"기상청 자료가 아직 없습니다 ({op}).")
+
+
+# ───────────────────────── 조립 ─────────────────────────
+def build(nx, ny, ncst, ufcst, vfcst, now):
+    """세 응답(item 목록) → 화면에 쓰는 날씨 + 판정. 단기예보는 없어도 된다(None)"""
+    nb, nitems = ncst
+    cur = {it["category"]: it.get("obsrValue") for it in nitems}
+    t, rh, ws = num(cur.get("T1H")), num(cur.get("REH")), num(cur.get("WSD"))
+    fl, fl_kind = feels_like(t, rh, ws, now.month)
+    pty = int(num(cur.get("PTY")) or 0)
+    w_now = {"time": nb.isoformat(), "temp": t, "humidity": rh, "rain_1h": amount(cur.get("RN1")), "rain_text": amount_text(cur.get("RN1"), "mm"),
+             "pty": pty, "pty_text": PTY.get(pty, "-"), "wind": ws, "wind_dir": num(cur.get("VEC")), "gust_est": gust(ws),
+             "feels_like": fl, "feels_kind": fl_kind}
+
+    hours = {}
+
+    def slot(it):
+        key = it["fcstDate"] + it["fcstTime"]
+        return hours.setdefault(key, {"time": dt.datetime.strptime(key, "%Y%m%d%H%M").replace(tzinfo=KST).isoformat()})
+    if vfcst:
+        for it in vfcst[1]:
+            h, c, v = slot(it), it["category"], it.get("fcstValue")
+            if c == "TMP": h["temp"] = num(v)
+            elif c == "WSD": h["wind"] = num(v)
+            elif c == "VEC": h["wind_dir"] = num(v)
+            elif c == "REH": h["humidity"] = num(v)
+            elif c == "PCP": h["rain"], h["rain_text"] = amount(v), amount_text(v, "mm")
+            elif c == "SNO": h["snow"], h["snow_text"] = amount(v), amount_text(v, "cm")
+            elif c == "PTY": h["pty"] = int(num(v) or 0)
+            elif c == "SKY": h["sky"] = int(num(v) or 0)
+            elif c == "POP": h["pop"] = num(v)
+    if ufcst:   # 앞 6시간은 더 새로운 초단기예보로 덮어쓴다
+        for it in ufcst[1]:
+            h, c, v = slot(it), it["category"], it.get("fcstValue")
+            if c == "T1H": h["temp"] = num(v)
+            elif c == "WSD": h["wind"] = num(v)
+            elif c == "VEC": h["wind_dir"] = num(v)
+            elif c == "REH": h["humidity"] = num(v)
+            elif c == "RN1": h["rain"], h["rain_text"] = amount(v), amount_text(v, "mm")
+            elif c == "PTY": h["pty"] = int(num(v) or 0)
+            elif c == "SKY": h["sky"] = int(num(v) or 0)
+            elif c == "LGT": h["lightning"] = (num(v) or 0) > 0
+            h["ultra"] = True
+    start = now.replace(minute=0, second=0, microsecond=0)
+    out = []
+    for key in sorted(hours):
+        h = hours[key]
+        if dt.datetime.fromisoformat(h["time"]) < start:
+            continue
+        h["gust_est"] = gust(h.get("wind"))
+        h["pty_text"] = PTY.get(h.get("pty", 0), "-")
+        h["sky_text"] = SKY.get(h.get("sky"), "")
+        h["feels_like"] = feels_like(h.get("temp"), h.get("humidity"), h.get("wind"), dt.datetime.fromisoformat(h["time"]).month)[0]
+        out.append(h)
+        if len(out) >= 24:
+            break
+    w = {"source": "기상청 단기예보", "provider": CONF["provider"] if CONF else None, "grid": {"nx": nx, "ny": ny},
+         "fetched_at": time.time(), "now": w_now, "hours": out, "gust_factor": GUST_FACTOR,
+         "base": {"ncst": nb.isoformat(), "ufcst": ufcst[0].isoformat() if ufcst else None, "vfcst": vfcst[0].isoformat() if vfcst else None}}
+    w["checks"] = evaluate(w)
+    w["level"] = max((c["status"] for c in w["checks"]), key=RANK.get, default="ok")
+    return w
+
+
+RANK = {"ok": 0, "info": 1, "caution": 2, "warn": 3, "stop": 4}
+
+
+def _peak(hours, key, n=6):
+    vals = [(h.get(key), h["time"]) for h in hours[:n] if h.get(key) is not None]
+    return max(vals, default=(None, None))
+
+
+def evaluate(w):
+    """법정 기준 판정. status: stop(지금 기준 넘음) · warn(6시간 안에 넘을 예보) · caution · ok"""
+    now, hours = w["now"], w["hours"]
+    checks = []
+
+    def add(cid, title, law, basis, now_v, peak, limit, unit, strict, msg_stop, msg_soon, note=""):
+        over = (lambda v: v is not None and (v > limit if strict else v >= limit))
+        st = "stop" if over(now_v) else "warn" if over(peak[0]) else "ok"
+        checks.append({"id": cid, "title": title, "law": law, "basis": basis, "status": st, "now": now_v, "peak6h": peak[0],
+                       "peak_time": peak[1], "limit": limit, "unit": unit, "op": "초과" if strict else "이상",
+                       "text": msg_stop if st == "stop" else msg_soon if st == "warn" else "", "note": note})
+
+    gnote = f"기상청 평균풍속 × {GUST_FACTOR}(설계값)로 추정 — 장비 풍속계가 우선"
+    add("tower_run", "타워크레인 운전", "안전보건규칙 제37조②", "법정", now["gust_est"], _peak(hours, "gust_est"), TOWER_RUN_MS, "m/s", True,
+        f"순간풍속 추정 {now['gust_est']} m/s — 타워크레인 운전 중지 기준({TOWER_RUN_MS} m/s 초과)", "6시간 안에 타워크레인 운전 중지 기준을 넘는 강풍 예보", gnote)
+    add("tower_erect", "타워크레인 설치·해체·점검", "안전보건규칙 제37조②", "법정", now["gust_est"], _peak(hours, "gust_est"), TOWER_ERECT_MS, "m/s", True,
+        f"순간풍속 추정 {now['gust_est']} m/s — 타워크레인 설치·수리·점검·해체 중지 기준({TOWER_ERECT_MS} m/s 초과)", "6시간 안에 타워크레인 설치·해체 중지 기준을 넘는 강풍 예보", gnote)
+    add("steel_wind", "철골작업 — 풍속", "안전보건규칙 제383조", "법정", now["wind"], _peak(hours, "wind"), STEEL_WIND_MS, "m/s", False,
+        f"풍속 {now['wind']} m/s — 철골작업 중지 기준({STEEL_WIND_MS} m/s 이상)", "6시간 안에 철골작업 중지 풍속 예보")
+    add("steel_rain", "철골작업 — 강우", "안전보건규칙 제383조", "법정", now["rain_1h"], _peak(hours, "rain"), STEEL_RAIN_MM, "mm/h", False,
+        f"강우 {now['rain_text']} — 철골작업 중지 기준({STEEL_RAIN_MM} mm/h 이상)", "6시간 안에 철골작업 중지 강우 예보")
+    snow_now = hours[0].get("snow") if hours and hours[0].get("snow") is not None else None
+    add("steel_snow", "철골작업 — 강설", "안전보건규칙 제383조", "법정", snow_now, _peak(hours, "snow"), STEEL_SNOW_CM, "cm/h", False,
+        "강설 1 cm/h 이상 — 철골작업 중지 기준", "6시간 안에 철골작업 중지 강설 예보", "강설량은 단기예보 1시간 신적설")
+    if now.get("feels_kind") == "summer" or any(h.get("feels_like") is not None and h.get("feels_like") >= HEAT_CAUTION_C for h in hours[:6]):
+        fl, pk = now.get("feels_like"), _peak(hours, "feels_like")
+        st = "warn" if fl is not None and fl >= HEAT_REST_C else "caution" if fl is not None and fl >= HEAT_CAUTION_C else \
+            "caution" if pk[0] is not None and pk[0] >= HEAT_CAUTION_C else "ok"
+        checks.append({"id": "heat", "title": "폭염작업", "law": "안전보건규칙 제559조·별표 13의2", "basis": "법정", "status": st,
+                       "now": fl, "peak6h": pk[0], "peak_time": pk[1], "limit": HEAT_CAUTION_C, "unit": "℃", "op": "이상",
+                       "text": f"체감온도 {fl} ℃ — 2시간마다 20분 이상 휴식({HEAT_REST_C} ℃ 이상)" if st == "warn"
+                       else f"체감온도 {fl if fl is not None and fl >= HEAT_CAUTION_C else pk[0]} ℃ — 폭염작업: 냉방·그늘·작업시간 조정·휴식 중 하나 이상({HEAT_CAUTION_C} ℃ 이상)" if st == "caution" else "",
+                       "note": "기상청 체감온도 식(기온·습도)으로 계산 — 작업장 온습도계 측정이 우선"})
+    lg = next((h for h in hours[:6] if h.get("lightning")), None)
+    checks.append({"id": "lightning", "title": "낙뢰", "law": "안전보건규칙 제37조①(일반 의무)", "basis": "참고", "status": "caution" if lg else "ok",
+                   "now": None, "peak6h": 1 if lg else 0, "peak_time": lg["time"] if lg else None, "limit": None, "unit": "", "op": "",
+                   "text": "6시간 안에 낙뢰 예보 — 크레인·고소작업·철골작업 주의" if lg else "", "note": "법정 수치 기준 없음"})
+    return checks
+
+
+# ───────────────────────── 캐시 · 공개 함수 ─────────────────────────
+_cache = {}            # (kind, nx, ny) → (받은 시각, 결과)
+_lock = threading.Lock()
+
+
+def _cached(kind, nx, ny, newest, fetch):
+    """fetch() → (발표 시각, 항목). 가진 자료가 최신 발표(newest)면 그대로, 아니면 RETRY_S 마다 다시"""
+    k = (kind, nx, ny)
+    with _lock:
+        hit = _cache.get(k)
+    if hit and (hit[1][0] >= newest or time.time() - hit[0] < RETRY_S):
+        return hit[1]
+    try:
+        val = fetch()
+    except KmaError:
+        if hit and kind == "vfcst":     # 단기예보는 실패해도 지난 값을 계속 쓴다
+            return hit[1]
+        raise
+    with _lock:
+        _cache[k] = (time.time(), val)
+    return val
+
+
+def get(lat, lon, now=None):
+    if not CONF:
+        raise KmaError("기상청 인증키가 없습니다 (backend/.env 의 SOCMAP_KMA_KEY).")
+    if not in_korea(lat, lon):
+        raise KmaError("현장 위치가 기상청 격자 범위(대한민국) 밖입니다.")
+    now = now or dt.datetime.now(KST)
+    nx, ny = latlon_to_grid(lat, lon)
+    ncst = _cached("ncst", nx, ny, ncst_bases(now)[0], lambda: _first("getUltraSrtNcst", ncst_bases(now), nx, ny, 20))
+    missing = []
+    try:
+        ufcst = _cached("ufcst", nx, ny, ufcst_bases(now)[0], lambda: _first("getUltraSrtFcst", ufcst_bases(now), nx, ny, 70))
+    except KmaError as e:
+        log.warning(f"초단기예보 실패: {e}")
+        ufcst = None
+        missing.append({"op": "getUltraSrtFcst", "label": OP_LABEL["getUltraSrtFcst"], "error": str(e)})
+    try:
+        vfcst = _cached("vfcst", nx, ny, vfcst_bases(now)[0], lambda: _first("getVilageFcst", vfcst_bases(now), nx, ny, 400))
+    except KmaError as e:
+        log.warning(f"단기예보 실패: {e}")
+        vfcst = None
+        missing.append({"op": "getVilageFcst", "label": OP_LABEL["getVilageFcst"], "error": str(e)})
+    w = build(nx, ny, ncst, ufcst, vfcst, now)
+    w["missing"] = missing     # 받지 못한 예보 — 화면이 「예보 없음(지금 기준 판정)」을 알림
+    return w
+
+
+def _http(fn):
+    try:
+        return fn()
+    except KmaError as e:
+        raise HTTPException(status_code=503 if not CONF else 502, detail=str(e))
+
+
+@router.get("/api/weather/config")
+def weather_config():
+    return {"enabled": bool(CONF), "provider": CONF["provider"] if CONF else None, "gust_factor": GUST_FACTOR,
+            "limits": {"tower_run": TOWER_RUN_MS, "tower_erect": TOWER_ERECT_MS, "steel_wind": STEEL_WIND_MS,
+                       "steel_rain": STEEL_RAIN_MM, "steel_snow": STEEL_SNOW_CM, "heat": [HEAT_CAUTION_C, HEAT_REST_C]}}
+
+
+@router.get("/api/weather")
+def weather_at(lat: float, lon: float):
+    """관리자 화면 — 현장 위치의 날씨 (서버 프로젝트가 아니어도 됨)"""
+    return _http(lambda: get(lat, lon))
+
+
+@router.get("/api/projects/{pid}/weather")
+def project_weather(pid: str, code: Optional[str] = None, x_manager_key: Optional[str] = Header(None)):
+    p = projects.store.get(pid)
+    projects._member(p, code, x_manager_key)
+    o = p.meta["origin"]
+    return _http(lambda: get(o["lat"], o["lon"]))
+
+
+# ───────────────────────── 현장 경보 ─────────────────────────
+WATCH_SEC = 10 * 60      # 확인 주기 — 실제로 기상청에 묻는 것은 새 발표가 있을 때뿐(_cached)
+
+
+def _signature(w):
+    """화면에 다시 보낼 만큼 바뀌었나 — 발표 시각과 판정"""
+    return (tuple(sorted((w.get("base") or {}).items())), tuple((c["id"], c["status"]) for c in w.get("checks", [])))
+
+
+async def background():
+    """접속한 사람이 있는 현장마다 10분에 한 번 확인 → 새 발표가 있거나 판정이 바뀌었을 때만 관리자·관리감독자에게 보내고,
+    법정 기준을 새로 넘거나(지금) 넘을 예보(6시간)가 나오면 경보 기록에 남긴다"""
+    if not CONF:
+        return
+    while True:
+        await asyncio.sleep(30)
+        for p in list(projects.store.projects.values()):
+            if not (p.managers or p.client_ws):
+                continue
+            if time.time() - getattr(p, "weather_at", 0) < WATCH_SEC:
+                continue
+            p.weather_at = time.time()
+            o = p.meta["origin"]
+            try:
+                w = await asyncio.to_thread(get, o["lat"], o["lon"])
+            except KmaError as e:
+                log.warning(f"[{p.meta['name']}] 날씨 실패: {e}")
+                continue
+            except Exception:
+                log.exception("날씨 처리 오류")
+                continue
+            p.weather = w
+            sig = _signature(w)
+            if sig == getattr(p, "weather_sig", None):
+                continue
+            p.weather_sig = sig
+            await p.to_managers({"type": "weather", "weather": w})
+            await weather_events(p, w)
+
+
+async def weather_events(p, w):
+    prev = getattr(p, "weather_state", {})
+    state = {}
+    for c in w["checks"]:
+        state[c["id"]] = c["status"]
+        if c["status"] in ("warn", "stop") and RANK[c["status"]] > RANK.get(prev.get(c["id"], "ok"), 0):
+            await p.event("weather", None, f"🌦️ 기상청: {c['text']} ({c['law']})", "warning", check=c["id"], status=c["status"])
+    p.weather_state = state

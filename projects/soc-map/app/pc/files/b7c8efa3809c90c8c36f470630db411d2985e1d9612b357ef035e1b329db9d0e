@@ -1,0 +1,195 @@
+"""하루 안전 기록 (2026-11-22) — 안전일지 · 산안법 대응 증빙용
+
+현장 폴더의 기록 세 가지를 날짜(이 PC 의 현지 시각) 하루로 묶는다.
+  events.jsonl      경보·SOS·신호 끊김·메시지 … (projects.Project.event 가 이미 남기던 것)
+  attendance.jsonl  출입: in(앱 연결) · out(연결 끝) · seen(5분마다 접속 중 확인) · reset(서버 시작)
+  acks.jsonl        관리자가 경보를 「확인」한 시각
+
+build() 는 파일을 읽지 않는 순수 함수(시험: test_report.py). 화면 그리기·CSV 는 관리자 화면(project.js)이 한다.
+"""
+import json
+import os
+import time
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta
+
+KIND_LABEL = {
+    "enter": "위험 구역 진입", "approach": "위험 구역 접근", "exit": "위험 구역 이탈",
+    "sos": "SOS 긴급 호출", "offline": "신호 끊김", "online": "연결 복구",
+    "leave": "현장 나가기", "intrusion": "장비 작업 반경에 작업자", "duplicate": "운전원 중복 연결", "operator": "장비 운전 시작",
+    "weather": "기상 경고", "broadcast": "전체 알림", "message": "개별 메시지", "ack_message": "메시지 확인",
+    "policy": "앱 정책 변경", "place": "대피 장소 등록", "gps_join": "GPS 합류 요청",
+    "op_state": "장비 상태 변경", "work_zone": "작업 구역 지정", "conflict": "장비 간섭", "evac_start": "대피 시작", "evac_arrived": "대피 도착", "evac_end": "대피 종료",
+}
+# 요약 숫자 칸 (순서대로 보고서 맨 위에)
+SUMMARY_KINDS = ["enter", "approach", "sos", "offline", "intrusion", "weather"]
+# 관리자 확인이 필요한 경보 (확인 안 된 것을 따로 센다)
+NEEDS_ACK = {"enter", "sos", "offline"}
+ROLE_LABEL = {"worker": "작업자", "operator": "운전원"}
+
+
+def read_jsonl(path):
+    out = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass   # 쓰다가 끊긴 마지막 줄 등은 건너뜀
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def append_jsonl(path, row):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def day_of(ts):
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+
+def day_bounds(date):
+    d = datetime.strptime(date, "%Y-%m-%d")
+    return d.timestamp(), (d + timedelta(days=1)).timestamp()
+
+
+def available_dates(events, attendance):
+    days = {day_of(r["ts"]) for r in events if isinstance(r.get("ts"), (int, float))}
+    days |= {day_of(r["ts"]) for r in attendance if isinstance(r.get("ts"), (int, float)) and r.get("kind") in ("in", "out", "seen")}
+    return sorted(days, reverse=True)
+
+
+def sessions(attendance, online_ids=(), now=None):
+    """사람마다 접속 구간 [(시작, 끝, 끝이 지금인지)] + 마지막 이름·역할.
+    out 없이 in 이 또 오거나 서버가 다시 켜지면(reset) 마지막으로 본 시각(in·seen)에서 끊는다."""
+    now = now or time.time()
+    rows = sorted((r for r in attendance if isinstance(r.get("ts"), (int, float))), key=lambda r: r["ts"])
+    state = {}     # id → {open, last}
+    info, out = {}, defaultdict(list)
+
+    def close(cid, end):
+        st = state.get(cid)
+        if st and st["open"] is not None:
+            out[cid].append((st["open"], max(st["open"], end), False))
+            st["open"] = None
+
+    for r in rows:
+        k = r.get("kind")
+        if k == "reset":
+            for cid, st in state.items():
+                close(cid, st["last"])
+            continue
+        cid = r.get("client_id")
+        if not cid:
+            continue
+        info[cid] = {"name": r.get("name") or "이름 없음", "role": r.get("role") or "worker",
+                     "equipment": r.get("equipment"), "sim": bool(r.get("sim"))}
+        st = state.setdefault(cid, {"open": None, "last": r["ts"]})
+        if k == "in":
+            close(cid, st["last"])
+            st["open"] = r["ts"]
+        elif k == "seen":
+            if st["open"] is None:
+                st["open"] = r["ts"]
+        elif k == "out":
+            close(cid, r["ts"])
+        st["last"] = r["ts"]
+    for cid, st in state.items():
+        if st["open"] is not None:
+            if cid in online_ids:
+                out[cid].append((st["open"], max(st["open"], now), True))
+                st["open"] = None
+            else:
+                close(cid, st["last"])
+    return info, out
+
+
+def _source(ev):
+    if ev.get("source"):
+        return str(ev["source"])
+    t = str(ev.get("text") or "")
+    if ev.get("kind") in ("enter", "approach") and " — " in t:
+        return t.split(" — ", 1)[1]
+    return None
+
+
+def build(meta, events, attendance, acks, date, online_ids=(), now=None):
+    now = now or time.time()
+    t0, t1 = day_bounds(date)
+    ack_at = {}
+    for a in acks:
+        if a.get("event_id") and isinstance(a.get("ts"), (int, float)):
+            ack_at.setdefault(a["event_id"], a["ts"])
+
+    day_events = []
+    for ev in sorted((e for e in events if isinstance(e.get("ts"), (int, float)) and t0 <= e["ts"] < t1), key=lambda e: e["ts"]):
+        k = ev.get("kind")
+        acked_ts = ack_at.get(ev.get("id"))
+        day_events.append({
+            "id": ev.get("id"), "ts": ev["ts"], "kind": k, "kind_label": KIND_LABEL.get(k, k or "기타"),
+            "severity": ev.get("severity", "info"), "name": ev.get("name"), "role": ev.get("role"),
+            "text": ev.get("text", ""), "source": _source(ev), "sim": bool(ev.get("sim")),
+            "needs_ack": k in NEEDS_ACK and ev.get("severity") in ("critical", "warning"),
+            "acked": bool(acked_ts or ev.get("acked")), "ack_ts": acked_ts,
+            "location": ev.get("location"),
+        })
+
+    counts = Counter(e["kind"] for e in day_events)
+    unacked = [e for e in day_events if e["needs_ack"] and not e["acked"]]
+    sos = [e for e in day_events if e["kind"] == "sos"]
+    sos_resp = [e["ack_ts"] - e["ts"] for e in sos if e["ack_ts"]]
+
+    info, sess = sessions(attendance, set(online_ids), now)
+    people = []
+    for cid, ss in sess.items():
+        clipped = [(max(a, t0), min(b, t1), live) for a, b, live in ss if b > t0 and a < t1]
+        if not clipped:
+            continue
+        i = info.get(cid, {})
+        live = t0 <= now < t1 and any(l for _, _, l in clipped)   # 지난 날짜는 자정에서 끊어 보여 줌
+        people.append({
+            "id": cid, "name": i.get("name"), "role": i.get("role"), "role_label": ROLE_LABEL.get(i.get("role"), "작업자"),
+            "equipment": i.get("equipment"), "sim": i.get("sim", False),
+            "first_in": min(a for a, _, _ in clipped), "last_out": None if live else max(b for _, b, _ in clipped),
+            "online_now": live, "minutes": round(sum(b - a for a, b, _ in clipped) / 60),
+            "sessions": len(clipped),
+        })
+    people.sort(key=lambda p: p["first_in"])
+
+    by_person = Counter()
+    for e in day_events:
+        if e["kind"] in ("enter", "approach") and e["name"]:
+            by_person[e["name"]] += 1 if e["kind"] == "approach" else 3   # 진입은 접근보다 무겁게
+    risk_people = []
+    for name, _ in by_person.most_common(5):
+        risk_people.append({"name": name,
+                            "enter": sum(1 for e in day_events if e["kind"] == "enter" and e["name"] == name),
+                            "approach": sum(1 for e in day_events if e["kind"] == "approach" and e["name"] == name)})
+    sources = Counter(e["source"] for e in day_events if e["kind"] in ("enter", "approach") and e["source"])
+
+    return {
+        "project": {"id": meta.get("id"), "name": meta.get("name")},
+        "date": date, "generated_at": now, "is_today": t0 <= now < t1,
+        "summary": {
+            "people": sum(1 for p in people if not p["sim"]), "sim_people": sum(1 for p in people if p["sim"]),
+            "operators": sum(1 for p in people if p["role"] == "operator"),
+            **{k: counts.get(k, 0) for k in SUMMARY_KINDS},
+            "unacked": len(unacked),
+            "sos_avg_response_s": round(sum(sos_resp) / len(sos_resp)) if sos_resp else None,
+            "has_sim": any(p["sim"] for p in people) or any(e["sim"] for e in day_events),
+        },
+        "attendance": people,
+        "risk_people": risk_people,
+        "risk_sources": [{"source": s, "count": n} for s, n in sources.most_common(5)],
+        "events": day_events,
+    }

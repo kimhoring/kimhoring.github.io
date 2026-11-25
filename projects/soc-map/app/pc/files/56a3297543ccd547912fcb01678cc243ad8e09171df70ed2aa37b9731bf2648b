@@ -1,0 +1,951 @@
+/* ═══════════════════════════════════════════════════════════════
+ *  SOC-MAP v14 — 관리감독자 앱 (휴대폰, /supervisor · 설치형 웹앱)
+ *
+ *  관리자 PC(/map)와 같은 관리자 WebSocket 으로 현장 인원 위치·경보를 실시간으로 받는다.
+ *  - 지도: 근로자·장비 운전원 실시간 위치(GPS), 장비 위험 반경, 대피 장소, 위험 진입자 깜박임
+ *  - 알림: 위험 구역 진입·신호 끊김 → 앱 알림 배너 + 짧은 알림음 + 휴대폰 알림(Web Push)
+ *          근로자 SOS → 어디서 일어났는지(건물·장비·대피 장소 기준 위치 설명) 전체 화면 + 너무 크지 않은 사이렌
+ *  - 지시: 개별 메시지 · 전체 알림 · 전체 대피(근로자 앱이 대피 장소까지 안전 경로 안내)
+ *  - 근로자 앱 정책(경보음 잠금 · 시연 모드 허용 · GPS 합류), 대피 장소 관리, 근로자 합류 QR, GPS 측량
+ *  로그인: 관리자 키 (PC 화면 QR 의 #p=…&k=… 또는 직접 입력). 키는 이 휴대폰에만 저장
+ * ═══════════════════════════════════════════════════════════════ */
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* noop */ } },
+  del(k) { try { localStorage.removeItem(k); } catch (e) { /* noop */ } },
+};
+const fmtM = (m) => (m == null ? '-' : m >= 1000 ? `${(m / 1000).toFixed(1)}km` : m >= 10 ? `${Math.round(m)}m` : `${m.toFixed(1)}m`);
+const timeStr = (ts) => new Date(ts * 1000).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const ago = (ts) => { const s = Math.max(0, Math.round(Date.now() / 1000 - ts)); return s < 60 ? `${s}초 전` : s < 3600 ? `${Math.floor(s / 60)}분 전` : `${Math.floor(s / 3600)}시간 전`; };
+
+// basemap.js · sitemap.js 가 쓰는 전역
+const S = { layers: { basemap: LS.get('socmap.sv.basemap', 'satellite') } };
+let DPR = window.devicePixelRatio || 1;
+let _frame = null, _drawQueued = false;
+function getFrame() { return _frame; }
+function requestRender() { if (!_drawQueued) { _drawQueued = true; requestAnimationFrame(() => { _drawQueued = false; draw(); }); } }
+
+const SV = {
+  pid: null, key: null, meta: null, site: null, planImg: null, contourPolys: [], markers: [], field: null,
+  clients: new Map(), events: [], places: [], policy: {}, survey: [],
+  ws: null, connected: false, retry: 0,
+  tab: 'map', focusId: null, sheetId: null, msgTo: 'all',
+  me: null, meOn: LS.get('socmap.sv.me', '0') === '1', meWatch: null,
+  sound: LS.get('socmap.sv.sound', '1') === '1', vibe: LS.get('socmap.sv.vibe', '1') === '1', wake: LS.get('socmap.sv.wake', '1') === '1',
+  audio: null, wakeLock: null, sirenTimer: null, alarmEv: null, unread: 0,
+  pickPlace: false, placeAt: null, placeKind: 'assembly', survey_: null, push: false,
+};
+const swReady = PWA.register();
+
+// 관리자 키 — 이 휴대폰에만. 같은 주소의 PC 화면(/map)에 저장된 키도 함께 찾는다
+const Keys = {
+  all() { try { return JSON.parse(LS.get('socmap.sv.keys', '{}')); } catch (e) { return {}; } },
+  get(pid) { try { return this.all()[pid] || JSON.parse(LS.get('socmap.v13.keys', '{}'))[pid] || null; } catch (e) { return null; } },
+  set(pid, key) { const a = this.all(); a[pid] = key; LS.set('socmap.sv.keys', JSON.stringify(a)); },
+  del(pid) { const a = this.all(); delete a[pid]; LS.set('socmap.sv.keys', JSON.stringify(a)); },
+};
+
+async function api(path, { method = 'GET', body } = {}) {
+  const headers = { 'X-Manager-Key': SV.key || '' };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const r = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, cache: 'no-store' });
+  const d = (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
+  if (!r.ok) throw new Error(r.status === 403 ? '관리자 키가 올바르지 않습니다.' : (d && d.detail) || `HTTP ${r.status}`);
+  return d;
+}
+
+// ═══════════════════════════════════════════════
+//  로그인
+// ═══════════════════════════════════════════════
+
+let _chosenPid = null;
+async function loadProjectList() {
+  try {
+    const list = await (await fetch('/api/projects', { cache: 'no-store' })).json();
+    $('prjList').innerHTML = list.length ? list.map(p => `<button class="card prj-pick" data-pid="${esc(p.id)}" style="--c:#3b82f6">
+        <span class="ic">🏗️</span><span class="body"><b>${esc(p.name)}</b><small>접속 ${p.online}명 · ${new Date(p.created_at * 1000).toLocaleDateString('ko-KR')}${Keys.get(p.id) ? ' · 🔑 저장된 키' : ''}</small></span></button>`).join('')
+      : '<div class="empty">서버에 현장이 없습니다. 관리자 PC에서 「새 프로젝트」를 만드세요.</div>';
+    const last = LS.get('socmap.sv.last', '');
+    if (list.some(p => p.id === last)) pickProject(last);
+  } catch (e) { $('prjList').innerHTML = '<div class="empty">서버에 연결할 수 없습니다.</div>'; }
+}
+function pickProject(pid) {
+  _chosenPid = pid;
+  document.querySelectorAll('.prj-pick').forEach(b => b.classList.toggle('on', b.dataset.pid === pid));
+  $('keyInput').value = Keys.get(pid) || '';
+  $('loginBtn').disabled = !$('keyInput').value.trim();
+}
+$('prjList').addEventListener('click', e => { const b = e.target.closest('[data-pid]'); if (b) pickProject(b.dataset.pid); });
+$('keyInput').addEventListener('input', () => { $('loginBtn').disabled = !(_chosenPid && $('keyInput').value.trim()); });
+$('loginBtn').addEventListener('click', async () => {
+  $('loginErr').textContent = ''; unlockAudio();
+  try { await login(_chosenPid, $('keyInput').value.trim()); } catch (e) { $('loginErr').textContent = e.message; }
+});
+
+// v14.10 서버 주소가 바뀌면 이 저장 공간도 새로 시작되므로 안드로이드 앱이 기억한 로그인을 먼저 채운다
+{ const p = PWA.profile(); if (p.pid && p.key) { Keys.set(p.pid, p.key); LS.set('socmap.sv.last', p.pid); } }
+
+async function login(pid, key) {
+  SV.pid = pid; SV.key = key;
+  let meta;
+  try { meta = await api(`/api/projects/${pid}`); } catch (e) { SV.pid = SV.key = null; throw e; }
+  if (!meta.join_code) { SV.pid = SV.key = null; throw new Error('관리자 키가 올바르지 않습니다.'); }
+  SV.meta = meta; SV.policy = meta.policy || {};
+  Keys.set(pid, key); LS.set('socmap.sv.last', pid); PWA.saveProfile({ pid, key });
+  _frame = new LocalFrame(meta.origin.lat, meta.origin.lon);
+  await loadSite();
+  $('login').hidden = true; $('main').hidden = false;
+  $('abProject').textContent = meta.name;
+  SV.clients = new Map(); SV.events = []; SV.unread = 0;
+  connect();
+  if (SV.meOn) startMe();
+  keepAwake();
+  PWA.keepAlive(true, `${meta.name} · 관제 중 (위험 진입·SOS 알림)`);
+  setTab('map'); renderAll();
+  syncPush();
+  loadWeather();
+}
+
+function logout(reason) {
+  PWA.saveProfile({});
+  if (SV.ws) { SV.ws.onclose = null; try { SV.ws.close(); } catch (e) { /* noop */ } }
+  SV.ws = null; SV.connected = false; SV.pid = null; SV.key = null;
+  stopMe(); stopSiren(); hideAlarm();
+  if (SV.wakeLock) SV.wakeLock.release().catch(() => {});
+  PWA.keepAlive(false);
+  setWeather(null);
+  $('main').hidden = true; $('login').hidden = false;
+  if (reason) $('loginErr').textContent = reason;
+  loadProjectList();
+}
+$('logoutBtn').addEventListener('click', () => { if (confirm('로그아웃할까요? 이 휴대폰으로 경보를 받지 않게 됩니다.')) logout(); });
+
+/** 현장 배치 (관리자 PC가 공유한 도면·건물·장비) */
+async function loadSite() {
+  try {
+    const site = await api(`/api/projects/${SV.pid}/site`);
+    SV.site = site;
+    SV.markers = site.doc.markers || [];
+    SV.contourPolys = (site.doc.contours || []).map(flattenContour);
+    if (site.places) SV.places = site.places;
+    if (site.planVersion && site.phonePlan) {
+      const img = new Image();
+      img.onload = () => { SV.planImg = img; requestRender(); };
+      img.src = `/api/projects/${SV.pid}/plan?v=${site.planVersion}&code=${encodeURIComponent(SV.meta.join_code)}`;
+    } else SV.planImg = null;
+  } catch (e) { SV.site = null; SV.markers = []; SV.contourPolys = []; }
+  rebuildLive();
+  requestRender();
+}
+
+/** 운전원 휴대폰 위치 = 장비 실시간 위치 → 위험 반경 */
+function rebuildLive() {
+  if (!SV.site) { SV.field = null; return; }
+  const ops = [...SV.clients.values()].filter(c => c.role === 'operator' && c.online !== false && c.x != null);
+  const markers = SV.markers.map(m => {
+    const op = ops.find(c => c.equipment === m.id);
+    if (!op) return m;
+    const P = equipPoseOf(op, m);   // 2026-11-25 도보면 장비는 마지막 자리에 정지, 작업 중이면 위험 구역은 작업 위치에 고정
+    return { ...m, x: P.x, y: P.y, heading: P.heading, _live: true, _by: op.name, _plan: { x: m.x, y: m.y }, _workAt: P.workAt, _liveState: op.op_state, _v: P.v };
+  });
+  SV.field = new RiskField(markers, SV.site.doc.siteEnvironment || { windSpeed: 0, envZones: [] });
+}
+
+function siteExtent() {
+  if (SV.site && SV.site.extent) return SV.site.extent;
+  const pts = [...SV.clients.values()].filter(c => c.x != null);
+  if (!pts.length) return { minX: -100, minY: -100, maxX: 100, maxY: 100, w: 200, h: 200 };
+  const xs = pts.map(c => c.x), ys = pts.map(c => c.y);
+  const minX = Math.min(...xs) - 40, maxX = Math.max(...xs) + 40, minY = Math.min(...ys) - 40, maxY = Math.max(...ys) + 40;
+  return { minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY };
+}
+
+// ═══════════════════════════════════════════════
+//  실시간 연결
+// ═══════════════════════════════════════════════
+
+function connect() {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/p/${SV.pid}/manager?key=${encodeURIComponent(SV.key)}`);
+  SV.ws = ws;
+  ws.onopen = () => { if (SV.retry > 0) toast('서버 연결이 복구되었습니다.', 'ok'); SV.connected = true; SV.retry = 0; renderStatus(); };
+  ws.onmessage = (e) => { if (SV.ws === ws) onMessage(JSON.parse(e.data)); };
+  ws.onclose = (e) => {
+    if (SV.ws !== ws) return;
+    const was = SV.connected;
+    SV.connected = false; renderStatus();
+    if (e.code === 4403) { logout('관리자 키가 거부되었습니다. 키를 다시 확인하세요.'); return; }
+    if (was) { toast('서버 연결이 끊겼습니다. 자동으로 다시 연결합니다.', 'warn'); vibrate([300, 100, 300]); }
+    if (SV.pid) setTimeout(() => { if (SV.pid && SV.ws === ws) connect(); }, Math.min(10000, 1000 * 2 ** SV.retry++));
+    if (SV.retry >= 2) followServer();
+  };
+  ws.onerror = () => ws.close();
+}
+
+// v14.10 노트북을 다시 켜 주소가 바뀌면 안내판을 보고 저절로 따라간다
+let _followTimer = null;
+function followServer() {
+  if (_followTimer || !Directory.enabled()) return;
+  _followTimer = setInterval(async () => {
+    if (!SV.pid || SV.connected) { clearInterval(_followTimer); _followTimer = null; return; }
+    const url = await Directory.find();
+    if (!url || url === location.origin || !SV.pid || SV.connected) return;
+    PWA.open(`${url}/supervisor#p=${encodeURIComponent(SV.pid)}&k=${encodeURIComponent(SV.key)}`);
+  }, 10000);
+}
+
+function onMessage(m) {
+  switch (m.type) {
+    case 'snapshot':
+      SV.clients = new Map(m.clients.map(c => [c.id, c]));
+      SV.events = m.events.slice().reverse();
+      SV.places = m.places || SV.places; SV.policy = m.policy || SV.policy; SV.survey = m.survey || [];
+      SV.evac = m.evac || null; SV.corr = m.corr || null;
+      rebuildLive(); renderPolicy(); renderPlaces();
+      if (m.weather) setWeather(m.weather);
+      if (SV.pendingEv) { const ev = SV.events.find(x => x.id === SV.pendingEv); SV.pendingEv = null; if (ev) setTimeout(() => openEvent(ev), 300); }
+      break;
+    case 'client':
+      SV.clients.set(m.client.id, m.client);
+      if (m.client.role === 'operator') rebuildLive();
+      if (SV.sheetId === m.client.id) renderPerson();
+      break;
+    case 'left': SV.clients.delete(m.id); rebuildLive(); break;
+    case 'event':
+      SV.events.unshift(m.event); SV.events = SV.events.slice(0, 200);
+      onEvent(m.event);
+      break;
+    case 'ack':
+      for (const ev of SV.events) if (ev.id === m.event_id) ev.acked = true;
+      if (SV.alarmEv && SV.alarmEv.id === m.event_id) nextAlarm();
+      break;
+    case 'places': SV.places = m.places || []; renderPlaces(); break;
+    case 'policy': SV.policy = m.policy || {}; renderPolicy(); break;
+    case 'evac': SV.evac = m.evac || null; break;
+    case 'corr': SV.corr = m.corr || null; renderRef(); break;
+    case 'weather': setWeather(m.weather); break;
+    case 'site': loadSite(); toast('관리자 PC가 현장 배치를 갱신했습니다.'); break;
+    case 'survey': SV.survey = m.survey || []; break;
+  }
+  renderStatus(); renderBadges(); renderEvac();
+  if (SV.tab === 'people') renderPeople();
+  if (SV.tab === 'alerts') renderEvents();
+  requestRender();
+}
+
+const NOTIF_ICON = '/app/pwa/icons/supervisor-192.png';
+/** 알림 단계: SOS = 위치와 함께 전체 화면 + 사이렌(작게), 그 밖의 긴급 = 앱 알림 배너 + 알림음, 접근 경고 = 소리 없는 토스트 */
+function onEvent(ev) {
+  // 안드로이드 앱에서는 「휴대폰 알림」을 끈 경우 알림을 띄우지 않는다 (웹은 알림 권한이 있을 때만 표시됨)
+  const hidden = document.hidden && (SV.push || !PWA.native), url = `/supervisor#ev=${ev.id}`;
+  if (ev.kind === 'sos') {
+    showAlarm(ev);
+    if (hidden) PWA.notify(`🆘 긴급 호출 — ${ev.name || '근로자'}`, { body: ev.location ? `📍 ${ev.location}` : ev.text, tag: ev.id, renotify: true, requireInteraction: true, vibrate: [400, 150, 400, 150, 400], icon: NOTIF_ICON, data: { url, event_id: ev.id } });
+  } else if (ev.severity === 'critical') {
+    notifyBanner(ev); chime(); vibrate([120, 60, 120]);
+    if (hidden) PWA.notify(`SOC-MAP · ${SV.meta.name}`, { body: ev.text, tag: ev.id, vibrate: [150, 80, 150], icon: NOTIF_ICON, data: { url, event_id: ev.id } });
+  } else if (ev.severity === 'warning') {
+    toast(ev.text, 'warn');
+  }
+  if (SV.tab !== 'alerts' && ev.severity !== 'info') SV.unread++;
+}
+
+/** 휴대폰 상단 알림처럼 내려오는 배너 — 누르면 지도에서 그 위치 */
+function notifyBanner(ev) {
+  const el = document.createElement('button');
+  el.className = 'toast notif';
+  const title = { enter: '위험 구역 진입', offline: '신호 끊김' }[ev.kind] || '안전 알림';
+  el.innerHTML = `<img src="${NOTIF_ICON}" alt=""><span><b>${esc(title)}</b><small>${esc(String(ev.text).replace(/^\S+\s/, ''))}</small></span><time>${timeStr(ev.ts).slice(0, 5)}</time>`;
+  el.onclick = () => { el.remove(); focusEvent(ev); };
+  $('toasts').appendChild(el);
+  setTimeout(() => el.classList.add('out'), 6000);
+  setTimeout(() => el.remove(), 6500);
+}
+function focusEvent(ev) {
+  setTab('map');
+  if (ev && ev.x != null) { SV.focusId = ev.client_id; map.centerOn(ev.x, ev.y, map.fitScale(siteExtent()) * 2.5); }
+}
+/** 휴대폰 알림을 눌러 들어왔을 때: 확인 안 한 SOS 면 경보 화면, 아니면 지도에서 위치 */
+function openEvent(ev) { if (ev.kind === 'sos' && !ev.acked) showAlarm(ev); else focusEvent(ev); }
+
+// ── SOS 경보 화면 ──
+function unackedCritical() { return SV.events.filter(e => e.severity === 'critical' && !e.acked); }
+function unackedSos() { return SV.events.filter(e => e.kind === 'sos' && !e.acked); }
+function showAlarm(ev) {
+  SV.alarmEv = ev;
+  $('alarmTitle').textContent = `🆘 긴급 호출 — ${ev.name || '근로자'}`;
+  $('alarmText').textContent = ev.location ? `📍 ${ev.location}` : ev.x != null ? '📍 지도에서 위치를 확인하세요' : '📍 위치 정보 없음 (근로자 휴대폰이 GPS를 아직 못 잡음)';
+  const more = unackedSos().length - 1;
+  $('alarmMeta').textContent = [timeStr(ev.ts), ev.acc >= 1 ? `위치 오차 ±${Math.round(ev.acc)} m` : '', ev.fix_age > 15 ? `마지막 위치 ${ev.fix_age}초 전` : '',
+    more > 0 ? `확인 안 한 긴급 호출 ${more}건 더` : ''].filter(Boolean).join(' · ');
+  $('alarmLocate').hidden = ev.x == null;
+  $('alarmOv').hidden = false;
+  if (SV.sirenFor !== ev.id) { SV.sirenFor = ev.id; siren(); }
+  requestRender();
+}
+function hideAlarm() { $('alarmOv').hidden = true; SV.alarmEv = null; SV.sirenFor = null; stopSiren(); }
+function nextAlarm() { const left = unackedSos(); if (left.length) showAlarm(left[0]); else hideAlarm(); }
+function ack(ev) { if (!ev || ev.acked) return; ev.acked = true; wsSend({ type: 'ack', event_id: ev.id }); }
+$('alarmAck').addEventListener('click', () => { ack(SV.alarmEv); nextAlarm(); renderStatus(); renderBadges(); if (SV.tab === 'alerts') renderEvents(); });
+$('alarmLocate').addEventListener('click', () => {
+  const ev = SV.alarmEv; ack(ev); hideAlarm();
+  setTab('map');
+  if (ev && ev.x != null) { SV.focusId = ev.client_id; map.centerOn(ev.x, ev.y, map.fitScale(siteExtent()) * 2.5); }
+  renderStatus(); renderBadges();
+});
+navigator.serviceWorker && navigator.serviceWorker.addEventListener('message', e => {   // 휴대폰 알림을 눌러 들어온 경우
+  if (e.data && e.data.type === 'notification-click') { const ev = SV.events.find(x => x.id === e.data.event_id); if (ev) openEvent(ev); }
+});
+
+function wsSend(obj) {
+  if (SV.ws && SV.ws.readyState === 1) { SV.ws.send(JSON.stringify(obj)); return true; }
+  toast('서버에 연결되어 있지 않습니다.', 'err');
+  return false;
+}
+
+// ═══════════════════════════════════════════════
+//  화면 렌더
+// ═══════════════════════════════════════════════
+
+function counts() {
+  const on = [...SV.clients.values()].filter(c => c.online !== false);
+  const workers = on.filter(c => !isDriving(c));   // 장비에서 내린 운전원은 작업자
+  return { workers: workers.length, ops: on.length - workers.length,
+    warn: workers.filter(c => c.level === 'warning').length, danger: workers.filter(c => c.level === 'danger').length,
+    off: [...SV.clients.values()].filter(c => c.online === false).length, crit: unackedCritical().length, sos: unackedSos().length };
+}
+function renderStatus() {
+  const k = counts(), el = $('status');
+  const color = !SV.connected ? '#64748b' : k.sos || k.danger || k.crit ? '#ef4444' : k.warn ? '#f97316' : '#10b981';
+  el.style.setProperty('--lv', color);
+  el.classList.toggle('alarm', !!k.sos);   // 깜박임은 확인 안 한 SOS 만
+  $('lvText').textContent = !SV.connected ? '📵 서버 연결 중…' : k.sos ? `🆘 긴급 호출 ${k.sos}건 — 확인하세요` : k.danger ? `🚨 위험 구역 진입 ${k.danger}명`
+    : k.crit ? `🔔 확인하지 않은 알림 ${k.crit}건` : k.warn ? `⚠️ 위험 구역 접근 ${k.warn}명` : '✅ 모두 안전';
+  $('kpis').innerHTML = `<span><b>${k.workers}</b>작업자</span><span><b>${k.ops}</b>운전 장비</span><span class="${k.warn ? 'w' : ''}"><b>${k.warn}</b>접근</span><span class="${k.danger ? 'd' : ''}"><b>${k.danger}</b>진입</span><span class="${k.off ? 'w' : ''}"><b>${k.off}</b>끊김</span>`;
+  const c = $('indConn'); c.className = 'ind ' + (SV.connected ? 'ok' : 'bad'); c.querySelector('span').textContent = SV.connected ? '연결' : '끊김';
+  const p = $('indPush'); p.className = 'ind ' + (SV.push ? 'ok' : 'warn'); p.querySelector('span').textContent = SV.push ? '알림' : '알림 꺼짐';
+}
+$('status').addEventListener('click', () => { const k = counts(); if (k.sos) nextAlarm(); else if (k.crit) setTab('alerts'); else if (k.danger || k.warn) setTab('people'); });
+
+function renderBadges() {
+  const k = counts();
+  $('alertBadge').hidden = !(SV.unread || k.crit); $('alertBadge').textContent = k.crit || SV.unread;
+  $('peopleBadge').hidden = !k.danger; $('peopleBadge').textContent = k.danger;
+}
+
+function sortedClients() {
+  return [...SV.clients.values()].sort((a, b) => (b.online !== false) - (a.online !== false)
+    || LEVELS[b.level || 'safe'].rank - LEVELS[a.level || 'safe'].rank || String(a.name).localeCompare(b.name));
+}
+function eqLabel(id) { return (SV.markers.find(m => m.id === id) || {}).label || '장비 미지정'; }
+function clientDetail(c) {
+  const off = c.online === false, lv = LEVELS[c.level || 'safe'];
+  if (off) return `신호 끊김 · ${ago(c.last_seen)}`;
+  if (isDriving(c)) return `🚜 ${esc(eqLabel(c.equipment))}${OP_STATES[c.op_state] ? ` · ${OP_STATES[c.op_state].label}` : ''}${(c.intrusions || []).length ? ` · <b class="d">반경 내 ${c.intrusions.length}명</b>` : ''}${c.speed ? ` · ${(c.speed * 3.6).toFixed(1)}km/h` : ''}`;
+  return `${c.role === 'operator' ? `🚶 하차 · 도보 (${esc(eqLabel(c.equipment))} 정지) · ` : ''}${c.inside_site === false ? '현장 밖' : lv.label}${c.floor != null ? ` · ${floorText(c.floor)}` : ''}${c.nearest_m != null && c.level !== 'danger' ? ` · 위험구역 ${c.nearest_m}m` : ''}${c.source && (c.level === 'danger' || c.level === 'warning') ? ` · ${esc(c.source)}` : ''}`;
+}
+function renderPeople() {
+  const list = sortedClients(), k = counts();
+  $('peopleSummary').textContent = `작업자 ${k.workers}명 · 운전 장비 ${k.ops}대${k.off ? ` · 신호 끊김 ${k.off}` : ''}`;
+  $('peopleList').innerHTML = list.length ? list.map(c => {
+    const off = c.online === false, color = off ? '#64748b' : isDriving(c) ? '#f59e0b' : LEVELS[c.level || 'safe'].color;
+    const acc = !off && c.sigma != null ? `±${c.sigma.toFixed(1)}m` : '';
+    return `<button class="card person ${off ? 'off' : ''} ${c.level === 'danger' && !off ? 'danger' : ''}" data-cid="${esc(c.id)}" style="--c:${color}">
+      <span class="ic">${isDriving(c) ? '🚜' : c.role === 'operator' ? '🚶' : '👷'}</span>
+      <span class="body"><b>${esc(c.name)}${c.sim ? ' <em>시연</em>' : ''}</b><small>${clientDetail(c)}</small></span>
+      <span class="dist">${acc}<small>${c.battery != null ? `🔋${c.battery}%` : ''}</small></span></button>`;
+  }).join('') : '<div class="empty">접속한 인원이 없습니다.<br>「더보기 → 근로자 합류 QR」을 근로자에게 보여 주세요.</div>';
+}
+$('peopleList').addEventListener('click', e => { const b = e.target.closest('[data-cid]'); if (b) openPerson(b.dataset.cid); });
+
+function renderEvents() {
+  SV.unread = 0; renderBadges();
+  const crit = unackedCritical().length;
+  $('ackAllBtn').hidden = !crit; $('ackAllBtn').textContent = `긴급 ${crit}건 모두 확인`;
+  $('eventList').innerHTML = SV.events.length ? SV.events.slice(0, 120).map(ev => {
+    const c = ev.severity === 'critical' ? '#ef4444' : ev.severity === 'warning' ? '#f97316' : '#3b82f6';
+    return `<div class="card ev ${ev.severity === 'critical' && !ev.acked ? 'unack' : ''} ${ev.acked ? 'acked' : ''}" data-ev="${esc(ev.id)}" style="--c:${c}">
+      <span class="body"><b>${esc(ev.text)}</b><small>${timeStr(ev.ts)}${ev.acked ? ' · 확인됨' : ''}</small></span>
+      ${ev.severity === 'critical' && !ev.acked ? '<button class="btn-sm" data-evack>확인</button>' : ev.x != null ? '<span class="chev">📍</span>' : ''}</div>`;
+  }).join('') : '<div class="empty">아직 경보가 없습니다.</div>';
+}
+$('eventList').addEventListener('click', e => {
+  const item = e.target.closest('[data-ev]'); if (!item) return;
+  const ev = SV.events.find(x => x.id === item.dataset.ev); if (!ev) return;
+  if (e.target.closest('[data-evack]')) { ack(ev); if (SV.alarmEv && SV.alarmEv.id === ev.id) nextAlarm(); renderEvents(); renderStatus(); return; }
+  if (ev.x != null) { setTab('map'); SV.focusId = ev.client_id; map.centerOn(ev.x, ev.y, map.fitScale(siteExtent()) * 2.5); }
+});
+$('ackAllBtn').addEventListener('click', () => { unackedCritical().forEach(ack); hideAlarm(); renderEvents(); renderStatus(); });
+
+function renderPolicy() {
+  $('polAlarm').checked = !!SV.policy.alarm_locked;
+  $('polSim').checked = !!SV.policy.allow_sim;
+  $('polGps').checked = SV.meta ? SV.meta.gps_join !== false : true;
+}
+async function patchProject(body, revert) {
+  try { const m = await api(`/api/projects/${SV.pid}`, { method: 'PATCH', body }); SV.meta = { ...SV.meta, ...m }; SV.policy = m.policy || SV.policy; toast('설정을 바꿨습니다. 근로자 앱에 바로 적용됩니다.', 'ok'); }
+  catch (e) { revert(); toast('설정을 바꾸지 못했습니다: ' + e.message, 'err'); }
+  renderPolicy();
+}
+$('polAlarm').addEventListener('change', e => patchProject({ policy: { alarm_locked: e.target.checked } }, () => { e.target.checked = !e.target.checked; }));
+$('polSim').addEventListener('change', e => patchProject({ policy: { allow_sim: e.target.checked } }, () => { e.target.checked = !e.target.checked; }));
+$('polGps').addEventListener('change', e => patchProject({ gps_join: e.target.checked }, () => { e.target.checked = !e.target.checked; }));
+
+function renderPlaces() {
+  const here = SV.me;
+  const PK = { assembly: ['🟢', '대피 장소', '#10b981'], dest: ['📍', '목적지', '#8b5cf6'], ref: ['📡', '기준점', '#38bdf8'] };
+  $('placeList').innerHTML = SV.places.length ? SV.places.map(p => `<div class="card" style="--c:${(PK[p.kind] || PK.dest)[2]}">
+      <span class="ic">${(PK[p.kind] || PK.dest)[0]}</span>
+      <span class="body"><b>${esc(p.name)}</b><small>${(PK[p.kind] || PK.dest)[1]}${here ? ` · 나와 ${fmtM(Math.hypot(p.x - here.x, p.y - here.y))}` : ''}</small></span>
+      <button class="btn-sm" data-place-go="${esc(p.id)}">📍</button><button class="btn-sm danger" data-place-del="${esc(p.id)}">삭제</button></div>`).join('')
+    : '<div class="empty">대피 장소가 없습니다. 대피 지시 때 근로자 앱이 경로를 안내하려면 1곳 이상 등록하세요.</div>';
+}
+$('placeList').addEventListener('click', async e => {
+  const del = e.target.closest('[data-place-del]'), go = e.target.closest('[data-place-go]');
+  if (del) {
+    const p = SV.places.find(x => x.id === del.dataset.placeDel);
+    if (!p || !confirm(`「${p.name}」을(를) 지울까요?`)) return;
+    try { await api(`/api/projects/${SV.pid}/places/${p.id}`, { method: 'DELETE' }); } catch (err) { toast(err.message, 'err'); }
+  } else if (go) {
+    const p = SV.places.find(x => x.id === go.dataset.placeGo);
+    if (p) { setTab('map'); map.centerOn(p.x, p.y, map.fitScale(siteExtent()) * 2); }
+  }
+});
+
+function renderMore() {
+  $('moreSub').textContent = SV.meta ? `${SV.meta.name} · 참여 코드 ${SV.meta.join_code}` : '';
+  $('soundToggle').checked = SV.sound; $('vibeToggle').checked = SV.vibe; $('wakeToggle').checked = SV.wake; $('meToggle').checked = SV.meOn;
+  $('pushToggle').checked = SV.push;
+  $('layerName').textContent = S.layers.basemap === 'none' ? '끄기' : (basemapDef(S.layers.basemap) || {}).label || '';
+  $('installHint').textContent = PWA.hint();
+  renderPolicy(); renderPlaces();
+}
+function renderAll() { renderStatus(); renderBadges(); renderMore(); requestRender(); }
+
+function setTab(tab) {
+  SV.tab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-pane').forEach(p => { p.hidden = p.dataset.tab !== tab; });
+  $('bcBtn').hidden = tab === 'more';
+  if (tab === 'map') { map.resize(); requestRender(); }
+  if (tab === 'people') renderPeople();
+  if (tab === 'alerts') renderEvents();
+  if (tab === 'more') renderMore();
+}
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => setTab(t.dataset.tab)));
+setInterval(() => { if (!SV.pid) return; if (SV.tab === 'people') renderPeople(); renderStatus(); }, 5000);
+
+// ── 작업자 상세 ──
+function openPerson(cid) { SV.sheetId = cid; renderPerson(); $('personSheet').hidden = false; }
+function renderPerson() {
+  const c = SV.clients.get(SV.sheetId);
+  if (!c) { $('personSheet').hidden = true; SV.sheetId = null; return; }
+  const off = c.online === false, lv = LEVELS[c.level || 'safe'];
+  const rows = [
+    ['상태', off ? `신호 끊김 (${ago(c.last_seen)})` : isDriving(c) ? `장비 운전 중${OP_STATES[c.op_state] ? ` · ${OP_STATES[c.op_state].label}` : ''}` : c.role === 'operator' ? `하차 · 도보 — ${lv.label}` : lv.label],
+    isDriving(c) ? ['장비', esc(eqLabel(c.equipment))] : ['위험 구역까지', c.level === 'danger' ? '안쪽' : c.nearest_m != null ? `${c.nearest_m} m` : '-'],
+    c.source ? ['원인', esc(c.source)] : null,
+    ['위치 정확도', c.sigma != null ? `±${c.sigma.toFixed(1)} m${c.acc ? ` (GPS ±${Math.round(c.acc)} m)` : ''}` : '-'],
+    ['이동 속도', c.speed != null ? `${(c.speed * 3.6).toFixed(1)} km/h` : '-'],
+    ['배터리', c.battery != null ? `${c.battery}%` : '-'],
+    ['마지막 보고', c.last_seen ? ago(c.last_seen) : '-'],
+    SV.me && c.x != null ? ['나와의 거리', fmtM(Math.hypot(c.x - SV.me.x, c.y - SV.me.y))] : null,
+  ].filter(Boolean);
+  $('personBody').innerHTML = `<div class="person-head" style="--c:${off ? '#64748b' : isDriving(c) ? '#f59e0b' : lv.color}">
+      <span class="ic">${c.role === 'operator' ? '🚜' : '👷'}</span><div><h2>${esc(c.name)}${c.sim ? ' <em>시연</em>' : ''}</h2><small>${c.role === 'operator' ? '장비 운전원' : '작업자'}</small></div></div>
+    <div class="kv">${rows.map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join('')}</div>`;
+  $('personMsg').disabled = off;
+  $('personLocate').disabled = c.x == null;
+}
+$('personMsg').addEventListener('click', () => { const id = SV.sheetId; $('personSheet').hidden = true; openMsg(id); });
+$('personLocate').addEventListener('click', () => {
+  const c = SV.clients.get(SV.sheetId); $('personSheet').hidden = true;
+  if (c && c.x != null) { setTab('map'); SV.focusId = c.id; map.centerOn(c.x, c.y, map.fitScale(siteExtent()) * 2.5); }
+});
+
+// ── 메시지 · 전체 알림 · 대피 지시 ──
+const QUICK_ALL = ['장비 작업 시작 — 반경 접근 금지', '양중 작업 중 — 하부 통행 금지', '휴식 시간입니다', '작업 종료 — 현장 정리'];
+const QUICK_ONE = ['위험 구역에서 즉시 벗어나세요.', '장비 작업을 일시 중지하세요.', '관리감독자에게 연락하세요.', '확인했습니다.'];
+function openMsg(to = 'all') {
+  SV.msgTo = to;
+  const c = to === 'all' ? null : SV.clients.get(to);
+  $('msgTitle').textContent = c ? `💬 ${c.name}에게` : '📢 전체 알림';
+  $('evacLabel').textContent = c ? `🚨 ${c.name} 즉시 대피` : '🚨 전체 대피 지시';
+  $('msgText').value = '';
+  $('msgQuick').innerHTML = (c ? QUICK_ONE : QUICK_ALL).map(q => `<button data-q="${esc(q)}">${esc(q)}</button>`).join('');
+  $('msgSheet').hidden = false;
+}
+$('bcBtn').addEventListener('click', () => openMsg('all'));
+$('msgQuick').addEventListener('click', e => { const b = e.target.closest('[data-q]'); if (b) $('msgText').value = b.dataset.q; });
+function sendMsg(text, level) {
+  if (!text) { toast('보낼 내용을 입력하세요.', 'warn'); return; }
+  if (wsSend({ type: 'message', to: SV.msgTo, text, level })) {
+    $('msgSheet').hidden = true;
+    toast(SV.msgTo === 'all' ? '전체 인원에게 보냈습니다.' : '보냈습니다.', 'ok');
+  }
+}
+$('msgSend').addEventListener('click', () => sendMsg($('msgText').value.trim(), 'info'));
+// 대피 지시는 실수로 누르지 않도록 1.2초 길게 누르기
+(() => {
+  const btn = $('evacHold'); let t = null, t0 = 0;
+  const up = () => { clearInterval(t); t = null; btn.style.setProperty('--p', 0); };
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault(); t0 = Date.now();
+    t = setInterval(() => {
+      const p = Math.min(1, (Date.now() - t0) / 1200); btn.style.setProperty('--p', p * 100);
+      if (p >= 1) { up(); vibrate([100, 50, 100]); sendMsg('🚨 즉시 작업을 중지하고 지정된 대피 장소로 이동하세요.', 'evacuate'); }
+    }, 30);
+  });
+  btn.addEventListener('pointerup', up); btn.addEventListener('pointerleave', up); btn.addEventListener('contextmenu', e => e.preventDefault());
+})();
+
+// ── 대피 장소 추가 ──
+function openPlace(pos) {
+  SV.placeAt = pos; SV.pickPlace = false; setChip();
+  $('placeName').value = ''; $('placeErr').textContent = '';
+  document.querySelectorAll('#placeKind button').forEach(b => b.classList.toggle('on', b.dataset.kind === SV.placeKind));
+  $('placeSheet').hidden = false; requestRender();
+}
+$('placeKind').addEventListener('click', e => { const b = e.target.closest('[data-kind]'); if (!b) return; SV.placeKind = b.dataset.kind; document.querySelectorAll('#placeKind button').forEach(x => x.classList.toggle('on', x === b)); });
+$('placeSave').addEventListener('click', async () => {
+  try {
+    await api(`/api/projects/${SV.pid}/places`, { method: 'POST', body: { kind: SV.placeKind, name: $('placeName').value.trim(), x: SV.placeAt.x, y: SV.placeAt.y } });
+    $('placeSheet').hidden = true; SV.placeAt = null; toast('장소를 추가했습니다. 근로자 앱에 바로 표시됩니다.', 'ok'); requestRender();
+  } catch (e) { $('placeErr').textContent = e.message; }
+});
+$('placeMapBtn').addEventListener('click', () => { SV.pickPlace = true; setTab('map'); setChip(); });
+$('placeHereBtn').addEventListener('click', () => {
+  if (!SV.me) { toast('내 위치를 확인하는 중입니다. 「내 위치 표시」를 켜고 잠시 기다리세요.', 'warn'); setMe(true); return; }
+  openPlace({ x: SV.me.x, y: SV.me.y });
+});
+
+// ═══════════════════════════════════════════════
+//  지도
+// ═══════════════════════════════════════════════
+
+const map = new SiteMap($('map'), { onTap: onMapTap, onLongPress: (w) => openPlace(w) });
+window.addEventListener('resize', () => { if (map.resize()) requestRender(); });
+$('fitBtn').addEventListener('click', () => { map.setMode('fit'); requestRender(); });
+$('meBtn').addEventListener('click', () => { if (!SV.meOn) { setMe(true); toast('내 위치를 찾는 중…'); return; } if (SV.me) map.centerOn(SV.me.x, SV.me.y, map.fitScale(siteExtent()) * 2); });
+$('zoomInBtn').addEventListener('click', () => map.zoomCenter(1.6));
+$('zoomOutBtn').addEventListener('click', () => map.zoomCenter(1 / 1.6));
+
+function setChip() {
+  const t = SV.pickPlace ? '📍 대피 장소·목적지로 쓸 지점을 누르세요' : '';
+  $('chip').textContent = t; $('chip').hidden = !t;
+}
+function onMapTap(w, sp) {
+  if (SV.pickPlace) { openPlace(w); return; }
+  const people = [...SV.clients.values()].filter(c => c.x != null);
+  const c = map.hit(people, sp);
+  if (c) { SV.focusId = c.id; openPerson(c.id); requestRender(); return; }
+  const p = map.hit(SV.places, sp);
+  if (p) { toast(`${p.kind === 'assembly' ? '🟢 대피 장소' : '📍 목적지'} — ${p.name}`); return; }
+  SV.focusId = null; requestRender();
+}
+
+function draw() {
+  if ($('main').hidden || SV.tab !== 'map' || !_frame) return;
+  if (!map._sized && !map.resize()) return;
+  map.frame(siteExtent(), null);
+  const vis = map.begin();
+  map.basemap(vis);
+  $('attr').textContent = Basemap.attribution();
+  if (SV.site) { map.plan(SV.planImg, SV.site.phonePlan, 0.7); map.siteLayers(SV.site, SV.contourPolys); }
+  if (SV.field) map.equipment(SV.field);
+  map.places(SV.places);
+  if (SV.placeAt) map.emoji('📍', SV.placeAt.x, SV.placeAt.y - map.px(10), 26);
+  for (const ev of unackedSos()) if (ev.x != null) map.sos(ev.x, ev.y, `SOS ${ev.name || ''}`);
+  let danger = 0;
+  for (const c of SV.clients.values()) {
+    if (c.x == null || isDriving(c)) continue;
+    const off = c.online === false, hot = !off && c.level === 'danger', walkOp = c.role === 'operator';
+    if (hot) danger++;
+    map.person(c.x, c.y, { color: off ? '#64748b' : LEVELS[c.level || 'safe'].color, label: c.name + (walkOp ? ' (운전원·도보)' : '') + (off ? ' (끊김)' : ''), labelColor: off ? '#cbd5e1' : '#fff',
+      pulse: hot, sigma: c.sim ? 0 : c.sigma, focus: c.id === SV.focusId, emoji: walkOp ? '🚶' : '👷' });
+  }
+  if (SV.me) map.person(SV.me.x, SV.me.y, { color: '#2563eb', label: '나', me: true, sigma: SV.me.acc, emoji: '🦺' });
+  map.end();
+  map.scale(26);
+  $('legend').innerHTML = SV.site ? '' : '<span>관리자 PC가 현장 배치를 아직 공유하지 않았습니다 — 인원 위치만 표시합니다.</span>';
+  $('legend').hidden = !!SV.site;
+}
+setInterval(() => {
+  if (unackedSos().some(e => e.x != null)) { requestRender(); return; }
+  for (const c of SV.clients.values()) if (c.level === 'danger' && c.online !== false) { requestRender(); break; }
+}, 60);
+
+// ── 내 위치 (관리감독자 휴대폰 GPS — 서버로 보내지 않음) ──
+function startMe() {
+  if (SV.meWatch !== null || !PWA.geoOk() || !_frame) return;
+  SV.meWatch = navigator.geolocation.watchPosition(p => {
+    const loc = _frame.toLocal(p.coords.latitude, p.coords.longitude);
+    SV.me = { x: loc.x, y: loc.y, acc: p.coords.accuracy, lat: p.coords.latitude, lon: p.coords.longitude };
+    if (SV.ref) wsSend({ type: 'ref_fix', place: SV.ref, lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy, by: deviceLabel() });
+    if (SV.survey_ && SV.survey_.running) SV.survey_.samples.push({ lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy });
+    requestRender();
+  }, err => { if (err.code === 1) toast('위치 권한이 거부되었습니다. 브라우저 설정에서 허용하세요.', 'err'); }, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+}
+function stopMe() { if (SV.meWatch !== null) navigator.geolocation.clearWatch(SV.meWatch); SV.meWatch = null; SV.me = null; }
+function setMe(on) { SV.meOn = on; LS.set('socmap.sv.me', on ? '1' : '0'); if (on) startMe(); else stopMe(); renderMore(); requestRender(); }
+$('meToggle').addEventListener('change', e => setMe(e.target.checked));
+
+// ═══════════════════════════════════════════════
+//  경보음 · 진동 · 화면 켜두기
+// ═══════════════════════════════════════════════
+
+function unlockAudio() { try { SV.audio = SV.audio || new (window.AudioContext || window.webkitAudioContext)(); SV.audio.resume(); } catch (e) { SV.audio = null; } }
+document.addEventListener('pointerdown', unlockAudio, { once: true });
+/** 부드러운 사인파 한 음 (앱 알림음 크기) */
+function beep(freq, dur, when = 0, vol = 0.12) {
+  if (!SV.sound || !SV.audio) return;
+  const t = SV.audio.currentTime + when, o = SV.audio.createOscillator(), g = SV.audio.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.015); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(SV.audio.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function vibrate(p) { if (!SV.vibe) return; try { navigator.vibrate && navigator.vibrate(p); } catch (e) { /* noop */ } }
+/** 앱 알림음: 띵-동 두 음 */
+function chime() { beep(988, 0.16); beep(1319, 0.24, 0.14); }
+/** SOS 사이렌 한 번(약 2.8초): 700↔1050 Hz 로 오르내리는 사인파, 음량은 경보음보다 작게(0.16) */
+function sirenOnce() {
+  if (!SV.sound || !SV.audio) return;
+  const a = SV.audio, t = a.currentTime, o = a.createOscillator(), g = a.createGain();
+  o.type = 'sine';
+  for (let i = 0; i < 4; i++) {
+    o.frequency.setValueAtTime(700, t + i * 0.7); o.frequency.linearRampToValueAtTime(1050, t + i * 0.7 + 0.35); o.frequency.linearRampToValueAtTime(700, t + i * 0.7 + 0.7);
+  }
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.16, t + 0.12); g.gain.setValueAtTime(0.16, t + 2.6); g.gain.exponentialRampToValueAtTime(0.0001, t + 2.8);
+  o.connect(g).connect(a.destination); o.start(t); o.stop(t + 2.85);
+}
+/** SOS: 확인할 때까지 5초마다 사이렌(최대 2분) */
+function siren() {
+  stopSiren(); sirenOnce(); vibrate([400, 150, 400, 150, 400]);
+  const t0 = Date.now();
+  SV.sirenTimer = setInterval(() => { if (Date.now() - t0 > 120000) stopSiren(); else { sirenOnce(); vibrate([300, 150, 300]); } }, 5000);
+}
+function stopSiren() { clearInterval(SV.sirenTimer); SV.sirenTimer = null; }
+async function keepAwake() { if (!SV.wake) return; try { if ('wakeLock' in navigator) SV.wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { /* 미지원 */ } }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && SV.pid) { keepAwake(); if (SV.ws && SV.ws.readyState > 1) connect(); } });
+
+$('soundToggle').addEventListener('change', e => { SV.sound = e.target.checked; LS.set('socmap.sv.sound', SV.sound ? '1' : '0'); unlockAudio(); });
+$('vibeToggle').addEventListener('change', e => { SV.vibe = e.target.checked; LS.set('socmap.sv.vibe', SV.vibe ? '1' : '0'); });
+$('wakeToggle').addEventListener('change', e => {
+  SV.wake = e.target.checked; LS.set('socmap.sv.wake', SV.wake ? '1' : '0');
+  if (SV.wake) keepAwake(); else if (SV.wakeLock) { SV.wakeLock.release().catch(() => {}); SV.wakeLock = null; }
+});
+$('testBtn').addEventListener('click', async () => {
+  unlockAudio(); chime(); vibrate([120, 60, 120]);
+  setTimeout(sirenOnce, 900);   // SOS 사이렌 크기도 들려 준다
+  const shown = await PWA.notify('SOC-MAP 알림 시험', { body: '위험 구역 진입·SOS가 이렇게 표시됩니다.', tag: 'test', icon: '/app/pwa/icons/supervisor-192.png' });
+  if (SV.push) {
+    const sub = PWA.reg && await PWA.reg.pushManager.getSubscription();
+    if (sub) { try { await api(`/api/projects/${SV.pid}/push/test`, { method: 'POST', body: { endpoint: sub.endpoint } }); toast('서버에서 휴대폰 알림을 보냈습니다. 몇 초 안에 도착합니다.', 'ok'); } catch (e) { toast('푸시 시험 실패: ' + e.message, 'err'); } }
+  } else if (!shown) toast('휴대폰 알림이 꺼져 있습니다. 「휴대폰 알림」을 켜세요.', 'warn');
+});
+
+// ═══════════════════════════════════════════════
+//  휴대폰 알림 (Web Push) — 앱을 닫아도 긴급 경보 수신
+// ═══════════════════════════════════════════════
+
+const b64uToBytes = (s) => { const b = atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+function pushUnavailableReason() {
+  if (PWA.native) return '';   // 안드로이드 앱: 앱이 살아 있으므로 서버 푸시 없이 앱이 직접 알림
+  if (PWA.state() === 'insecure') return '정식 인증서 주소(https://…trycloudflare.com)에서만 됩니다. 관리자 PC 서버를 「--tunnel」로 켜고 그 주소의 QR로 다시 접속하세요.';
+  if (!('PushManager' in window)) return PWA.state() === 'ios' ? 'iPhone은 홈 화면에 설치한 앱(iOS 16.4 이상)에서만 알림을 받을 수 있습니다.' : '이 브라우저는 휴대폰 알림을 지원하지 않습니다.';
+  return '';
+}
+async function syncPush() {
+  await swReady;
+  if (PWA.native) {
+    SV.push = LS.get('socmap.sv.appNotify', '1') === '1' && PWA.notifyPermission() === 'granted';
+    $('pushHint').textContent = '화면이 꺼져 있어도 위험 진입·SOS를 휴대폰 알림으로';
+    $('pushToggle').disabled = false;
+    renderStatus(); renderMore();
+    return;
+  }
+  const why = pushUnavailableReason();
+  $('pushHint').textContent = why || '앱을 닫아도 위험 진입·SOS 알림';
+  $('pushToggle').disabled = !!why;
+  SV.push = false;
+  if (!why && PWA.reg) {
+    const sub = await PWA.reg.pushManager.getSubscription().catch(() => null);
+    if (sub && Notification.permission === 'granted') {
+      try { await api(`/api/projects/${SV.pid}/push`, { method: 'POST', body: { subscription: sub.toJSON(), label: deviceLabel() } }); SV.push = true; } catch (e) { /* noop */ }
+    }
+  }
+  renderStatus(); renderMore();
+}
+function deviceLabel() { const m = navigator.userAgent.match(/\(([^;)]+);?\s*([^;)]*)/); return `관리감독자 휴대폰${m ? ` (${(m[2] || m[1]).slice(0, 24)})` : ''}`; }
+$('pushToggle').addEventListener('change', async e => {
+  const on = e.target.checked;
+  if (PWA.native) {
+    if (on && await PWA.requestNotify() !== 'granted') {
+      SV.push = false;
+      toast('알림 권한이 꺼져 있습니다. 휴대폰 설정 → 앱 → SOC 관리감독 → 알림에서 허용하세요.', 'err');
+    } else {
+      SV.push = on; LS.set('socmap.sv.appNotify', on ? '1' : '0');
+      toast(on ? '휴대폰 알림을 켰습니다. 「알림 시험」으로 확인하세요.' : '휴대폰 알림을 껐습니다.', on ? 'ok' : undefined);
+    }
+    renderStatus(); renderMore();
+    return;
+  }
+  try {
+    await swReady;
+    if (on) {
+      const why = pushUnavailableReason(); if (why) throw new Error(why);
+      if (await Notification.requestPermission() !== 'granted') throw new Error('알림 권한이 거부되었습니다. 브라우저 설정 → 사이트 설정에서 알림을 허용하세요.');
+      const { key } = await (await fetch('/api/push/key')).json();
+      const sub = await PWA.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(key) });
+      await api(`/api/projects/${SV.pid}/push`, { method: 'POST', body: { subscription: sub.toJSON(), label: deviceLabel() } });
+      SV.push = true; toast('휴대폰 알림을 켰습니다. 「알림 시험」으로 확인하세요.', 'ok');
+    } else {
+      const sub = PWA.reg && await PWA.reg.pushManager.getSubscription();
+      if (sub) { await api(`/api/projects/${SV.pid}/push/remove`, { method: 'POST', body: { endpoint: sub.endpoint } }).catch(() => {}); await sub.unsubscribe(); }
+      SV.push = false; toast('휴대폰 알림을 껐습니다.');
+    }
+  } catch (err) { SV.push = !on ? SV.push : false; toast(err.message, 'err'); }
+  renderStatus(); renderMore();
+});
+
+// ═══════════════════════════════════════════════
+//  현장 도구 — 근로자 합류 QR · GPS 측량 · 배경 지도 · 앱 설치
+// ═══════════════════════════════════════════════
+
+$('qrBtn').addEventListener('click', () => {
+  const url = `${location.origin}/j/${SV.meta.join_code}`;
+  $('joinCode').textContent = SV.meta.join_code;
+  $('joinUrl').textContent = url;
+  const box = $('qrBox');
+  if (box.dataset.url !== url) {
+    box.dataset.url = url; box.innerHTML = '';
+    if (window.QRCode) new QRCode(box, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
+    else box.innerHTML = '<span class="lead">QR 표시에는 인터넷이 필요합니다. 참여 코드를 불러 주세요.</span>';
+  }
+  $('qrSheet').hidden = false;
+});
+
+$('surveyBtn').addEventListener('click', () => {
+  if (!SV.meOn) setMe(true);
+  SV.survey_ = { running: false, samples: [], result: null };
+  $('surveyStat').textContent = '지점에 휴대폰을 대고 「측정 시작」을 누르세요.';
+  $('surveyBar').style.width = '0'; $('surveySend').hidden = true; $('surveyStart').hidden = false;
+  $('surveySheet').hidden = false;
+});
+$('surveyStart').addEventListener('click', () => {
+  if (!SV.me) { $('surveyStat').textContent = 'GPS 신호를 기다리는 중입니다. 잠시 후 다시 시도하세요.'; return; }
+  SV.survey_ = { running: true, samples: [], start: Date.now() };
+  $('surveyStart').hidden = true;
+  const DUR = 60000;
+  const timer = setInterval(() => {
+    const sv = SV.survey_; if (!sv) { clearInterval(timer); return; }
+    const t = Date.now() - sv.start, r = averageFixes(sv.samples);
+    $('surveyBar').style.width = Math.min(100, t / DUR * 100) + '%';
+    $('surveyStat').innerHTML = r ? `측정 ${r.n}회 · 흩어짐 ${r.spread.toFixed(1)}m<br>추정 오차 <b>±${r.estError.toFixed(1)}m</b><br>${r.lat.toFixed(7)}, ${r.lon.toFixed(7)}` : `측정 중… (${Math.round(t / 1000)}초)`;
+    if (t >= DUR || !sv.running) {
+      clearInterval(timer); sv.running = false; sv.result = r;
+      if (r) { $('surveySend').hidden = false; beep(1320, 0.15); vibrate(200); }
+      else { $('surveyStat').textContent = '정확한 측위(±30m 이내)를 얻지 못했습니다. 하늘이 트인 곳에서 다시 시도하세요.'; $('surveyStart').hidden = false; }
+    }
+  }, 500);
+});
+$('surveySend').addEventListener('click', async () => {
+  const r = SV.survey_ && SV.survey_.result; if (!r) return;
+  try {
+    await api(`/api/projects/${SV.pid}/survey`, { method: 'POST', body: { name: $('surveyName').value.trim(), lat: r.lat, lon: r.lon, n: r.n, estError: r.estError, by: '관리감독자' } });
+    $('surveyStat').innerHTML = '✅ 전송했습니다. 관리자 PC 「📍 도면 정합」에서 이 점을 고를 수 있습니다.';
+    $('surveySend').hidden = true;
+  } catch (e) { $('surveyStat').textContent = '전송 실패: ' + e.message; }
+});
+
+function openLayers() { document.querySelectorAll('#layerChoice button').forEach(b => b.classList.toggle('on', b.dataset.layer === S.layers.basemap)); $('layerSheet').hidden = false; }
+$('layerBtn').addEventListener('click', openLayers);
+$('layerMenuBtn').addEventListener('click', openLayers);
+$('layerChoice').addEventListener('click', e => {
+  const b = e.target.closest('[data-layer]'); if (!b) return;
+  S.layers.basemap = b.dataset.layer; LS.set('socmap.sv.basemap', S.layers.basemap);
+  $('layerSheet').hidden = true; renderMore(); requestRender();
+});
+// 브이월드(서버 .env 에 키가 있을 때): 선택지를 보이고, 배경 지도를 직접 고른 적이 없으면 브이월드 영상으로
+loadVWorld('').then(ok => {
+  document.querySelectorAll('[data-vw]').forEach(b => { b.hidden = !ok; });
+  if (ok && LS.get('socmap.sv.basemap', null) === null) S.layers.basemap = 'vworld';
+  requestRender();
+});
+
+// 시트 닫기
+document.querySelectorAll('.sheet-wrap').forEach(w => w.addEventListener('click', e => {
+  if (e.target === w || e.target.closest('[data-close-sheet]')) {
+    w.hidden = true;
+    if (w.id === 'personSheet') SV.sheetId = null;
+    if (w.id === 'placeSheet') { SV.placeAt = null; requestRender(); }
+    if (w.id === 'surveySheet' && SV.survey_) SV.survey_.running = false;
+  }
+}));
+
+// 토스트
+function toast(text, kind = 'info') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind; el.textContent = text;
+  $('toasts').appendChild(el);
+  setTimeout(() => el.classList.add('out'), kind === 'err' ? 5500 : 3500);
+  setTimeout(() => el.remove(), kind === 'err' ? 6000 : 4000);
+}
+
+// 앱 설치
+PWA.onChange(st => {
+  $('obInstall').hidden = PWA.androidBrowser || !['ready', 'ios', 'manual'].includes(st);   // 안드로이드는 앱 파일 받기 하나만 (v14.11)
+  $('obInstallHint').textContent = PWA.hint(st);
+  $('installHint').textContent = PWA.hint(st);
+});
+async function doInstall() { if (!(await PWA.install())) alert(PWA.hint()); }
+$('obInstall').addEventListener('click', doInstall);
+$('installRow').addEventListener('click', doInstall);
+// 안드로이드: 브라우저로 들어왔으면 앱(APK) 안내 — 관리자 키는 # 뒤로만 넘긴다(서버 기록에 남지 않게)
+if (PWA.androidBrowser) {
+  $('obApk').hidden = $('apkRow').hidden = $('obOpenApp').hidden = false;   // 받기는 /supervisor.apk 로 바로 (v14.11)
+  $('obOpenApp').addEventListener('click', () => {
+    $('obOpenApp').href = PWA.appLink('supervisor', SV.pid && SV.key ? `/supervisor?p=${encodeURIComponent(SV.pid)}&k=${encodeURIComponent(SV.key)}` : '/supervisor');
+  });
+}
+// 2026-11-25 업데이트는 내부 패치로만 — 화면은 늘 서버의 최신, 파일 내려받기로 보내지 않는다 (field.js 와 같음)
+function oldAppUpdate() { toast('화면과 기능은 현장 서버에서 늘 최신으로 받습니다. 따로 파일을 받을 필요가 없습니다.'); }
+PWA.checkAppUpdate('supervisor', null);
+// v14.16 더보기 「🔄 앱 업데이트 확인」 — 앱 안에서 바로
+if (PWA.native) {
+  $('updateRow').hidden = false;
+  $('updateHint').textContent = `${PWA.versionText()} · 새 버전은 앱이 스스로 받습니다`;
+  $('updateRow').addEventListener('click', () => {
+    const r = PWA.updateNow();
+    if (r === 'ask') toast('새 버전을 확인합니다. 있으면 바로 「업데이트」 창이 뜹니다. 안 뜨면 최신입니다.');
+    else if (r === 'old') oldAppUpdate(null);
+  });
+}
+if (PWA.native) {
+  $('scanHomeBtn').hidden = false;
+  $('scanHomeBtn').addEventListener('click', () => { PWA.keepAlive(false); PWA.home(); });
+  $('installRow').hidden = true; $('homeRow').hidden = false;
+  $('footNote').textContent = 'SOC-MAP 관리감독자 앱 · 화면이 꺼져도 경보를 받습니다 (알림 영역에 「관제 중」 표시).';
+  $('homeRow').addEventListener('click', () => {
+    if (SV.pid && !confirm('로그아웃하고 다른 서버의 QR을 찍을까요?')) return;
+    PWA.keepAlive(false); PWA.home();
+  });
+}
+
+// ═══════════════════════════════════════════════
+//  시작: PC 화면 QR(#p=…&k=…) → 저장된 키 → 직접 로그인
+// ═══════════════════════════════════════════════
+
+/** 주소의 #p=…&k=… 로 로그인. 키가 주소창·방문 기록에 남지 않게 먼저 지운다 */
+async function hashLogin(h) {
+  history.replaceState(null, '', location.pathname);
+  try { await login(h.get('p'), h.get('k')); return true; } catch (e) { $('loginErr').textContent = e.message; return false; }
+}
+// v14.9 이 화면이 열린 채로 같은 주소의 QR 을 열면 # 뒤만 바뀌어 페이지가 다시 불리지 않는다
+window.addEventListener('hashchange', async () => {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (!h.get('p') || !h.get('k')) return;
+  if (SV.pid) logout();
+  if (!(await hashLogin(h))) loadProjectList();
+});
+
+(async () => {
+  const h = new URLSearchParams(location.hash.slice(1));
+  SV.pendingEv = h.get('ev');   // 휴대폰 알림을 눌러 앱이 새로 열린 경우 그 경보로
+  if (SV.pendingEv && !h.get('k')) history.replaceState(null, '', location.pathname);
+  if (h.get('p') && h.get('k')) {
+    if (await hashLogin(h)) return;
+  } else {
+    const last = LS.get('socmap.sv.last', ''), key = last && Keys.get(last);
+    if (key) { try { await login(last, key); return; } catch (e) { $('loginErr').textContent = e.message; } }
+  }
+  loadProjectList();
+})();
+
+// ═══════════════════════════════════════════════
+//  기상청 날씨 (v14.5) — 서버가 현장 위치로 받아 10분마다 보내 준다(WebSocket 'weather').
+//  법정 작업 중지 기준 판정도 서버(weather.py)가 하고, 새로 넘으면 경보 기록(주의)으로도 온다.
+// ═══════════════════════════════════════════════
+const WX_ST = { ok: '정상', info: '참고', caution: '주의', warn: '예보', stop: '중지' };
+async function loadWeather() {
+  try { setWeather(await api(`/api/projects/${SV.pid}/weather`)); } catch (e) { /* 키 없음(503) 등 — 날씨 표시 없이 동작 */ }
+}
+function setWeather(w) {
+  SV.weather = w || null;
+  renderWeather();
+}
+function renderWeather() {
+  const w = SV.weather, ind = $('indWx');
+  $('wxSection').hidden = ind.hidden = !w;
+  if (!w) return;
+  const n = w.now, hr = (iso) => `${new Date(iso).getHours()}시`;
+  ind.className = 'ind ' + (w.level === 'stop' ? 'bad' : w.level === 'warn' || w.level === 'caution' ? 'warn' : 'ok');
+  ind.querySelector('span').textContent = `🌬️ ${n.gust_est == null ? '-' : n.gust_est}m/s`;
+  $('wxMeta').textContent = `${hr(n.time)} 관측 · 격자 ${w.grid.nx},${w.grid.ny}`;
+  const bad = w.checks.filter(c => c.status !== 'ok');
+  $('wxBox').innerHTML = `
+    <div class="now">🌡️ <b>${n.temp ?? '-'}℃</b>${n.feels_like != null && n.feels_like !== n.temp ? ` (체감 ${n.feels_like}℃)` : ''} · 💧 ${n.humidity ?? '-'}% · 강수 <b>${esc(n.rain_text)}</b><br>
+      🌬️ 평균 <b>${n.wind ?? '-'} m/s</b> → 순간 추정 <b>${n.gust_est ?? '-'} m/s</b> <small>(× ${w.gust_factor}, 장비 풍속계 우선)</small></div>
+    ${bad.map(c => `<div class="wx-row st-${c.status}"><span class="st">${WX_ST[c.status]}</span><span>${esc(c.text)}${c.status === 'warn' && c.peak_time ? ` — ${hr(c.peak_time)} 최대 ${c.peak6h}${c.unit}` : ''}<small>${esc(c.law)}${c.note ? ` · ${esc(c.note)}` : ''}</small></span></div>`).join('')
+    || `<div class="wx-ok">✅ 타워크레인(제37조) · 철골작업(제383조) 기상 중지 기준에 해당 없음 · ${w.missing && w.missing.length ? (w.hours && w.hours.length ? '일부 예보만 반영' : '지금 날씨 기준 (예보는 받지 못함)') : '6시간 예보 포함'}</div>`}
+    ${w.missing && w.missing.length ? `<div class="wx-ok">⚠️ 받지 못한 예보: ${w.missing.map(m => esc(m.label)).join(' · ')}</div>` : ''}`;
+}
+
+
+// ═══════════════════════════════════════════════
+//  2026-11-22 대피 점호 · 기준점 보정
+// ═══════════════════════════════════════════════
+function mmss(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+function renderEvac() {
+  const el = $('svEvac'), ev = SV.evac;
+  if (!ev || SV.evacHidden === ev.id) { el.hidden = true; return; }
+  const ps = (ev.people || []).map(p => { const c = SV.clients.get(p.id); return { ...p, online: !!c && c.online !== false }; });
+  const arrived = ps.filter(p => p.state === 'arrived').length, rest = ps.filter(p => p.state !== 'arrived');
+  const lost = rest.filter(p => !p.online);
+  el.hidden = false; el.classList.toggle('ended', !!ev.ended);
+  el.innerHTML = `<div class="se-head"><b>${ev.ended ? '🏁 대피 종료' : '🚨 대피 점호'}</b><span>${ev.ended ? `${mmss(ev.ended - ev.start)} 걸림` : `<span data-evac-clock="${ev.start}">${mmss(Date.now() / 1000 - ev.start)}</span> 경과`}</span></div>
+    <div class="se-nums"><span class="ok">도착 <b>${arrived}</b>/${ps.length}</span><span>이동 중 <b>${rest.length - lost.length}</b></span><span class="bad">연락 없음 <b>${lost.length}</b></span></div>
+    ${rest.length ? `<div class="se-list">${rest.map(p => `<button data-evac-p="${esc(p.id)}" class="${p.online ? '' : 'lost'}">${esc(p.name)}</button>`).join('')}</div>` : ''}
+    ${ev.ended ? '<button class="se-btn" data-evac-close>닫기</button>' : `<button class="se-btn end" data-evac-end>${rest.length ? '대피 종료' : '✅ 전원 도착 — 대피 종료'}</button>`}`;
+}
+$('svEvac').addEventListener('click', e => {
+  const t = e.target, ev = SV.evac;
+  if (t.closest('[data-evac-end]')) {
+    const rest = ev ? ev.people.filter(p => p.state !== 'arrived') : [];
+    if (rest.length && !confirm(`아직 확인되지 않은 인원 ${rest.length}명 (${rest.map(p => p.name).join(', ')}).\n대피를 끝내고 기록에 남길까요?`)) return;
+    wsSend({ type: 'evac_end' });
+  } else if (t.closest('[data-evac-p]')) {
+    const id = t.closest('[data-evac-p]').dataset.evacP, p = ev && ev.people.find(q => q.id === id);
+    if (!p) return;
+    if (confirm(`${p.name} — 무전·대면으로 안전을 확인했나요?\n(취소를 누르면 지도에서 위치를 봅니다)`)) wsSend({ type: 'evac_safe', id });
+    else openPerson(id);
+  } else if (t.closest('[data-evac-close]')) { SV.evacHidden = ev && ev.id; renderEvac(); }
+});
+setInterval(() => {
+  document.querySelectorAll('[data-evac-clock]').forEach(el => { el.textContent = mmss(Date.now() / 1000 - +el.dataset.evacClock); });
+}, 1000);
+
+// 기준점 보정: 이 휴대폰을 기준점 위에 두고 GPS 를 계속 보냄
+function renderRef() {
+  const refs = SV.places.filter(p => p.kind === 'ref');
+  $('refChoice').innerHTML = refs.length ? refs.map(p => `<button data-ref="${esc(p.id)}" class="${SV.ref === p.id ? 'on' : ''}">📡 ${esc(p.name)}</button>`).join('')
+    : '<p class="lead">등록된 기준점이 없습니다. 관리자 PC → 관제 → 대피 장소 「＋ 지도에서 추가」에서 이름 앞에 @ 를 붙여 만드세요.</p>';
+  const k = SV.corr, fresh = k && Date.now() / 1000 - k.at < 15;
+  $('refStat').textContent = !SV.ref ? '' : fresh
+    ? `보정 중 — GPS 오차 동 ${k.dx >= 0 ? '+' : ''}${k.dx.toFixed(1)} m · 남 ${k.dy >= 0 ? '+' : ''}${k.dy.toFixed(1)} m (보고 ${k.n}번)${SV.policy.ref_corr === false ? ' · 근로자 앱 적용은 꺼져 있음' : ''}`
+    : 'GPS 를 모으는 중… (정확도 15 m 안의 측정이 5번 모이면 시작)';
+  $('refStop').hidden = !SV.ref;
+  $('refHint').textContent = SV.ref ? `켜짐 — ${(refs.find(p => p.id === SV.ref) || {}).name || ''} 위에 두세요` : '위치를 아는 기준점에 이 휴대폰을 두면 근로자 휴대폰의 GPS 오차를 줄입니다';
+}
+$('refBtn').addEventListener('click', () => { renderRef(); $('refSheet').hidden = false; });
+$('refChoice').addEventListener('click', e => {
+  const b = e.target.closest('[data-ref]'); if (!b) return;
+  SV.ref = b.dataset.ref;
+  if (!SV.meOn) setMe(true); else startMe();
+  keepAwake();
+  renderRef();
+});
+$('refStop').addEventListener('click', () => { SV.ref = null; renderRef(); });

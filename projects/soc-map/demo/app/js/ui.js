@@ -12,8 +12,7 @@ const MODES = [
   { id: 'select',   group: 'draw',  icon: '🖐️', label: '선택 · 이동', short: '선택', key: '1', desc: '항목 선택, 끌어서 이동', hint: '장비·위험물·건물을 클릭해 선택하고 끌어서 옮깁니다. 빈 곳을 드래그하면 지도가 이동합니다.' },
   { id: 'building', group: 'draw',  icon: '🏢', label: '건물',        key: '6', desc: '외곽을 그려 건물 지정', hint: '드래그로 건물 외곽을 그립니다. AI 인식 없이 건물을 지정할 때 씁니다.' },
   { id: 'aipick',   group: 'draw',  icon: '✨', label: 'AI 건물 따기', desc: '감싸 끌면 외곽선 자동', hint: '건물을 사각형으로 감싸듯 끌면 AI가 외곽선을 땁니다(가장 정확). 건물 안을 한 번 눌러도 됩니다. 도면이 없거나 「배치도」를 끄면 위성 지도에서 땁니다. 틀리면 Ctrl+Z.' },
-  { id: 'road',     group: 'draw',  icon: '〰️', label: '도로',        short: '도로', key: '2', desc: '이동 가능한 길', status: true, hint: '드래그해 이동 가능한 도로(우회로)를 그립니다. 보행 구역이 없으면 경로는 도로 위로만 찾습니다.' },
-  { id: 'lasso',    group: 'draw',  icon: '🚶', label: '보행 구역',   short: '보행', key: '3', desc: '걸을 수 있는 범위', status: true, hint: '드래그로 보행 가능 구역의 외곽을 그립니다. 경로는 이 안에서만 찾습니다.' },
+  { id: 'site',     group: 'draw',  icon: '🏗️', label: '현장 경계',   short: '현장', key: '2', desc: '공사 현장 = 보행 구역', status: true, hint: '드래그로 공사 현장의 테두리를 그립니다. 이 안이 걸어 다닐 수 있는 구역(안전 경로)이고, 위험도 계산·주변 건물·근로자 위치 추적도 이 안(+30 m)에서만 합니다.' },
   { id: 'fence',    group: 'draw',  icon: '🚧', label: '울타리',      short: '울타리', key: '4', desc: '통행 차단선', status: true, hint: '드래그해 통행할 수 없는 안전 울타리를 설치합니다.' },
   { id: 'zone',     group: 'draw',  icon: '🌧️', label: '환경 구역',  key: '7', desc: '연약지반·고압선·침수', hint: '구역 종류를 고른 뒤 드래그로 영역을 그립니다.' },
   { id: 'route',    group: 'route', icon: '🧭', label: '안전 경로 탐색', short: '경로 탐색', key: '5', hint: '출발지 → 도착지를 차례로 클릭하세요. 핀을 끌면 위치를 바꿔 다시 찾습니다.' },
@@ -23,7 +22,7 @@ const MODES = [
 ];
 
 /** 도구가 속한 작업 화면 */
-const MODE_WS = { building: 'layout', aipick: 'layout', road: 'layout', lasso: 'layout', fence: 'layout', zone: 'layout', route: 'route', align: 'plan' };
+const MODE_WS = { building: 'layout', aipick: 'layout', site: 'layout', fence: 'layout', zone: 'layout', route: 'route', align: 'plan' };
 const WORKSPACES = ['layout', 'route', 'monitor', 'plan', 'site'];
 
 function setWorkspace(ws, { fromMode = false, toggle = false } = {}) {
@@ -97,7 +96,7 @@ function buildModeGrid() {
        ${m.status ? `<span class="chip" data-status="${m.id}"></span>` : ''}
        ${m.key ? `<kbd>${m.key}</kbd>` : ''}</button>`).join('');
   // 지도 하단 빠른 도구: 선택 + 동선 도구 + 경로 탐색
-  const dockModes = ['select', 'road', 'lasso', 'fence'].map(id => MODES.find(m => m.id === id));
+  const dockModes = ['select', 'site', 'fence'].map(id => MODES.find(m => m.id === id));
   $('dock').innerHTML = dockModes.map(m =>
     `<button class="dock-btn" data-mode="${m.id}" title="${esc(m.label)} (${m.key})"><span class="ico">${m.icon}</span><span class="lbl">${m.short}</span></button>`).join('')
     + '<span class="dock-sep"></span><button class="dock-route" data-mode="route" title="안전 경로 탐색 (5)"><span class="ico">🧭</span><span class="lbl">경로 탐색</span></button>';
@@ -106,8 +105,7 @@ function buildModeGrid() {
 /** 도구 버튼의 상태 표시(개수, 지정 여부, 경로 결과) */
 function renderToolStatus() {
   const chip = (id, text, on) => document.querySelectorAll(`[data-status="${id}"]`).forEach(el => { el.textContent = text; el.classList.toggle('on', on); });
-  chip('road', S.polylines.length ? `${S.polylines.length}개` : '없음', S.polylines.length > 0);
-  chip('lasso', S.walkableAreaPolygon.length >= 6 ? '지정됨' : '전체', S.walkableAreaPolygon.length >= 6);
+  chip('site', hasSiteBoundary() ? '지정됨' : '없음', hasSiteBoundary());
   chip('fence', S.fences.length ? `${S.fences.length}개` : '없음', S.fences.length > 0);
   const R = S.route, sub = $('routeMainSub');
   if (R && R.result) {
@@ -153,29 +151,28 @@ function renderModeUI() {
            <div class="hint">딴 외곽선이 기존 건물과 <b>겹치거나 1 m 안에 맞닿으면</b> 한 건물로 합칩니다 (지붕 층·난간으로 나뉜 조각).</div>
            <div class="row"><span class="label-sm">건물 ${S.contours.length}개</span>${S.contours.length > 1 ? '<button class="btn btn-xs" data-act="mergeTouching" title="이미 그려진 건물 가운데 겹치거나 맞닿은 조각을 모두 한 건물로">🔗 붙은 조각 모두 합치기</button>' : ''}${S.contours.length ? '<button class="btn btn-xs" data-act="clearBuildings">모두 지우기</button>' : ''}</div>`;
       break;
-    case 'road':
     case 'fence': {
-      const isRoad = S.mode === 'road', key = isRoad ? 'roadWidth' : 'fenceWidth', list = isRoad ? S.polylines : S.fences;
-      const range = isRoad ? 'min="1" max="12" step="0.5"' : 'min="0.1" max="2" step="0.1"';
-      h = `<div class="row label-sm"><span>${isRoad ? '도로 폭' : '울타리 두께'}</span><span class="value" id="thickLabel">${st[key]} m</span></div>
-           <input type="range" ${range} value="${st[key]}" data-setting="${key}">
-           ${isRoad ? '' : '<div class="hint warn">⚠️ 울타리 구간은 경로 탐색 시 통과할 수 없습니다.</div>'}
-           <div class="row"><span class="label-sm">${list.length}개 그려짐</span>${list.length ? `<button class="btn btn-xs" data-act="${isRoad ? 'clearRoads' : 'clearFences'}">모두 지우기</button>` : ''}</div>`;
+      h = `<div class="row label-sm"><span>울타리 두께</span><span class="value" id="thickLabel">${st.fenceWidth} m</span></div>
+           <input type="range" min="0.1" max="2" step="0.1" value="${st.fenceWidth}" data-setting="fenceWidth">
+           <div class="hint warn">⚠️ 울타리 구간은 경로 탐색 시 통과할 수 없습니다.</div>
+           <div class="row"><span class="label-sm">${S.fences.length}개 그려짐</span>${S.fences.length ? '<button class="btn btn-xs" data-act="clearFences">모두 지우기</button>' : ''}</div>`;
       break;
     }
-    case 'lasso':
+    case 'site': {
+      const E = docExtent();
       h = `<div class="hint">${mode.hint}</div>
-           <div class="row"><span class="label-sm">${S.walkableAreaPolygon.length >= 6 ? '✅ 보행 구역 지정됨' : '지정된 구역 없음 (도면 전체가 이동 가능)'}</span>
-           ${S.walkableAreaPolygon.length >= 6 ? '<button class="btn btn-xs" data-act="clearLasso">해제</button>' : ''}</div>`;
+           <div class="row"><span class="label-sm">${hasSiteBoundary() ? `✅ 현장 경계 지정됨 · 계산 범위 ${fmt(E.w, 0)} × ${fmt(E.h, 0)} m` : '⚠️ 지정 안 됨 — 그린 것 전체(불러온 주변 건물 포함)가 계산 범위'}</span>
+           ${hasSiteBoundary() ? '<button class="btn btn-xs" data-act="clearSite">해제</button>' : ''}</div>`;
       break;
+    }
     case 'zone':
       h = `<div class="zone-picker">${Object.entries(ENV_ZONE_TYPES).map(([k, z]) =>
         `<button class="zone-opt ${S.envZoneType === k ? 'active' : ''}" data-zone="${k}" style="--zc:${z.color}">${hzIconHTML(hzZoneSign(k), z.icon)} ${z.label.split(' ')[0]}<small>보행 ${z.pedestrian}점${k === 'floodedArea' || k === 'powerLine' ? ' · 장비 통제' : ''}</small></button>`).join('')}</div>`;
       break;
     case 'route': {
-      const method = S.walkableAreaPolygon.length >= 6 ? '보행 구역 안에서' : (S.polylines.length ? '그려진 도로 위로' : '현장 전체에서 (건물·울타리 회피)');
+      const method = hasSiteBoundary() ? '현장 경계 안에서' : '현장 전체에서 (건물·울타리 회피)';
       h = `<div class="field-row"><span>탐색 범위</span><b>${method}</b></div>
-           <div class="hint">보행 구역·도로는 「배치」 화면의 동선 도구로 지정합니다.</div>`;
+           <div class="hint">현장 경계는 「배치」 화면의 🏗️ 현장 도구로 그립니다 (경계 안 = 걸어 다닐 수 있는 구역).</div>`;
       break;
     }
     case 'align':
@@ -331,9 +328,15 @@ function opsSection(m) {
   let h = '<h4>운영</h4>';
   if (m.isEquipment) {
     const st = m._live || (S.live && S.live[m.id]);
-    h += `<div class="field"><div class="row"><span style="white-space:nowrap">⚙️ 작업 상태</span><select class="input input-sm" data-ops="opState" style="max-width:150px">${Object.entries(OP_STATES).map(([k, v]) =>
-      `<option value="${k}"${(m.opState || 'work') === k ? ' selected' : ''}>${v.icon} ${v.label}</option>`).join('')}</select></div>
-      <div class="label-sm">${st && st.opState ? `지금 운전원 휴대폰: <b>${OP_STATES[st.opState] ? OP_STATES[st.opState].label : '-'}</b> (휴대폰 값이 우선)` : '정지·대기면 작업 반경 대신 본체 둘레만 「주의」입니다. 운전원 휴대폰이 연결되면 휴대폰 값이 우선합니다.'}</div></div>`;
+    h += `<div class="field"><div class="row"><span style="white-space:nowrap">⚙️ 작업 상태</span><select class="input input-sm" data-ops="opState" style="max-width:150px">${EQUIP_STATES.map(k =>
+      `<option value="${k}"${(m.opState || 'work') === k ? ' selected' : ''}>${OP_STATES[k].icon} ${OP_STATES[k].label}</option>`).join('')}</select></div>
+      <div class="label-sm">${st && st.opState ? `지금 운전원 휴대폰: <b>${OP_STATES[st.opState] ? OP_STATES[st.opState].label : '-'}</b> (휴대폰 값이 우선${st.opState === 'walk' ? ' — 운전원이 내려 걷는 중이라 장비는 그 자리에 정지, 운전원은 작업자로 봅니다' : ''})` : '정지·대기면 작업 반경 대신 본체 둘레만 「주의」입니다. 운전원 휴대폰이 연결되면 휴대폰 값이 우선합니다.'}</div></div>`;
+    // 2026-11-25 작업 구역: 작업 중 위험 반경은 배치한 자리(또는 운전원이 정한 자리)에 고정 = 출입 금지
+    const zr = createEquipment({ ...m, opState: 'work', _liveState: undefined, schedule: undefined }, S.siteEnvironment), wa = st && st.workAt;
+    h += `<div class="field"><div class="row"><span style="white-space:nowrap">🚧 작업 구역 여유</span><span class="row-gap" style="align-items:center"><input type="number" class="input input-sm" data-ops="workPad" min="0" max="${WORK_PAD_MAX}" step="1" value="${workPadOf(m)}" style="max-width:72px"> m</span></div>
+      <div class="label-sm">작업 중에는 위험 반경이 장비를 따라 움직이지 않고 <b>이 장비를 놓은 자리</b>에 고정됩니다 — 작업 구역 반경 <b>${zr ? zr.getMaxRadius().toFixed(1) : '-'} m</b> = 출입 금지.
+        여유 = 작업하며 장비가 옮겨 다니는 거리(설계값, 굴착기 기본 ${WORK_PAD.excavator} m). 장비가 작업 구역을 벗어나면 운전원 앱이 「이동 중」으로 바꿉니다.
+        ${wa ? `<br><b style="color:var(--warn)">지금은 운전원이 정한 자리</b>(배치에서 ${Math.round(Math.hypot(wa.x - m.x, wa.y - m.y))} m)에서 작업 중입니다.` : ''}</div></div>`;
   }
   h += `<div class="field"><div class="row"><span>⏰ ${m.isEquipment ? '작업 시간 지정' : '시간 지정 (그 시간에만 위험)'}</span>
       <label class="switch"><input type="checkbox" data-ops="schedOn"${on ? ' checked' : ''}><span class="sl"></span></label></div>
@@ -360,6 +363,7 @@ function buildingInspector(idx) {
   const opts = (obj, cur) => Object.entries(obj).map(([k, v]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${v.label}</option>`).join('');
   let h = inspectorHeader(`🏢 ${esc(bd.name || `건물 #${idx + 1}`)}`);
   h += `<div class="field"><div class="label-sm" style="margin-bottom:4px">건물 이름 (동 번호)</div><input type="text" class="input" maxlength="20" placeholder="예: 101동" value="${esc(bd.name || '')}" data-bd="name"></div>
+        ${bd.realNote ? `<div class="alert warn" style="margin:-4px 0 8px;font-size:12px">⚠️ ${esc(bd.realNote)}</div>` : ''}
         <div class="field row"><span>층수 <span class="label-sm">(비우면 기본 높이 ${S.settings.buildingHeight} m)</span></span><input type="number" class="input input-num" min="1" max="80" value="${bd.floors || ''}" placeholder="${sp.floors}" data-bd="floors"></div>
         <h4>구조 · 공정</h4>
         <div class="field row"><span>구조 형식</span><select class="input input-sel" data-bd="structure">
@@ -424,8 +428,7 @@ function renderRouteCard() {
       ? `<div class="alert danger" style="margin-top:10px">🚫 <b>${esc(R.redirect.fromName)}</b> 현관 출입 불가<br>➜ <b style="color:#67e8f9">${esc(R.redirect.viaName)}</b> 지하층(B1)을 통해 진입하세요</div>`
       : `<div class="alert danger" style="margin-top:10px">🚫 <b>${esc(R.redirect.fromName)}</b> 현관 출입 불가 — 우회할 다른 건물이 없습니다. 지하층 진입로를 확인하세요.</div>`;
   }
-  const snap = r.snapDist > 60 ? `<div class="alert warn" style="margin-top:10px">클릭 지점이 도로에서 ${fmtLen(r.snapDist)} 떨어져 있어 가장 가까운 도로점에 연결했습니다.</div>` : '';
-  const methodLabel = { road: '도로 그래프', 'grid-walkable': '보행 구역 그리드', 'grid-open': '전체 그리드' }[r.method];
+  const methodLabel = { 'grid-walkable': '현장 경계 안', 'grid-open': '현장 전체' }[r.method];
   el.innerHTML = `
     <div class="row"><b>🧭 안전 경로 <span class="badge" style="background:${g.color}26;color:${g.color}">${g.label}</span></b>
       <button class="btn btn-ghost btn-xs" data-act="clearRoute" title="경로 초기화">초기화</button></div>
@@ -439,7 +442,7 @@ function renderRouteCard() {
     </div>
     <div class="bar"><i style="width:${pct(m.bands.high)}%;background:#ef4444"></i><i style="width:${pct(m.bands.mid)}%;background:#f59e0b"></i><i style="width:${pct(m.bands.low)}%;background:#eab308"></i></div>
     <div class="legend"><span style="--c:#ef4444">위험 ≥70</span><span style="--c:#f59e0b">주의 30~70</span><span style="--c:#eab308">경미</span><span style="--c:#10b981">안전</span></div>
-    ${cmp}${redirect}${snap}
+    ${cmp}${redirect}
     ${m.maxRisk >= 70 ? '<div class="alert warn" style="margin-top:10px">위험 구역을 완전히 피할 수 없는 경로입니다. 장비 작업 중지 또는 신호수 배치를 검토하세요.</div>' : ''}
     </div>`;
   el.hidden = false;

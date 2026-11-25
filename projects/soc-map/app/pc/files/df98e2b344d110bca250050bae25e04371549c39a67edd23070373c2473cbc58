@@ -1,0 +1,142 @@
+"""서버 주소 안내판 — 터널 주소가 바뀌어도 휴대폰이 스스로 찾아오게 한다 (v14.10)
+
+cloudflared 빠른 터널은 켤 때마다 주소가 바뀐다. 서버가 새 주소를 비밀 GitHub Gist 에 적고,
+휴대폰(app/js/directory.js)은 그 Gist 를 읽어 따라간다. 새 서버·가입 없이 이 PC 의 `gh` 로그인을 쓴다.
+비밀 Gist 는 주소를 아는 사람은 읽을 수 있으므로 서버 주소 말고는 적지 않는다.
+
+처음 한 번:  python directory.py --setup   (Gist 를 만들고 app/js/directory.js 에 ID 를 적은 뒤 APK 를 다시 빌드)
+끄기:        환경변수 SOCMAP_DIRECTORY=off
+"""
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+log = logging.getLogger("soc-map.directory")
+JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app", "js", "directory.js")
+FILE = "socmap-server.json"
+ID_RE = re.compile(r"GIST_ID = '([0-9a-f]*)'")
+GH_URL_RE = re.compile(r"https://gist\.github\.com/\S*?([0-9a-f]{20,})")
+RETRY_S = 15
+
+
+def gist_id(js_path=JS_PATH):
+    """app/js/directory.js 에 적힌 Gist ID (없으면 빈 문자열) — ID 는 그 파일 한 곳에만 둔다"""
+    with open(js_path, encoding="utf-8") as f:
+        m = ID_RE.search(f.read())
+    return m.group(1) if m else ""
+
+
+def find_gh():
+    return shutil.which("gh") or next((p for p in (r"C:\Program Files\GitHub CLI\gh.exe",) if os.path.isfile(p)), None)
+
+
+def payload(url, now=None):
+    """Gist 수정 요청 본문. 서버 주소와 시각만 적는다"""
+    content = json.dumps({"url": url, "at": int(now if now is not None else time.time())})
+    return {"files": {FILE: {"content": content}}}
+
+
+def publish(url, gid=None, gh=None, run=subprocess.run):
+    """안내판에 주소를 적는다. 성공하면 True (토큰은 gh 가 다루고 이 코드는 보지 않는다)"""
+    gid = gist_id() if gid is None else gid
+    gh = gh or find_gh()
+    if not gid or not gh:
+        return False
+    try:
+        r = run([gh, "api", "--method", "PATCH", f"gists/{gid}", "--input", "-"], input=json.dumps(payload(url)),
+                capture_output=True, text=True, encoding="utf-8", timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("주소 안내판 갱신 실패: %s", e)
+        return False
+    if r.returncode != 0:
+        log.warning("주소 안내판 갱신 실패: %s", (r.stderr or "").strip()[:200])
+    return r.returncode == 0
+
+
+def wait_reachable(url, timeout=120, opener=None, sleep=time.sleep, clock=time.monotonic):
+    """주소가 실제로 응답할 때까지 기다린다(v14.12). 빠른 터널은 주소가 나온 뒤 10~30초 동안 연결이 안 되므로,
+    그 사이에 안내판에 적으면 휴대폰이 응답 없는 주소를 받는다. 응답하면 True, timeout 초 안에 안 되면 False"""
+    import urllib.request
+    opener = opener or urllib.request.urlopen
+    end = clock() + timeout
+    while clock() < end:
+        try:
+            with opener(url + "/health", timeout=5) as r:
+                if getattr(r, "status", 200) == 200:
+                    return True
+        except Exception:
+            pass
+        sleep(2)
+    return False
+
+
+def status():
+    """off: 쓰지 않음 · None: 쓸 수 있음"""
+    return "off" if os.environ.get("SOCMAP_DIRECTORY") == "off" or not gist_id() else None
+
+
+def publish_async(url, done):
+    """터널 주소가 나오면 부른다. done('ok' | 'failed' | 'off'). 서버 시작을 막지 않게 뒤에서 처리"""
+    if status() == "off":
+        done("off")
+        return
+
+    def work():
+        for i in range(3):
+            if publish(url):
+                log.info("주소 안내판 갱신: %s → 휴대폰이 저절로 따라옵니다", url)
+                done("ok")
+                return
+            time.sleep(RETRY_S * (i + 1))
+        log.warning("주소 안내판을 갱신하지 못했습니다. 휴대폰이 새 주소를 찾지 못합니다. `gh auth status` 로 GitHub 로그인을 확인하세요.")
+        done("failed")
+    threading.Thread(target=work, daemon=True).start()
+
+
+def setup(js_path=JS_PATH, run=subprocess.run):
+    """처음 한 번: 비밀 Gist 를 만들고 ID 를 app/js/directory.js 에 적는다. 이미 있으면 그대로 둔다"""
+    if gist_id(js_path):
+        print(f"이미 설정되어 있습니다: {gist_id(js_path)}")
+        return 0
+    gh = find_gh()
+    if not gh:
+        print("GitHub CLI(gh)를 찾지 못했습니다.")
+        return 1
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, FILE)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"url": None, "at": 0}))
+        r = run([gh, "gist", "create", "--desc", "SOC-MAP server address board", path],
+                capture_output=True, text=True, encoding="utf-8", timeout=60)
+    m = GH_URL_RE.search(r.stdout or "")
+    if r.returncode != 0 or not m:
+        print("Gist 를 만들지 못했습니다:", (r.stderr or r.stdout or "").strip()[:300])
+        return 1
+    with open(js_path, encoding="utf-8") as f:
+        src = f.read()
+    with open(js_path, "w", encoding="utf-8", newline="") as f:
+        f.write(ID_RE.sub(f"GIST_ID = '{m.group(1)}'", src, count=1))
+    print(f"완료: 비밀 Gist {m.group(1)}")
+    return 0
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")   # 윈도우 콘솔(cp949)에 없는 글자로 멈추지 않게
+    if "--setup" not in sys.argv:
+        print(__doc__)
+        sys.exit(0)
+    first = not gist_id()
+    code = setup()
+    if code == 0 and first:   # 앱에 안내판 주소가 들어가도록 APK 도 다시 만든다
+        print("APK 를 다시 빌드합니다...")
+        apk = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "android", "build_apk.py")
+        code = subprocess.run([sys.executable, apk]).returncode
+    sys.exit(code)

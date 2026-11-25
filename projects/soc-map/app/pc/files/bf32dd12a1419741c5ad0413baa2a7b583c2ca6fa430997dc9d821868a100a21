@@ -1,0 +1,101 @@
+/* ═══════════════════════════════════════════════════════════════
+ *  SOC-MAP v14 — 서비스 워커 (근로자 앱 · 관리감독자 앱 공용, 서버가 /sw.js 로 내려줌)
+ *
+ *  - 앱 화면 파일을 저장해 두어 신호가 약한 현장에서도 앱이 바로 열린다 (온라인이면 항상 새 파일 우선)
+ *  - 위성 지도 타일은 한 번 받은 것을 다시 쓴다 (최대 TILE_LIMIT 장)
+ *  - 서버 API · WebSocket 은 저장하지 않는다 (위치·경보는 항상 실시간)
+ *  - 저장 공간(Cache Storage)을 못 쓰는 기기에서도 설치·알림·화면 열기는 그대로 동작해야 하므로 저장은 모두 선택 사항
+ *  - Web Push: 관리감독자 휴대폰에 위험 구역 진입·SOS 알림 표시
+ * ═══════════════════════════════════════════════════════════════ */
+'use strict';
+
+const VERSION = 'socmap-v14-18-1';
+const TILE_CACHE = 'socmap-tiles';
+const TILE_LIMIT = 800;
+const SHELL = [
+  '/worker', '/supervisor',
+  '/app/field.css', '/app/supervisor.css',
+  '/app/js/costmap.js', '/app/js/hazardviz.js', '/app/js/geo.js', '/app/js/pathfinding.js', '/app/js/basemap.js',
+  '/app/js/sitemap.js', '/app/js/version.js', '/app/js/directory.js', '/app/js/pwa.js', '/app/js/field.js', '/app/js/supervisor.js',
+  '/manifest/worker.webmanifest', '/manifest/supervisor.webmanifest',
+  '/app/pwa/icons/worker-192.png', '/app/pwa/icons/supervisor-192.png',
+];
+
+const openCache = (name) => caches.open(name).catch(() => null);
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(openCache(VERSION)
+    .then(c => c && Promise.all(SHELL.map(u => c.add(u).catch(() => null))))
+    .then(() => self.skipWaiting()));
+});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil(caches.keys()
+    .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== TILE_CACHE).map(k => caches.delete(k)))).catch(() => null)
+    .then(() => self.clients.claim()));
+});
+
+const isTile = (u) => /server\.arcgisonline\.com|tile\.openstreetmap\.org/.test(u.hostname) || (u.hostname === 'api.vworld.kr' && u.pathname.startsWith('/req/wmts/'));
+const isCdn = (u) => /cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net/.test(u.hostname);
+
+async function networkFirst(req) {
+  try {
+    const res = await fetch(req);
+    if (res.ok) { const copy = res.clone(); openCache(VERSION).then(c => c && c.put(req, copy)).catch(() => {}); }
+    return res;
+  } catch (err) {
+    const c = await openCache(VERSION);
+    const hit = c && await c.match(req, { ignoreSearch: req.mode === 'navigate' }).catch(() => null);
+    if (hit) return hit;
+    throw err;
+  }
+}
+
+async function cacheFirst(req, name, limit) {
+  const c = await openCache(name);
+  const hit = c && await c.match(req).catch(() => null);
+  if (hit) return hit;
+  const res = await fetch(req);
+  if (c && (res.ok || res.type === 'opaque')) {
+    c.put(req, res.clone()).catch(() => {});
+    if (limit) c.keys().then(keys => { for (let i = 0; i < keys.length - limit; i++) c.delete(keys[i]); }).catch(() => {});
+  }
+  return res;
+}
+
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  const u = new URL(req.url);
+  if (u.origin === location.origin) {
+    if (u.pathname.startsWith('/api/vworld/cadastral/')) { e.respondWith(cacheFirst(req, TILE_CACHE, TILE_LIMIT).catch(() => Response.error())); return; }
+    if (u.pathname.startsWith('/api/') || u.pathname.startsWith('/ws/')) return;   // 실시간 데이터는 항상 서버에서
+    if (req.mode === 'navigate' || u.pathname.startsWith('/app/') || u.pathname.startsWith('/manifest/')) e.respondWith(networkFirst(req));
+    return;
+  }
+  if (isTile(u)) e.respondWith(cacheFirst(req, TILE_CACHE, TILE_LIMIT).catch(() => Response.error()));
+  else if (isCdn(u)) e.respondWith(cacheFirst(req, VERSION).catch(() => Response.error()));
+});
+
+// ── Web Push (관리감독자) ──
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (err) { d = { body: e.data && e.data.text() }; }
+  const sos = d.kind === 'sos';   // SOS 만 확인할 때까지 남겨 두고 길게 진동, 나머지는 일반 앱 알림처럼
+  e.waitUntil(self.registration.showNotification(d.title || 'SOC-MAP 안전 알림', {
+    body: d.body || '', tag: d.tag || 'socmap', renotify: true, requireInteraction: sos,
+    icon: '/app/pwa/icons/supervisor-192.png', badge: '/app/pwa/icons/supervisor-192.png',
+    vibrate: sos ? [400, 150, 400, 150, 400] : [150, 80, 150],
+    data: { url: d.url || '/supervisor', event_id: d.tag },
+  }));
+});
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || '/supervisor';
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    const open = list.find(c => new URL(c.url).pathname.startsWith(new URL(url, location.origin).pathname));
+    if (open) { open.postMessage({ type: 'notification-click', event_id: e.notification.data && e.notification.data.event_id }); return open.focus(); }
+    return self.clients.openWindow(url);
+  }));
+});

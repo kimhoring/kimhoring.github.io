@@ -56,6 +56,17 @@ function isPointInPolygon(px, py, poly) {
   return inside;
 }
 
+/** 2026-11-24 공사 현장 경계: 경계 안이거나 경계선에서 margin(m) 안이면 현장 안.
+ *  경계가 없으면 배치 범위 사각형(ext) + margin — 예전 방식. 둘 다 없으면 현장 안으로 봄 */
+const SITE_MARGIN = 30;
+function siteContains(boundary, ext, x, y, margin = SITE_MARGIN) {
+  if (Array.isArray(boundary) && boundary.length >= 6) {
+    return distanceToPolygon(x, y, boundary) <= margin;
+  }
+  if (ext) return x >= ext.minX - margin && x <= ext.maxX + margin && y >= ext.minY - margin && y <= ext.maxY + margin;
+  return true;
+}
+
 function polygonBBox(poly) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (let i = 0; i < poly.length; i += 2) {
@@ -167,11 +178,37 @@ const OP_STATES = {
   work:   { label: '작업 중',   icon: '⚙️' },
   idle:   { label: '정지·대기', icon: '⏸️' },
   travel: { label: '이동 중',   icon: '➡️' },
+  walk:   { label: '하차 · 도보', icon: '🚶' },   // 2026-11-25 운전원이 장비에서 내려 걸음 → 운전원 = 일반 근로자, 장비 = 그 자리에 정지
 };
+/** 관리자가 고를 수 있는 장비 상태 (도보는 운전원 휴대폰만 알림) */
+const EQUIP_STATES = ['work', 'idle', 'travel'];
 const IDLE_RISK = 50;        // 설계값: 멈춘 장비 본체 둘레 = 「주의」(30~69) — 작업 반경 전체를 위험으로 두면 오경보가 많음
 const TRAVEL_MARGIN = 2;     // 설계값: 이동 중 장비 본체 + 2 m = 위험
 const TRAVEL_AHEAD = 8;      // 설계값: 진행 방향 앞 8 m = 경고
 const PERMIT_RISK = 50;      // 설계값: 출입 허가를 받은 사람은 그 구역에서 「주의」로 낮춤
+/** 2026-11-25 작업 구역: 작업 중인 장비의 위험 반경은 장비를 따라 움직이지 않고 「작업 위치」에 고정 = 출입 금지 구역.
+ *  여유(설계값) = 작업하면서 장비가 조금씩 옮겨 다니는 거리. 여유가 있으면 「작업 반경 + 여유」 원 전체가 위험(출입 금지).
+ *  장비가 작업 위치에서 「여유 + WORK_TOL」 넘게 벗어나면 운전원 앱이 「이동 중」으로 바꾼다(위험 구역이 장비를 놓치지 않게). */
+const WORK_PAD = { excavator: 4 };   // 설계값(m): 굴착기는 작업 중에도 몇 m 씩 옮겨 다님. 크레인·펌프카·항타기는 아웃트리거로 고정 → 0
+const WORK_PAD_MAX = 30;
+const WORK_TOL = 3;                  // 설계값(m): GPS 흔들림
+/** 작업 구역 여유(m) — 관리자가 정한 값(marker.workPad) > 장비 종류 기본값 */
+function workPadOf(m) {
+  const v = m && m.workPad != null && m.workPad !== '' ? +m.workPad : NaN;
+  return Number.isFinite(v) ? Math.max(0, Math.min(WORK_PAD_MAX, v)) : (WORK_PAD[m && m.type] || 0);
+}
+/** 사람(서버 참여자·휴대폰 peers)이 장비를 운전 중인가 — 운전원이라도 「하차 · 도보」면 일반 근로자로 본다 */
+function isDriving(p) { return !!p && p.role === 'operator' && p.op_state !== 'walk'; }
+/** 운전원 보고(서버 참여자) → 연결된 장비의 자세. 도보면 마지막으로 탔던 자리(서버가 기억한 eq_x·eq_y), 모르면 배치 위치.
+ *  heading 은 라디안(지도 좌표), workAt = 운전원이 정한 작업 위치(작업 중일 때만) — 관리자·근로자·관리감독자 화면 공용 */
+function equipPoseOf(op, m) {
+  const walk = op.op_state === 'walk';
+  const x = op.eq_x != null ? op.eq_x : walk ? m.x : op.x, y = op.eq_y != null ? op.eq_y : walk ? m.y : op.y;
+  const hb = op.eq_heading != null ? op.eq_heading : walk ? null : op.heading;
+  return { x, y, heading: hb != null ? bearingToHeading(hb) : m.heading, walk,
+    v: walk ? { vx: 0, vy: 0 } : { vx: +op.vx || 0, vy: +op.vy || 0 },
+    workAt: op.op_state === 'work' && op.work_x != null && op.work_y != null ? { x: op.work_x, y: op.work_y } : null };
+}
 
 /** 시험·재현용 현장 시계 (기본은 이 기기 시각) */
 let _siteClock = () => new Date();
@@ -195,9 +232,10 @@ function scheduleText(sch) { return scheduleValid(sch) ? `${sch.from}~${sch.to}`
 
 /** 장비의 지금 상태: 운전원 휴대폰이 알린 값 > 작업 일정 밖이면 대기 > 관리자가 정한 값 > 작업 중 */
 function effectiveOpState(m, now = siteNow()) {
+  if (m._liveState === 'walk') return 'idle';   // 운전원이 내림 → 장비는 그 자리에 정지
   if (m._liveState && OP_STATES[m._liveState]) return m._liveState;
   if (m.schedule && !scheduleActive(m.schedule, now)) return 'idle';
-  return OP_STATES[m.opState] ? m.opState : 'work';
+  return EQUIP_STATES.includes(m.opState) ? m.opState : 'work';
 }
 
 /**
@@ -237,6 +275,15 @@ class Equipment {
     this.equipmentType = type;
     this.state = effectiveOpState(marker);
     if (type === 'towerCrane' && this.state === 'travel') this.state = 'work';   // 고정식 — 이동 상태 없음
+    // 2026-11-25 장비가 지금 있는 곳(mx, my) ↔ 위험 구역 중심(xc, yc). 작업 중이면 중심 = 작업 위치(고정):
+    //  운전원이 정한 곳(marker._workAt) > 관리자가 배치한 곳(marker._plan, 실시간 위치로 바뀌기 전) > 지금 위치
+    this.mx = marker.x; this.my = marker.y;
+    this.fixedZone = this.state === 'work';
+    if (this.fixedZone) {
+      const a = marker._workAt || marker._plan;
+      if (a && Number.isFinite(+a.x) && Number.isFinite(+a.y)) { this.xc = +a.x; this.yc = +a.y; }
+    }
+    this.zonePad = this.fixedZone ? workPadOf(marker) : 0;
     // 사고 빈도 가중치 — 설계값 (2026-10-05 결정). 통계로 산출한 값이 아니다.
     //  사망자 수 순위(고용노동부 2019~2021: 굴착기 63 > 이동식크레인 33)와는 맞지만,
     //  등록대수로 나눈 대당 위험률은 이동식크레인이 약 7.9배 높고, 나머지 기종은 통계가 없다.
@@ -298,9 +345,16 @@ class Equipment {
   bodyRadius() { return 3; }
   /** 지금 상태의 영향 반경. 전면 통제(강풍·침수·고압선)는 상태와 상관없이 작업 반경 전체 */
   getMaxRadius() {
-    if (this.state === 'work' || this.isFullControl()) return this.workRadius();
+    if (this.state === 'work' || this.isFullControl()) return this.workRadius() + this.zonePad;
     if (this.state === 'idle') return this.bodyRadius();
     return this.bodyRadius() + Math.max(TRAVEL_MARGIN, TRAVEL_AHEAD);
+  }
+  /** 작업 구역(작업 반경 + 여유) 원 전체가 출입 금지인가 — 여유가 있는 작업 중 장비 */
+  padZone() { return this.fixedZone && this.zonePad > 0; }
+  /** 작업 중 장비가 작업 위치에서 얼마나 벗어났나(m) — 여유 안이면 0, 작업 중이 아니면 0 */
+  outOfZone() {
+    if (!this.fixedZone) return 0;
+    return Math.max(0, Math.hypot(this.mx - this.xc, this.my - this.yc) - this.zonePad);
   }
   /** 진행 방향 앞쪽 띠 (이동 중) */
   aheadSegment() {
@@ -316,7 +370,8 @@ class Equipment {
         { type: 'circle', zone: 'red', cx: this.xc, cy: this.yc, radius: this.bodyRadius() + TRAVEL_MARGIN },
       ];
     }
-    return this.workShapes();
+    if (this.padZone()) return [{ type: 'circle', zone: 'red', cx: this.xc, cy: this.yc, radius: this.workRadius() + this.zonePad, workZone: true }];
+    return this.workShapes().map(sh => ({ ...sh, workZone: true }));
   }
 
   orangeRisk() { return clampRisk((this.orangeBase + this.sPenalty) * this.w_freq - this.hMitigation); }
@@ -332,6 +387,7 @@ class Equipment {
       const a = this.aheadSegment();
       return pointToSegmentDistance(x, y, a.x1, a.y1, a.x2, a.y2) <= this.bodyRadius() ? this.orangeRisk() : 0;
     }
+    if (this.padZone()) return 100;   // 작업 구역 = 출입 금지 (d ≤ 작업 반경 + 여유는 위에서 확인)
     if (this.computeScoreRed(x, y, d) > 0) return 100;
     if (this.computeScoreOrange(x, y, d) > 0) return this.orangeRisk();
     return this.normalRisk();
@@ -348,6 +404,7 @@ class Equipment {
       const a = this.aheadSegment();
       return pointToSegmentDistance(x, y, a.x1, a.y1, a.x2, a.y2) <= this.bodyRadius() ? 'orange' : 'none';
     }
+    if (this.padZone()) return 'red';
     if (this.computeScoreRed(x, y, d) > 0) return 'red';
     if (this.computeScoreOrange(x, y, d) > 0) return 'orange';
     return 'normal';
@@ -600,7 +657,7 @@ class RiskField {
     for (const eq of this.equipments) {
       const v = eq.calculate_risk(x, y);
       const st = eq.state !== 'work' && !eq.isFullControl() ? `(${OP_STATES[eq.state].label})` : '';
-      if (v > 0) out.push({ risk: v, text: `${eq.marker.label}${st} · ${({ full: '전면 통제', red: '위험 반경', orange: '주의 반경', normal: '영향권', idle: '장비 본체' })[eq.zoneAt(x, y)] || '영향권'}` });
+      if (v > 0) out.push({ risk: v, text: `${eq.marker.label}${st} · ${({ full: '전면 통제', red: eq.fixedZone ? '작업 구역 (출입 금지)' : '위험 반경', orange: '주의 반경', normal: '영향권', idle: '장비 본체' })[eq.zoneAt(x, y)] || '영향권'}` });
     }
     const permitNote = (o) => !permitOn(o.permit) ? '' : permitAllows(o.permit, this.opts.person) ? ' · 출입 허가됨' : ' · 허가자 외 출입 금지';
     for (const m of this.simple) {
@@ -649,7 +706,7 @@ function groundReach(eq) {
   if (eq.state === 'idle') return eq.bodyRadius();
   if (eq.state === 'travel') return eq.bodyRadius() + TRAVEL_MARGIN;
   switch (eq.equipmentType) {
-    case 'excavator': return eq.rMax;                       // 붐·암 선회
+    case 'excavator': return eq.rMax + eq.zonePad;          // 붐·암 선회 (+ 작업 구역 여유)
     case 'mobileCrane': return eq.rOutrigger;               // 아웃트리거·차체 회전
     case 'pileDriver': return eq.rFall;                     // 전도 반경
     case 'concretePumpCar': return eq.lCar / 2 + eq.dSign;  // 차체 + 전후방 표지

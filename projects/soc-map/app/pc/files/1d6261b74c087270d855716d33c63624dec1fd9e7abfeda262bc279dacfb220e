@@ -1,0 +1,211 @@
+/* ═══════════════════════════════════════════════════════════════
+ *  SOC-MAP v14 — 설치형 앱 공용: 서비스 워커 등록 · 홈 화면 설치 · 휴대폰 알림 · 안드로이드 앱 연동
+ *  근로자 앱(field.js)과 관리감독자 앱(supervisor.js)이 함께 쓴다.
+ *
+ *  설치·푸시 알림은 브라우저가 믿는 인증서의 HTTPS 에서만 된다.
+ *  자체 서명 인증서(--https)에서는 서비스 워커 등록이 거부되므로 'insecure' 상태가 된다 → 서버를 --tunnel 로 실행
+ *
+ *  v14.4 안드로이드 앱(APK, android/): 같은 화면을 앱 안(WebView)에서 띄우고 window.SOCMAPNative 를 넣어 준다.
+ *   - 위치: 휴대폰 GPS 를 navigator.geolocation 대신 공급(NativeGeo) → 화면이 꺼져도 계속
+ *   - 알림: 안드로이드 알림 (WebView 에는 Web Push 가 없음)
+ *   - keepAlive: 현장에 있는 동안 포그라운드 서비스로 앱을 살려 둔다
+ * ═══════════════════════════════════════════════════════════════ */
+'use strict';
+
+const PWA = (() => {
+  let deferred = null, reg = null, swError = null;
+  const listeners = new Set();
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const NATIVE = (() => { try { return window.SOCMAPNative && typeof window.SOCMAPNative.info === 'function' ? window.SOCMAPNative : null; } catch (e) { return null; } })();
+  const appInfo = (() => { try { return NATIVE ? JSON.parse(NATIVE.info()) : null; } catch (e) { return null; } })();
+  const androidBrowser = !NATIVE && /android/i.test(navigator.userAgent);
+  const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+  // ── 안드로이드 앱: 휴대폰 GPS → navigator.geolocation ──
+  if (NATIVE && navigator.geolocation) {
+    const geo = navigator.geolocation, watchers = new Map();
+    let seq = 0, last = null, running = false;
+    const sync = () => {
+      const want = watchers.size > 0;
+      if (want && !running) { running = true; NATIVE.startLocation(); }
+      else if (!want && running) { running = false; NATIVE.stopLocation(); }
+    };
+    const settle = (fn) => [...watchers.values()].forEach(w => {
+      if (w.once) { clearTimeout(w.timer); watchers.delete(w.id); }
+      try { fn(w); } catch (e) { /* 콜백 오류는 다른 구독자에 영향 없게 */ }
+    });
+    window.__socmapFix = (f) => {
+      last = { coords: { latitude: f.lat, longitude: f.lon, accuracy: f.acc, altitude: f.alt != null ? f.alt : null, altitudeAccuracy: null,
+                         heading: f.bearing != null ? f.bearing : null, speed: f.speed != null ? f.speed : null }, timestamp: f.t || Date.now() };
+      settle(w => w.ok(last)); sync();
+    };
+    window.__socmapGeoError = (code, message) => { settle(w => w.fail && w.fail({ code, message })); sync(); };
+    geo.watchPosition = (ok, fail) => {
+      const id = ++seq;
+      watchers.set(id, { id, ok, fail }); sync();
+      if (last && Date.now() - last.timestamp < 3000) setTimeout(() => ok(last), 0);
+      return id;
+    };
+    geo.clearWatch = (id) => { const w = watchers.get(id); if (w) { clearTimeout(w.timer); watchers.delete(id); } sync(); };
+    geo.getCurrentPosition = (ok, fail, opts = {}) => {
+      if (last && Date.now() - last.timestamp <= (opts.maximumAge || 0)) { setTimeout(() => ok(last), 0); return; }
+      const id = ++seq, w = { id, ok, fail, once: true };
+      w.timer = setTimeout(() => { watchers.delete(id); sync(); if (fail) fail({ code: 3, message: 'GPS 응답 시간 초과' }); }, opts.timeout || 20000);
+      watchers.set(id, w); sync();
+    };
+  }
+
+  async function register() {
+    if (NATIVE) { emit(); return null; }   // 앱 안에서는 서비스 워커·웹 설치가 필요 없다
+    if (!('serviceWorker' in navigator)) { swError = 'unsupported'; emit(); return null; }
+    if (!window.isSecureContext) { swError = 'insecure'; emit(); return null; }
+    try { reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' }); swError = null; } catch (e) { reg = null; swError = 'cert'; }
+    emit();
+    return reg;
+  }
+
+  window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; emit(); });
+  window.addEventListener('appinstalled', () => { deferred = null; emit(); });
+  function emit() { listeners.forEach(f => { try { f(state()); } catch (e) { /* noop */ } }); }
+
+  /** native(안드로이드 앱) · installed · ready(설치 버튼 가능) · ios(Safari 수동) · insecure(인증서 문제) · manual(브라우저 메뉴) */
+  function state() {
+    if (NATIVE) return 'native';
+    if (standalone()) return 'installed';
+    if (deferred) return 'ready';
+    if (ios) return 'ios';
+    if (swError) return 'insecure';
+    return 'manual';
+  }
+  const HINT = {
+    native: `안드로이드 앱 v${appInfo && appInfo.version || ''}으로 실행 중입니다. 화면이 꺼져도 위치 공유·경보가 이어집니다.`,
+    installed: '홈 화면 앱으로 실행 중입니다.',
+    ready: '눌러서 홈 화면에 앱으로 설치합니다.',
+    ios: 'Safari 아래쪽 공유 버튼 → 「홈 화면에 추가」를 누르세요.',
+    insecure: '이 주소는 자체 서명 인증서라 앱 설치·알림이 막힙니다. 관리자에게 정식 주소(https://…trycloudflare.com) QR을 받으세요.',
+    manual: '브라우저 메뉴(⋮) → 「앱 설치」 또는 「홈 화면에 추가」를 누르세요.',
+  };
+
+  async function install() {
+    if (!deferred) return false;
+    deferred.prompt();
+    const r = await deferred.userChoice.catch(() => ({ outcome: 'dismissed' }));
+    deferred = null; emit();
+    return r.outcome === 'accepted';
+  }
+
+  /** 시스템 알림. Android 크롬은 페이지의 new Notification() 을 막으므로 서비스 워커로 표시한다 */
+  async function notify(title, opts = {}) {
+    if (NATIVE) { try { return NATIVE.notify(title, opts.body || '', opts.tag || '', !!opts.requireInteraction); } catch (e) { return false; } }
+    if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+    try {
+      const r = reg || (navigator.serviceWorker && await navigator.serviceWorker.getRegistration());
+      if (r) { await r.showNotification(title, opts); return true; }
+    } catch (e) { /* 아래로 */ }
+    try { new Notification(title, opts); return true; } catch (e) { return false; }
+  }
+
+  /** 알림 권한: granted · denied · default */
+  function notifyPermission() {
+    if (NATIVE) { try { return NATIVE.notifyPermission(); } catch (e) { return 'denied'; } }
+    return 'Notification' in window ? Notification.permission : 'denied';
+  }
+  function requestNotify() {
+    if (NATIVE) return new Promise(res => { window.__socmapNotifyPerm = (p) => res(p); NATIVE.requestNotify(); });
+    return 'Notification' in window ? Notification.requestPermission() : Promise.resolve('denied');
+  }
+
+  /** 현장에 있는 동안 앱을 살려 두기(안드로이드 앱만). text 는 알림 영역에 표시 */
+  function keepAlive(on, text) { if (NATIVE) try { NATIVE.keepAlive(!!on, text || ''); } catch (e) { /* noop */ } }
+
+  /** 휴대폰 브라우저에서 → 설치된 안드로이드 앱으로 같은 주소 열기 (앱이 없으면 앱 받기 페이지) */
+  function appLink(role, pathAndQuery) {
+    const fallback = `${location.origin}/download?app=${role}`;
+    return `intent://${location.host}${pathAndQuery}#Intent;scheme=socmap-${role};package=kr.ac.jnu.socmap.${role};S.browser_fallback_url=${encodeURIComponent(fallback)};end`;
+  }
+
+  /**
+   * v14.9 앱을 열었을 때 어디로 갈지 (순수 함수 — pwa.test.js).
+   * urlCode: 주소의 참여 코드(QR·초대 링크), saved: 지난 합류 정보 { code, name, consentCode, left }
+   *  - auto: 바로 합류. 위치 공유 동의는 현장마다 받으므로 이 현장에 동의한 적이 있을 때만.
+   *          「현장 나가기」로 나간 뒤에는 앱만 열어서는 들어가지 않는다(QR·링크를 직접 누르면 들어가려는 뜻)
+   *  - form: 이름 화면 (코드는 있고 이 현장 동의가 아직 없음)
+   *  - code: 코드 화면 (resume: 「지난 현장 다시 합류」 표시)
+   */
+  function entryPlan(urlCode, saved) {
+    const code = String(urlCode || '').trim().toUpperCase(), s = saved || {};
+    if (/^[A-Z0-9]{6}$/.test(code)) return { go: s.name && s.consentCode === code ? 'auto' : 'form', code };
+    if (s.code && s.name && s.consentCode === s.code && !s.left) return { go: 'auto', code: s.code };
+    return { go: 'code', code: '', resume: !!(s.code && s.name) };
+  }
+
+  /** 버전 비교: a 가 b 보다 새 버전인가 ('14.13' > '14.9') */
+  function newerVersion(a, b) {
+    const pa = String(a || '0').split('.').map(Number), pb = String(b || '0').split('.').map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x > y;
+    }
+    return false;
+  }
+  /**
+   * v14.13 앱 업데이트 확인 (안드로이드 앱 안에서만). 서버의 APK 가 더 새것이면 앱에게 업데이트를 묻게 한다.
+   * 이 기능이 없는 옛 앱(v14.12 이하)은 old(새 버전 정보) 를 불러 화면에 「새 버전 받기」를 띄운다.
+   */
+  async function checkAppUpdate(role, old) {
+    if (!NATIVE || !appInfo) return null;
+    let apps = [];
+    try { apps = (await (await fetch('/api/apps', { cache: 'no-store' })).json()).apps || []; } catch (e) { return null; }
+    const a = apps.find(x => x.app === role);
+    // 본체 업데이트는 서버가 알리는 번호(version_code)가 내 본체보다 클 때만 — 화면·기능은 늘 서버의 최신이라 보통은 묻지 않는다
+    const newer = a && (a.version_code && appInfo.versionCode ? a.version_code > appInfo.versionCode : newerVersion(a.version, appInfo.version));
+    if (!newer) return null;
+    if (typeof NATIVE.checkUpdate === 'function') NATIVE.checkUpdate();
+    else if (old) old(a);
+    return a;
+  }
+
+  /**
+   * v14.16 「업데이트 확인」 — 앱 안에서 바로 (브라우저·홈페이지로 가지 않음).
+   * 반환: 'native'(앱이 확인·설치·「최신입니다」까지) · 'ask'(v14.13~15: 새것이 있을 때만 앱이 물음) · 'old'(자동 업데이트 없는 옛 앱) · 'web'
+   */
+  function updateNow() {
+    if (!NATIVE) return 'web';
+    try {
+      if (typeof NATIVE.updateNow === 'function') { NATIVE.updateNow(); return 'native'; }
+      if (typeof NATIVE.checkUpdate === 'function') { NATIVE.checkUpdate(); return 'ask'; }
+    } catch (e) { /* noop */ }
+    return 'old';
+  }
+  /**
+   * 「SOC-MAP v14.18 · 화면 11-25 14:05 · 본체 v14.17」 — SOC-MAP 버전은 화면(서버·화면 패치)이 정하고,
+   * 앱 본체(APK)는 휴대폰 기능 코드가 바뀔 때만 올라가므로 둘이 다를 수 있다(다시 설치할 필요 없음).
+   */
+  function versionText() {
+    if (!appInfo) return '';
+    const two = (n) => String(n).padStart(2, '0'), d = appInfo.shell ? new Date(appInfo.shell * 1000) : null;
+    const v = window.SOCMAP_VERSION || appInfo.version || '-';
+    const shell = d ? ` · 화면 ${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}` : '';
+    return `SOC-MAP v${v}${shell}${appInfo.version && appInfo.version !== v ? ` · 본체 v${appInfo.version}` : ''}`;
+  }
+
+  /** 내 정보(이름·역할·동의한 현장). 서버 주소가 바뀌면 웹 저장 공간도 새로 시작되므로 안드로이드 앱에 따로 둔다 */
+  function profile() {
+    try { return (NATIVE && NATIVE.getProfile && JSON.parse(NATIVE.getProfile() || '{}')) || {}; } catch (e) { return {}; }
+  }
+  function saveProfile(p) { try { if (NATIVE && NATIVE.setProfile) NATIVE.setProfile(JSON.stringify(p)); } catch (e) { /* 옛 APK */ } }
+
+  return {
+    register, state, install, notify, standalone, notifyPermission, requestNotify, keepAlive, appLink, entryPlan, profile, saveProfile, newerVersion, checkAppUpdate, updateNow, versionText,
+    native: !!NATIVE, androidBrowser, appInfo,
+    /** 휴대폰 GPS 를 쓸 수 있는가 — 브라우저는 HTTPS 에서만, 안드로이드 앱은 항상 */
+    geoOk: () => !!NATIVE || ('geolocation' in navigator && window.isSecureContext),
+    home: () => { if (NATIVE) NATIVE.home(); },
+    /** 다른 서버 주소로 옮겨 가기. 안드로이드 앱은 다른 출처 이동을 브라우저로 내보내므로 앱에게 맡긴다 */
+    open: (url) => { if (NATIVE) NATIVE.open(url); else location.replace(url); },
+    hint: (st = state()) => HINT[st],
+    onChange: (f) => { listeners.add(f); f(state()); },
+    get reg() { return reg; },
+    get pushable() { return !!(reg && 'PushManager' in window); },
+  };
+})();

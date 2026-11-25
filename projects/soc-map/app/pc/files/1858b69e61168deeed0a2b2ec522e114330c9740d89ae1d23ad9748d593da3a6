@@ -1,0 +1,283 @@
+/* ═══════════════════════════════════════════════════════════════
+ *  SOC-MAP v14 — 휴대폰 지도 (근로자 앱 · 관리감독자 앱 공용)
+ *
+ *  현장 좌표(m) 캔버스 지도.  화면 = 현장 좌표 × s + (ox, oy)
+ *  - 한 손가락 끌기 = 이동, 두 손가락 = 확대·축소, 탭·길게 누르기 = 콜백 (장갑 낀 손은 ＋/－ 버튼)
+ *  - 보기 모드: follow(내 위치 중심) / fit(현장 전체) / free(직접 움직인 뒤)
+ *  - 그리기 도구: 배경 지도·도면·건물·환경 구역·장비 위험 반경·장소·경로·사람·축척
+ *  필요한 전역: Basemap(basemap.js), zoneShapePolygon·ENV_ZONE_TYPES(costmap.js), hz*(hazardviz.js), requestRender(앱)
+ * ═══════════════════════════════════════════════════════════════ */
+'use strict';
+
+const MAP_FONT = '"Pretendard","Segoe UI","Malgun Gothic",sans-serif';
+
+class SiteMap {
+  constructor(canvas, { onTap, onLongPress, onModeChange } = {}) {
+    this.cv = canvas; this.g = canvas.getContext('2d');
+    this.cb = { onTap, onLongPress, onModeChange };
+    this.W = 300; this.H = 300; this.dpr = 1; this._sized = false;
+    this.s = 2; this.ox = 0; this.oy = 0;
+    this.mode = 'fit'; this.followScale = null; this.ext = null;
+    this.ptr = new Map(); this.gs = null;
+    this._bind();
+  }
+
+  // ── 뷰 ──
+  resize() {
+    const r = this.cv.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    if (this._sized && (r.width !== this.W || r.height !== this.H)) { this.ox += (r.width - this.W) / 2; this.oy += (r.height - this.H) / 2; }
+    this.dpr = window.devicePixelRatio || 1;
+    this.W = r.width; this.H = r.height; this._sized = true;
+    this.cv.width = Math.round(this.W * this.dpr); this.cv.height = Math.round(this.H * this.dpr);
+    return true;
+  }
+  setMode(mode) { if (mode === this.mode) return; this.mode = mode; if (this.cb.onModeChange) this.cb.onModeChange(mode); }
+  fitScale(ext) { return Math.min(this.W / ext.w, this.H / ext.h) * 0.95; }
+  /** 보기 모드에 맞춰 뷰를 정한다. me: 내 위치 {x, y} (없으면 follow 도 현장 전체) */
+  frame(ext, me) {
+    this.ext = ext;
+    if (this.mode === 'follow' && me) {
+      const s = this.followScale || Math.min(this.W, this.H) / 70;   // 짧은 변이 약 70 m
+      this.s = s; this.ox = this.W / 2 - me.x * s; this.oy = this.H / 2 - me.y * s;
+    } else if (this.mode !== 'free') {
+      const s = this.fitScale(ext);
+      this.s = s; this.ox = (this.W - ext.w * s) / 2 - ext.minX * s; this.oy = (this.H - ext.h * s) / 2 - ext.minY * s;
+    }
+  }
+  toWorld(sx, sy) { return { x: (sx - this.ox) / this.s, y: (sy - this.oy) / this.s }; }
+  toScreen(x, y) { return { x: x * this.s + this.ox, y: y * this.s + this.oy }; }
+  centerOn(x, y, minScale) {
+    if (minScale && this.s < minScale) this.s = minScale;
+    this.ox = this.W / 2 - x * this.s; this.oy = this.H / 2 - y * this.s;
+    this.setMode('free'); requestRender();
+  }
+  zoomAt(sx, sy, k) {
+    const min = this.ext ? this.fitScale(this.ext) * 0.3 : 0.05;
+    const s = Math.max(min, Math.min(60, this.s * k));
+    const w = this.toWorld(sx, sy);
+    this.s = s; this.ox = sx - w.x * s; this.oy = sy - w.y * s;
+    if (this.mode === 'follow') this.followScale = s; else this.setMode('free');
+    requestRender();
+  }
+  zoomCenter(k) { this.zoomAt(this.W / 2, this.H / 2, k); }
+
+  // ── 입력 ──
+  _pos(e) { const r = this.cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+  _bind() {
+    const cv = this.cv;
+    cv.style.touchAction = 'none';
+    cv.addEventListener('contextmenu', e => e.preventDefault());
+    cv.addEventListener('pointerdown', e => {
+      try { cv.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+      const p = this._pos(e);
+      this.ptr.set(e.pointerId, p);
+      clearTimeout(this._lp);
+      if (this.ptr.size === 1) {
+        const gs = this.gs = { type: 'one', start: p, last: p, t: Date.now(), moved: false };
+        this._lp = setTimeout(() => {
+          if (this.gs === gs && !gs.moved) { gs.type = 'done'; if (this.cb.onLongPress) this.cb.onLongPress(this.toWorld(p.x, p.y), p); }
+        }, 600);
+      } else if (this.ptr.size === 2) {
+        const [a, b] = [...this.ptr.values()];
+        this.gs = { type: 'pinch', d: Math.hypot(a.x - b.x, a.y - b.y), mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+      }
+    });
+    cv.addEventListener('pointermove', e => {
+      if (!this.ptr.has(e.pointerId)) return;
+      const p = this._pos(e);
+      this.ptr.set(e.pointerId, p);
+      const gs = this.gs;
+      if (!gs) return;
+      if (gs.type === 'one') {
+        if (!gs.moved && Math.hypot(p.x - gs.start.x, p.y - gs.start.y) > 8) { gs.moved = true; clearTimeout(this._lp); this.setMode('free'); }
+        if (gs.moved) { this.ox += p.x - gs.last.x; this.oy += p.y - gs.last.y; gs.last = p; requestRender(); }
+      } else if (gs.type === 'pinch' && this.ptr.size >= 2) {
+        const [a, b] = [...this.ptr.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y), mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        if (this.mode !== 'follow') { this.ox += mid.x - gs.mid.x; this.oy += mid.y - gs.mid.y; }
+        if (gs.d > 0) this.zoomAt(mid.x, mid.y, d / gs.d);
+        gs.d = d; gs.mid = mid;
+      }
+    });
+    const up = (e) => {
+      if (!this.ptr.has(e.pointerId)) return;
+      this.ptr.delete(e.pointerId);
+      clearTimeout(this._lp);
+      const gs = this.gs;
+      if (e.type === 'pointerup' && gs && gs.type === 'one' && !gs.moved && Date.now() - gs.t < 550 && this.cb.onTap) {
+        this.cb.onTap(this.toWorld(gs.start.x, gs.start.y), gs.start);
+      }
+      if (this.ptr.size === 0) this.gs = null;
+      else if (gs && gs.type === 'pinch') this.gs = { type: 'done' };   // 한 손가락만 남으면 무시
+    };
+    cv.addEventListener('pointerup', up);
+    cv.addEventListener('pointercancel', up);
+    cv.addEventListener('wheel', e => { e.preventDefault(); const p = this._pos(e); this.zoomAt(p.x, p.y, Math.exp(-e.deltaY * 0.0015)); }, { passive: false });
+  }
+  /** 화면 좌표 근처(반경 px)의 항목 찾기 */
+  hit(items, sp, radiusPx = 26) {
+    let best = null, bd = radiusPx;
+    for (const it of items) {
+      if (it.x == null) continue;
+      const q = this.toScreen(it.x, it.y), d = Math.hypot(q.x - sp.x, q.y - sp.y);
+      if (d < bd) { bd = d; best = it; }
+    }
+    return best;
+  }
+
+  // ── 그리기 (begin 과 end 사이는 현장 좌표 m) ──
+  px(n) { return n / this.s; }
+  begin(bg = '#0d1526') {
+    const g = this.g, d = this.dpr;
+    g.setTransform(d, 0, 0, d, 0, 0); g.fillStyle = bg; g.fillRect(0, 0, this.W, this.H);
+    g.setTransform(d * this.s, 0, 0, d * this.s, d * this.ox, d * this.oy);
+    return { minX: -this.ox / this.s, minY: -this.oy / this.s, maxX: (this.W - this.ox) / this.s, maxY: (this.H - this.oy) / this.s };
+  }
+  end() { this.g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); }
+  basemap(vis) { try { Basemap.draw(this.g, this.s, vis); } catch (e) { /* 타일 실패 무시 */ } }
+  plan(img, plan, alpha = 0.7) {
+    if (!img || !plan || !plan.transform) return;
+    const [a, b, c, d, e, f] = plan.transform, g = this.g;
+    g.save(); g.transform(a, d, b, e, c, f); g.globalAlpha = alpha; g.drawImage(img, 0, 0); g.restore();
+  }
+  poly(p, fill, stroke, lw, dash) {
+    if (!p || p.length < 6) return;
+    const g = this.g;
+    g.beginPath(); g.moveTo(p[0], p[1]);
+    for (let i = 2; i < p.length; i += 2) g.lineTo(p[i], p[i + 1]);
+    g.closePath();
+    if (fill) { g.fillStyle = fill; g.fill(); }
+    if (stroke) { g.strokeStyle = stroke; g.lineWidth = this.px(lw); g.setLineDash(dash ? dash.map(v => this.px(v)) : []); g.stroke(); g.setLineDash([]); }
+  }
+  label(text, x, y, size, color = '#fff', baseline = 'bottom') {
+    const g = this.g;
+    g.font = `bold ${this.px(size)}px ${MAP_FONT}`; g.textAlign = 'center'; g.textBaseline = baseline;
+    g.lineWidth = this.px(3); g.strokeStyle = 'rgba(5,8,15,.85)'; g.strokeText(text, x, y);
+    g.fillStyle = color; g.fillText(text, x, y);
+  }
+  emoji(ch, x, y, size) {
+    const g = this.g;
+    g.font = `${this.px(size)}px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif`;
+    g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(ch, x, y);
+  }
+  /** 건물 외곽 · 환경 구역 · 울타리 (v14.8: 관리자 화면과 같은 표지·무늬 — hazardviz.js) */
+  siteLayers(site, contourPolys) {
+    const g = this.g, px = (n) => this.px(n), doc = site.doc || {};
+    const zones = ((doc.siteEnvironment || {}).envZones || []).filter(z => z.polygon && z.polygon.length >= 6);
+    const fences = (doc.fences || []).filter(f => f.points && f.points.length >= 4);
+    for (const z of zones) hzZoneArea(g, z, px);
+    for (const f of fences) hzFenceArea(g, f, px);
+    for (const p of contourPolys) this.poly(p, 'rgba(148,163,184,0.35)', '#cbd5e1', 1.2);
+    for (const f of fences) hzFence(g, f, px);
+    for (const z of zones) hzZoneLabel(g, z, px);
+  }
+  /** 장비 위험 반경 · 아이콘 · 방향 (marker._mine: 내 장비, marker._live: 운전원 휴대폰이 움직이는 중) */
+  equipment(field) {
+    const g = this.g, px = (n) => this.px(n);
+    for (const eq of field.equipments) {
+      const shapes = eq.isFullControl() ? [{ type: 'circle', zone: 'red', cx: eq.xc, cy: eq.yc, radius: eq.getMaxRadius() }] : eq.getZoneShapes();
+      for (const sh of shapes) {
+        const st = zoneStyle(sh.zone);
+        this.poly(zoneShapePolygon(sh, 48), st.fill, st.stroke, 2, st.dash ? [6, 4] : null);
+      }
+      // 2026-11-25 작업 중 = 위험 구역이 작업 위치에 고정 → 「출입 금지」 표지 + 글자 판 (장비 아이콘은 지금 위치에)
+      if (eq.padZone() && !eq.isFullControl()) {
+        const r = eq.getMaxRadius(), ty = eq.yc - r;
+        hzSign(g, 'noEntry', eq.xc, ty - px(14), px(26));
+        hzTag(g, '작업 구역 · 출입 금지', eq.xc, ty + px(2), px, '#b91c1c', '#fff', 10.5);
+      }
+      const mine = !!eq.marker._mine, live = !!eq.marker._live, X = eq.mx, Y = eq.my;
+      g.beginPath(); g.arc(X, Y, px(15), 0, Math.PI * 2);
+      g.fillStyle = 'rgba(11,17,32,.9)'; g.fill();
+      g.strokeStyle = mine ? '#60a5fa' : live ? '#f59e0b' : '#fff'; g.lineWidth = px(mine || live ? 3 : 1.5); g.stroke();
+      this.emoji(eq.marker.icon || '⚙️', X, Y, 16);
+      const h = eq.heading;
+      g.beginPath(); g.moveTo(X + px(15) * Math.cos(h), Y + px(15) * Math.sin(h)); g.lineTo(X + px(30) * Math.cos(h), Y + px(30) * Math.sin(h));
+      g.strokeStyle = '#fff'; g.lineWidth = px(2.5); g.stroke();
+      if (mine) this.label('내 장비', X, Y + px(18), 12, '#93c5fd', 'top');
+      else if (live && eq.marker._by) this.label(eq.marker._liveState === 'walk' ? `🅿 ${eq.marker._by} 하차` : `🚜 ${eq.marker._by}`, X, Y + px(18), 10.5, '#fcd34d', 'top');
+      if (eq.state !== 'work' && !eq.isFullControl()) this.label(`${OP_STATES[eq.state].icon} ${OP_STATES[eq.state].label}`, X, Y - px(18), 10.5, '#e2e8f0', 'bottom');
+    }
+    for (const m of field.simple) hzMarker(g, m, px, { size: 26 });   // 통제구역·고전압·개구부 … 표지 + 글자 판
+    // 2026-11-22 작업 일정 밖(지금은 꺼짐): 흐리게 + 켜지는 시간
+    for (const o of field.inactive || []) {
+      if (o.polygon) { const c = polygonCentroid(o.polygon); this.label(`⏰ ${scheduleText(o.schedule)}에만`, c.x, c.y, 10.5, '#cbd5e1', 'middle'); continue; }
+      g.save(); g.globalAlpha = 0.35; hzMarker(g, o, px, { size: 22 }); g.restore();
+      this.label(`⏰ ${scheduleText(o.schedule)}에만`, o.x, o.y + px(16), 10, '#cbd5e1', 'top');
+    }
+  }
+  /** 대피 장소(초록) · 목적지(보라) */
+  places(list, activeId) {
+    const g = this.g, px = (n) => this.px(n);
+    for (const p of list || []) {
+      const evac = p.kind === 'assembly', on = p.id === activeId;
+      g.beginPath(); g.arc(p.x, p.y, px(on ? 16 : 13), 0, Math.PI * 2);
+      g.fillStyle = evac ? '#059669' : '#7c3aed'; g.fill();
+      g.strokeStyle = on ? '#fde047' : '#fff'; g.lineWidth = px(on ? 4 : 2.5); g.stroke();
+      if (evac) this.label('대피', p.x, p.y, 10, '#fff', 'middle'); else this.emoji('📍', p.x, p.y, 14);
+      this.label(p.name, p.x, p.y + px(17), 11, evac ? '#6ee7b7' : '#ddd6fe', 'top');
+    }
+  }
+  /** 경로: 외곽선 + 본선 + 진행 방향 표시 */
+  route(path, color = '#3b82f6') {
+    if (!path || path.length < 4) return;
+    const g = this.g, px = (n) => this.px(n);
+    const line = (w, c, dash) => {
+      g.beginPath(); g.moveTo(path[0], path[1]);
+      for (let i = 2; i < path.length; i += 2) g.lineTo(path[i], path[i + 1]);
+      g.lineWidth = px(w); g.strokeStyle = c; g.lineJoin = g.lineCap = 'round'; g.setLineDash(dash || []); g.stroke(); g.setLineDash([]);
+    };
+    line(9, 'rgba(5,8,15,.75)'); line(5.5, color); line(1.6, 'rgba(255,255,255,.85)', [px(2), px(10)]);
+    // 진행 방향 화살표 (약 화면 70 px 간격)
+    const step = px(70); let acc = step / 2;
+    for (let i = 2; i < path.length; i += 2) {
+      const x0 = path[i - 2], y0 = path[i - 1], x1 = path[i], y1 = path[i + 1], L = Math.hypot(x1 - x0, y1 - y0);
+      if (!L) continue;
+      const a = Math.atan2(y1 - y0, x1 - x0);
+      for (; acc < L; acc += step) {
+        const x = x0 + (x1 - x0) * acc / L, y = y0 + (y1 - y0) * acc / L, k = px(5);
+        g.beginPath(); g.moveTo(x + k * Math.cos(a), y + k * Math.sin(a));
+        g.lineTo(x + k * Math.cos(a + 2.5), y + k * Math.sin(a + 2.5)); g.lineTo(x + k * Math.cos(a - 2.5), y + k * Math.sin(a - 2.5)); g.closePath();
+        g.fillStyle = '#fff'; g.fill();
+      }
+      acc -= L;
+    }
+  }
+  /** 사람 표시. o: {color, label, sigma, pulse, focus, emoji, me} */
+  person(x, y, o = {}) {
+    const g = this.g, px = (n) => this.px(n), r = o.me ? 11 : 10;
+    if (o.sigma) { g.beginPath(); g.arc(x, y, o.sigma, 0, Math.PI * 2); g.fillStyle = 'rgba(96,165,250,0.15)'; g.fill(); }
+    if (o.pulse) {
+      const k = (performance.now() / 1000) % 1;
+      g.beginPath(); g.arc(x, y, px(14 + k * 26), 0, Math.PI * 2); g.strokeStyle = `rgba(239,68,68,${1 - k})`; g.lineWidth = px(4); g.stroke();
+    }
+    g.beginPath(); g.arc(x, y, px(r), 0, Math.PI * 2);
+    g.fillStyle = o.color || '#60a5fa'; g.fill();
+    g.strokeStyle = o.focus ? '#60a5fa' : '#fff'; g.lineWidth = px(o.focus ? 4 : o.me ? 3 : 2.2); g.stroke();
+    if (o.emoji) this.emoji(o.emoji, x, y, 12);
+    if (o.label) this.label(o.label, x, y + px(r + 3), o.me ? 12 : 11, o.labelColor || '#fff', 'top');
+  }
+  /** 근로자 SOS 위치: 퍼져 나가는 빨간 원 두 겹 + 🆘 */
+  sos(x, y, label) {
+    const g = this.g, px = (n) => this.px(n), t = (performance.now() / 1400) % 1;
+    for (const k of [t, (t + 0.5) % 1]) {
+      g.beginPath(); g.arc(x, y, px(16 + k * 40), 0, Math.PI * 2);
+      g.strokeStyle = `rgba(239,68,68,${0.85 * (1 - k)})`; g.lineWidth = px(3); g.stroke();
+    }
+    g.beginPath(); g.arc(x, y, px(15), 0, Math.PI * 2); g.fillStyle = '#dc2626'; g.fill();
+    g.strokeStyle = '#fff'; g.lineWidth = px(3); g.stroke();
+    this.label('SOS', x, y, 10, '#fff', 'middle');
+    if (label) this.label(label, x, y - px(20), 12, '#fecaca', 'bottom');
+  }
+  /** 축척 막대 (화면 왼쪽 아래) — end() 다음에 호출 */
+  scale(bottom = 26) {
+    const g = this.g, steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+    const bm = steps.find(v => v * this.s >= 60) || 1000, bp = bm * this.s, y = this.H - bottom;
+    g.fillStyle = 'rgba(5,8,15,.6)'; g.fillRect(8, y - 12, bp + 16, 22);
+    g.strokeStyle = '#fff'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(16, y); g.lineTo(16, y + 5); g.lineTo(16 + bp, y + 5); g.lineTo(16 + bp, y); g.stroke();
+    g.font = `bold 11px ${MAP_FONT}`; g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'bottom';
+    g.fillText(bm >= 1000 ? `${bm / 1000} km` : `${bm} m`, 16 + bp / 2, y + 1);
+  }
+}

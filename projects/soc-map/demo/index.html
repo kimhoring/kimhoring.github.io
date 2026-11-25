@@ -153,10 +153,7 @@
               <button class="btn btn-primary" id="uploadBtn" title="이미지·PDF 는 AI 가 건물을 찾고, CAD 원본(DXF)은 도형을 그대로 실제 단위로 읽습니다">⬆ 배치도 업로드 (이미지 · PDF · DXF)</button>
               <div class="hint" id="dxfInfo" hidden></div>
               <button class="btn" data-act="aipickMode" title="AI 가 건물을 못 찾았거나 빠뜨렸을 때 — 건물을 사각형으로 감싸 끌면 외곽선을 땁니다 (MobileSAM)">✨ AI 건물 따기 (감싸 끌기)</button>
-              <div class="row-gap">
-                <button class="btn flex1" id="reanalyzeBtn" title="현재 도면을 지금 설정으로 다시 분석 (Ctrl+Z로 이전 결과 복원)">🔄 다시 분석</button>
-                <button class="btn flex1" id="saveSampleBtn" title="현재 건물 외곽선을 정답으로 삼아 재학습용 데이터에 추가">🎯 학습용 저장</button>
-              </div>
+              <button class="btn" id="reanalyzeBtn" title="현재 도면을 지금 설정으로 다시 분석 (Ctrl+Z로 이전 결과 복원)">🔄 다시 분석</button>
               <button class="btn" data-act="regularizeAll" title="모든 건물 외곽선을 단순화하고 주축 방향 직각으로 정리 (Ctrl+Z로 되돌리기)">📐 외곽선 직각 보정 (구조 정합)</button>
               <details class="adv" id="aiAdvanced">
                 <summary>AI 검출 설정 <span class="label-sm" id="aiOptsSummary"></span></summary>
@@ -170,7 +167,8 @@
                   <label class="field-row"><span>반전 추론(TTA) <small>정확도↑ 약 3배 느림</small></span><span class="switch"><input type="checkbox" id="optTta"><span class="sl"></span></span></label>
                   <label class="field-row"><span>선 도면 선명도 보정</span><span class="switch"><input type="checkbox" id="optEnhance"><span class="sl"></span></span></label>
                   <label class="field-row"><span>외곽선 직각 보정 <small>인식 직후 자동 · 실제 건물처럼 반듯하게</small></span><span class="switch"><input type="checkbox" id="optRegularize"><span class="sl"></span></span></label>
-                  <button class="btn btn-xs" id="optReset">기본값으로</button>
+                  <div class="row-gap"><button class="btn btn-xs flex1" id="optReset">기본값으로</button>
+                  <button class="btn btn-xs flex1" id="saveSampleBtn" title="현재 건물 외곽선을 정답으로 삼아 재학습용 데이터에 추가 (AI 개선용)">🎯 학습용 저장</button></div>
                 </div>
               </details>
               <div class="hint" id="datasetInfo"></div>
@@ -179,11 +177,12 @@
           <div class="step">
             <div class="step-no">2</div>
             <div class="step-body">
-              <div class="step-title">실제 건물 데이터 (브이월드)</div>
-              <div class="hint">국토교통부 <b>GIS건물통합정보</b> — 실제 축척의 건물 외곽선과 지상·지하 층수, 높이, 구조. 현장 위치(📍)가 정해져 있어야 합니다.</div>
-              <button class="btn" id="realBldgBtn" title="현장 주변의 실제 건물을 외곽선·층수·높이·구조와 함께 추가 (이미 그린 건물 자리는 건너뜀)">🏢 주변 실제 건물 불러오기</button>
-              <button class="btn" id="autoAlignBtn" title="AI가 도면에서 찾은 건물을 실제 건물과 짝 지어 도면의 축척·방향·위치를 자동으로 맞춤 (맞는 건물 5동 이상)">🧭 AI 인식 건물로 도면 자동 맞추기</button>
+              <div class="step-title">현장 주변 (실제 건물 · 공사 인허가)</div>
+              <div class="hint">국토교통부 <b>GIS건물통합정보·도로명주소</b>(외곽선·층수·높이·구조·이름)와 <b>건축 인허가</b>(주변 공사 중·착공 전 필지). 현장 위치(📍)가 정해져 있어야 하고, 현장 경계가 있으면 경계 둘레만 불러옵니다.</div>
+              <button class="btn" id="realBldgBtn" title="현장 주변의 실제 건물을 추가하고(이미 그린 건물 자리는 건너뜀), 인허가 키가 있으면 주변 공사 현장도 찾아 지도에 표시">🏢 현장 주변 불러오기</button>
               <div class="hint" id="realBldgInfo"></div>
+              <div id="permitInfo"></div>
+              <button class="btn" id="autoAlignBtn" title="AI가 도면에서 찾은 건물을 실제 건물과 짝 지어 도면의 축척·방향·위치를 자동으로 맞춤 (맞는 건물 5동 이상)">🧭 AI 인식 건물로 도면 자동 맞추기</button>
             </div>
           </div>
           <div class="step">
@@ -196,21 +195,12 @@
               <div class="mode-slot" data-slot="plan"></div>
             </div>
           </div>
-          <div class="step">
-            <div class="step-no">4</div>
-            <div class="step-body">
-              <div class="step-title">표시</div>
-              <div class="field-row"><span>도면 불투명도</span></div>
-              <input type="range" id="planOpacity" min="0" max="1" step="0.05" value="0.85">
-              <label class="field-row"><span>도면 표시</span><span class="switch"><input type="checkbox" id="layerBg" checked><span class="sl"></span></span></label>
-            </div>
-          </div>
         </div>
       </section>
 
       <!-- 현장 설정 -->
       <section class="ws" data-ws="site">
-        <header class="ws-head"><h2>현장 설정</h2><p>기상 조건, 지도 표시, 데이터와 서버를 관리합니다.</p></header>
+        <header class="ws-head"><h2>현장 설정</h2><p>기상 조건, 데이터와 서버를 관리합니다. 지도 표시는 지도 위 보기 막대와 🗂️ 에서.</p></header>
         <div class="ws-body">
           <div class="group">
             <div class="group-title">현장 조건</div>
@@ -230,15 +220,6 @@
               <div class="label-sm" style="margin:8px 0 6px">환경 구역</div>
               <div class="list" id="envZoneList"></div>
             </div>
-          </div>
-          <div class="group">
-            <div class="group-title">지도 표시</div>
-            <div class="field-row"><span>배경 지도</span>
-              <select class="input input-sel" id="basemapSelect"><option value="vworld" data-vw>브이월드 영상</option><option value="vworldHybrid" data-vw>브이월드 영상+지명</option><option value="vworldBase" data-vw>브이월드 지도</option><option value="satellite">위성 (Esri)</option><option value="street">일반 지도 (OSM)</option><option value="none">끄기</option></select></div>
-            <label class="field-row" id="cadastralRow"><span>연속지적도 <small>필지 경계 · 줌 15 이상 · 도면 정합 때 경계점에 붙이기</small></span><span class="switch"><input type="checkbox" id="layerCadastral"><span class="sl"></span></span></label>
-            <label class="field-row"><span>위험도 히트맵 <kbd>H</kbd></span><span class="switch"><input type="checkbox" id="layerHeat"><span class="sl"></span></span></label>
-            <label class="field-row"><span>장비 위험 구역</span><span class="switch"><input type="checkbox" id="layerZones" checked><span class="sl"></span></span></label>
-            <label class="field-row"><span>최단 경로 비교선</span><span class="switch"><input type="checkbox" id="layerShortest" checked><span class="sl"></span></span></label>
           </div>
           <div class="group">
             <div class="group-title">데이터</div>
@@ -323,24 +304,19 @@
         </div>
         <div class="ctl-group">
           <button class="ctl" id="layersBtn" title="지도 레이어">🗂️</button>
-          <button class="ctl" id="tbHeat" title="위험도 히트맵 (H)">🔥</button>
           <button class="ctl" data-mode="measure" title="거리·면적 측정 (0)">📏</button>
-          <button class="ctl" data-mode="3d" title="3D 보기 (8)">🧊</button>
           <button class="ctl" id="tbPng" title="화면을 이미지로 저장">📷</button>
         </div>
         <span class="zoom-label" id="zoomLabel" hidden>100%</span>
       </div>
       <div class="popover layers-pop" id="layersPop" hidden>
+        <!-- 2026-11-24 지도 설정은 여기 한 곳 (켜고 끄기는 위쪽 보기 막대) -->
         <div class="pop-title">배경 지도</div>
-        <div class="seg" id="basemapSeg">
-          <label data-vw><input type="radio" name="basemapQuick" value="vworld">브이월드</label>
-          <label><input type="radio" name="basemapQuick" value="satellite">위성</label>
-          <label><input type="radio" name="basemapQuick" value="street">일반</label>
-          <label><input type="radio" name="basemapQuick" value="none">끄기</label>
-        </div>
-        <label class="row label-sm" data-vw style="margin-top:8px;cursor:pointer"><span>연속지적도</span><input type="checkbox" id="layerCadastralQuick"></label>
+        <select class="input input-sel" id="basemapSelect"><option value="vworld" data-vw>브이월드 영상</option><option value="vworldHybrid" data-vw>브이월드 영상+지명</option><option value="vworldBase" data-vw>브이월드 지도</option><option value="satellite">위성 (Esri)</option><option value="street">일반 지도 (OSM)</option><option value="none">끄기</option></select>
+        <label class="row label-sm" id="cadastralRow" style="margin-top:8px;cursor:pointer"><span>연속지적도 <small>필지 경계 · 줌 15 이상</small></span><input type="checkbox" id="layerCadastral"></label>
+        <label class="row label-sm" style="margin-top:6px;cursor:pointer"><span>최단 경로 비교선</span><input type="checkbox" id="layerShortest" checked></label>
         <div class="pop-title">도면 불투명도</div>
-        <input type="range" id="planOpacityQuick" min="0" max="1" step="0.05" value="0.85">
+        <input type="range" id="planOpacity" min="0" max="1" step="0.05" value="0.85">
       </div>
 
       <div class="floating dock" id="dock"></div>
@@ -420,7 +396,7 @@ python main.py --host 0.0.0.0  # 다른 PC 접속 허용</pre>
   <div class="modal-box" style="width:420px">
     <h3>❔ 화면 구성 · 단축키</h3>
     <div class="help-areas">
-      <div><b>🗺️ 배치</b><span>건물·도로·보행 구역·울타리·환경 구역 그리기, 장비·위험물 배치</span></div>
+      <div><b>🗺️ 배치</b><span>건물·현장 경계(보행 구역)·울타리·환경 구역 그리기, 장비·위험물 배치</span></div>
       <div><b>🧭 경로</b><span>위험을 피하는 이동 경로 탐색과 결과 지표</span></div>
       <div><b>👷 관제</b><span>현장 앱으로 합류한 인원·장비 위치, 경보, 전체 알림</span></div>
       <div><b>📐 도면</b><span>배치도 업로드·AI 건물 인식·실제 위치 정합</span></div>

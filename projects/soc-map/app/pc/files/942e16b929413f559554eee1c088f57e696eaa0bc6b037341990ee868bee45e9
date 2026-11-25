@@ -1,0 +1,291 @@
+"""SOC-MAP PC 자동 업데이트 · 파일 확인 (온라인 게임 런처처럼) — 파이썬 표준 라이브러리만.
+
+켤 때마다:
+  1) 홈페이지의 업데이트 목록(manifest.json)과 서명(manifest.sig)을 받아 공개 키로 확인한다.
+     서명이 틀리거나 지금보다 옛 번호면 받지 않는다 → 개발자가 낸 업데이트만 들어온다.
+  2) 목록에 적힌 파일마다 SHA-256 을 확인해, 바뀐 것만 받아 바꿔 끼운다(모두 받은 뒤 한 번에).
+  3) 누가 프로그램 파일을 고쳤거나 지웠으면 원래 파일로 되돌린다(인터넷이 없으면 runtime/cache 의 원본으로).
+     프로그램 폴더에 끼워 넣은 코드 파일(.py 등)·화면 파일은 지운다.
+  현장 기록·설정·인증서·가상환경(USER_DATA)은 건드리지 않는다.
+
+시험: SOCMAP_UPDATE_URL(업데이트 주소, file:// 가능) · SOCMAP_UPDATE_OFFLINE=1(인터넷 없이).
+"""
+import hashlib
+import json
+import os
+import shutil
+import sys
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import ed25519  # noqa: E402
+
+CHANNEL = "https://kimhoring.github.io/projects/soc-map/app/pc/"
+KEY_FILE = os.path.join(HERE, "release_key.pub")
+INSTALLED = os.path.join(HERE, "installed.json")      # 지금 설치된 목록 (서명 그대로 보관 → 고치면 알아챔)
+INSTALLED_SIG = os.path.join(HERE, "installed.sig")
+CACHE = os.path.join(HERE, "cache")                   # 원본 파일 (인터넷 없을 때 되돌리기용, 이름 = SHA-256)
+STAGE = os.path.join(HERE, "stage")
+
+# 이 PC 의 것 — 업데이트·확인에서 건드리지 않는다
+USER_DATA = (
+    "backend/venv/", "backend/projects/", "backend/logs/", "backend/tilecache/", "backend/certs/", "backend/dataset/",
+    "backend/__pycache__/", "backend/.env", "backend/vapid_private.pem", "backend/models/mobile_sam.pt",
+    "runtime/cache/", "runtime/stage/", "runtime/__pycache__/", "runtime/installed.json", "runtime/installed.sig",
+)
+CODE_EXT = (".py", ".pyc", ".pyw", ".pyd", ".pth", ".dll")
+
+
+class Result:
+    def __init__(self):
+        self.version = None
+        self.updated_from = None     # 업데이트했으면 이전 버전
+        self.changed = []            # 새 버전으로 바뀐 파일
+        self.repaired = []           # 고쳐졌거나 없어서 되돌린 파일
+        self.removed = []            # 지운 파일 (끼워 넣은 코드 · 새 버전에서 빠진 파일)
+        self.requirements_changed = False
+        self.self_changed = False    # 업데이트 프로그램(runtime/*.py) 자신이 바뀜 → 다시 실행
+        self.online = False
+        self.note = ""
+        self.ok = True
+
+
+def _norm(rel):
+    return rel.replace("\\", "/")
+
+
+def _is_user_data(rel):
+    rel = _norm(rel)
+    return any(rel == u or (u.endswith("/") and rel.startswith(u)) for u in USER_DATA)
+
+
+def _safe_rel(rel):
+    rel = _norm(rel)
+    parts = rel.split("/")
+    return bool(rel) and not rel.startswith("/") and ":" not in rel and all(p not in ("", ".", "..") for p in parts)
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def public_key():
+    with open(KEY_FILE, encoding="ascii") as f:
+        return bytes.fromhex(f.read().strip())
+
+
+def parse_signed(manifest_bytes, sig_text, key):
+    """서명이 맞는 목록이면 dict, 아니면 None"""
+    try:
+        sig = bytes.fromhex(sig_text.strip())
+    except (ValueError, AttributeError):
+        return None
+    if not ed25519.verify(key, manifest_bytes, sig):
+        return None
+    try:
+        m = json.loads(manifest_bytes.decode("utf-8"))
+    except ValueError:
+        return None
+    files = m.get("files")
+    if not isinstance(files, dict) or not isinstance(m.get("serial"), int):
+        return None
+    for rel, info in files.items():
+        if not _safe_rel(rel) or _is_user_data(rel) or not isinstance(info, dict) or len(str(info.get("sha256", ""))) != 64:
+            return None
+    return m
+
+
+def _channel():
+    return (os.environ.get("SOCMAP_UPDATE_URL") or CHANNEL).rstrip("/") + "/"
+
+
+def _get(url, timeout=10):
+    sep = "&" if "?" in url else "?"
+    if url.startswith("http"):
+        url = f"{url}{sep}t={int(time.time())}"   # 홈페이지 CDN 캐시를 건너뜀
+    req = urllib.request.Request(url, headers={"User-Agent": "SOC-MAP-PC-updater"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def load_installed(key):
+    try:
+        with open(INSTALLED, "rb") as f:
+            mb = f.read()
+        with open(INSTALLED_SIG, encoding="ascii") as f:
+            sig = f.read()
+    except OSError:
+        return None, None, None
+    m = parse_signed(mb, sig, key)
+    return (m, mb, sig) if m else (None, None, None)
+
+
+def fetch_remote(key):
+    base = _channel()
+    mb = _get(base + "manifest.json")
+    sig = _get(base + "manifest.sig").decode("ascii", "replace")
+    m = parse_signed(mb, sig, key)
+    return (m, mb, sig) if m else (None, None, None)
+
+
+def _blob(sha, online, res):
+    """원본 파일 내용: 캐시 → 없거나 틀리면 업데이트 주소에서 받아 캐시에 넣는다"""
+    path = os.path.join(CACHE, sha)
+    if os.path.isfile(path) and sha256_file(path) == sha:
+        return path
+    if not online:
+        return None
+    data = _get(_channel() + "files/" + sha, timeout=60)
+    if hashlib.sha256(data).hexdigest() != sha:
+        raise IOError("받은 파일이 목록과 다릅니다 (" + sha[:12] + ")")
+    os.makedirs(CACHE, exist_ok=True)
+    tmp = path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+    return path
+
+
+def _local_sha(rel):
+    p = os.path.join(ROOT, rel)
+    return sha256_file(p) if os.path.isfile(p) else None
+
+
+def _strays(target_files):
+    """목록에 없는 코드·화면 파일 — 프로그램 폴더에 끼워 넣은 것"""
+    managed = set(target_files)
+    out = []
+    for top, rule in (("app", "all"), ("backend", "code-top"), ("runtime", "code-top"), ("backend/models", "code-top")):
+        d = os.path.join(ROOT, top)
+        if not os.path.isdir(d):
+            continue
+        if rule == "all":
+            for dp, dns, fns in os.walk(d):
+                for fn in fns:
+                    rel = _norm(os.path.relpath(os.path.join(dp, fn), ROOT))
+                    if rel not in managed and not _is_user_data(rel):
+                        out.append(rel)
+        else:
+            for fn in os.listdir(d):
+                rel = f"{top}/{fn}"
+                if os.path.isfile(os.path.join(d, fn)) and fn.lower().endswith(CODE_EXT) and rel not in managed and not _is_user_data(rel):
+                    out.append(rel)
+    return out
+
+
+def run(online=None, log=print):
+    """업데이트 확인 → 파일 확인·되돌리기. 결과(Result)를 돌려준다. 실패해도 예외 대신 res.ok=False + note"""
+    res = Result()
+    if online is None:
+        online = os.environ.get("SOCMAP_UPDATE_OFFLINE") != "1"
+    key = public_key()
+    local, local_b, local_sig = load_installed(key)
+    remote = remote_b = remote_sig = None
+    if online:
+        try:
+            remote, remote_b, remote_sig = fetch_remote(key)
+            res.online = True
+            if remote is None:
+                log("  알림: 업데이트 목록의 서명이 맞지 않아 받지 않았습니다(개발자가 낸 업데이트가 아님).")
+        except Exception as e:   # 인터넷 없음 · 홈페이지 응답 없음
+            res.note = f"업데이트 확인 못 함 ({type(e).__name__}) — 지금 버전으로 실행합니다."
+    if remote and local and remote["serial"] < local["serial"]:
+        remote = None            # 옛 목록(되돌리기 시도)은 받지 않는다
+    target, target_b, target_sig = (remote, remote_b, remote_sig) if remote and (not local or remote["serial"] > local["serial"]) else (local, local_b, local_sig)
+    if target is None:
+        res.ok = False
+        res.note = "설치 정보가 없거나 손상됐습니다. 인터넷에 연결한 뒤 다시 실행하면 복구합니다."
+        return res
+    if local and target is not local:
+        res.updated_from = local.get("version")
+    res.version = target.get("version")
+    old_files = (local or {}).get("files", {})
+
+    # 1) 필요한 파일을 모두 먼저 받는다 (도중에 끊겨도 프로그램 폴더는 그대로)
+    todo = []
+    for rel, info in sorted(target["files"].items()):
+        sha = info["sha256"]
+        cur = _local_sha(rel)
+        if cur == sha:
+            # 처음 실행 · 캐시가 비었으면 지금 파일(목록과 같음)을 원본으로 보관
+            cp = os.path.join(CACHE, sha)
+            if not os.path.isfile(cp):
+                os.makedirs(CACHE, exist_ok=True)
+                shutil.copyfile(os.path.join(ROOT, rel), cp + ".part")
+                os.replace(cp + ".part", cp)
+            continue
+        is_new = rel not in old_files or old_files[rel]["sha256"] != sha
+        try:
+            src = _blob(sha, res.online, res)
+        except Exception as e:
+            src = None
+            log(f"  알림: {rel} 을(를) 받지 못했습니다 ({e})")
+        if src is None:
+            res.ok = False
+            res.note = (res.note + " " if res.note else "") + f"{rel} 원본이 없어 되돌리지 못했습니다(인터넷 연결 후 다시 실행)."
+            if is_new and target is not local:
+                # 새 버전 파일을 다 받지 못했으면 이번에는 업데이트하지 않는다
+                log("  알림: 새 버전 파일을 다 받지 못해 이번에는 지금 버전으로 실행합니다.")
+                return run(online=False, log=log)
+            continue
+        todo.append((rel, src, is_new and target is not local))
+    # 2) 한 번에 바꿔 끼운다
+    for rel, src, is_update in todo:
+        dst = os.path.join(ROOT, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        tmp = dst + ".socmap-new"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+        (res.changed if is_update else res.repaired).append(rel)
+        if rel.startswith("runtime/") and rel.endswith(".py"):
+            res.self_changed = True
+        if rel == "backend/requirements.txt":
+            res.requirements_changed = True
+    # 3) 새 버전에서 빠진 파일 · 끼워 넣은 코드·화면 파일 지우기
+    gone = [r for r in old_files if r not in target["files"] and not _is_user_data(r)]
+    for rel in sorted(set(gone) | set(_strays(target["files"]))):
+        p = os.path.join(ROOT, rel)
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+                res.removed.append(rel)
+            except OSError as e:
+                log(f"  알림: {rel} 을(를) 지우지 못했습니다 ({e})")
+    # 4) 설치 기록 — 서명 그대로
+    if target is not local:
+        with open(INSTALLED + ".part", "wb") as f:
+            f.write(target_b)
+        with open(INSTALLED_SIG + ".part", "w", encoding="ascii") as f:
+            f.write(target_sig.strip())
+        os.replace(INSTALLED + ".part", INSTALLED)
+        os.replace(INSTALLED_SIG + ".part", INSTALLED_SIG)
+    # 5) 이제 쓰지 않는 원본 정리
+    keep = {i["sha256"] for i in target["files"].values()}
+    if os.path.isdir(CACHE):
+        for fn in os.listdir(CACHE):
+            if fn not in keep:
+                try:
+                    os.remove(os.path.join(CACHE, fn))
+                except OSError:
+                    pass
+    return res
+
+
+def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+    r = run()
+    print(json.dumps({"ok": r.ok, "version": r.version, "updated_from": r.updated_from, "changed": r.changed,
+                      "repaired": r.repaired, "removed": r.removed, "note": r.note}, ensure_ascii=False, indent=2))
+    sys.exit(0 if r.ok else 1)
+
+
+if __name__ == "__main__":
+    main()

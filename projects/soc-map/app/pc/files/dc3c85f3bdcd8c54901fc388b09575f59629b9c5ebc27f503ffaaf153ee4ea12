@@ -1,0 +1,392 @@
+"""브이월드(국토교통부 공간정보 오픈플랫폼) 연동
+
+인증키: backend/.env 의 SOCMAP_VWORLD_KEY (APP 유형, git 제외). 없으면 브이월드 기능만 꺼지고 나머지는 그대로 동작한다.
+  - 지도 타일(영상·일반·지명)은 브라우저가 브이월드에서 직접 받는다(CORS 허용) → /api/vworld/config 로 키를 내려준다
+  - 연속지적도 그림·필지 경계·주소 검색은 브이월드가 CORS 를 허용하지 않아 서버가 대신 받는다
+    (지적도 그림은 backend/tilecache/ 에 30일 캐시 — git 제외)
+"""
+import logging
+import re
+import os
+import time
+
+import requests
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CACHE = os.path.join(HERE, "tilecache", "vworld")
+API = "https://api.vworld.kr/req"
+CACHE_DAYS = 30
+MERC = 20037508.342789244   # 웹 메르카토르 반폭(m)
+
+log = logging.getLogger("soc-map.vworld")
+router = APIRouter()
+_session = requests.Session()
+
+
+def _load_env():
+    """backend/.env 의 KEY=VALUE 를 환경 변수로 (이미 있는 값은 덮어쓰지 않음)"""
+    try:
+        with open(os.path.join(HERE, ".env"), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+    except FileNotFoundError:
+        pass
+
+
+_load_env()
+KEY = os.environ.get("SOCMAP_VWORLD_KEY", "").strip()
+if KEY:
+    log.info("브이월드 연동 켜짐 (영상지도 · 연속지적도 · 주소 검색)")
+
+
+def _need():
+    if not KEY:
+        raise HTTPException(status_code=503, detail="브이월드 인증키가 없습니다 (backend/.env 의 SOCMAP_VWORLD_KEY).")
+
+
+def _get(path, params):
+    try:
+        r = _session.get(f"{API}/{path}", params={**params, "key": KEY}, timeout=15)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"브이월드에 연결하지 못했습니다: {e}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"브이월드 응답 오류 {r.status_code}")
+    return r
+
+
+@router.get("/api/vworld/config")
+def config():
+    return {"enabled": bool(KEY), "key": KEY or None}
+
+
+@router.get("/api/vworld/cadastral/{z}/{x}/{y}.png")
+def cadastral(z: int, x: int, y: int):
+    """연속지적도 투명 PNG 타일 (웹 메르카토르 z/x/y → WMS GetMap)"""
+    _need()
+    if not (14 <= z <= 20 and 0 <= x < 2 ** z and 0 <= y < 2 ** z):
+        raise HTTPException(status_code=400, detail="지적도는 줌 14~20 에서만 제공합니다.")
+    path = os.path.join(CACHE, "cadastral", str(z), str(x), f"{y}.png")
+    headers = {"Cache-Control": "max-age=604800"}
+    if os.path.exists(path) and time.time() - os.path.getmtime(path) < CACHE_DAYS * 86400:
+        with open(path, "rb") as f:
+            return Response(f.read(), media_type="image/png", headers=headers)
+    t = 2 * MERC / 2 ** z
+    r = _get("wms", {"SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": "1.3.0", "LAYERS": "lp_pa_cbnd_bubun", "STYLES": "lp_pa_cbnd_bubun",
+                     "CRS": "EPSG:900913", "BBOX": f"{-MERC + x * t},{MERC - (y + 1) * t},{-MERC + (x + 1) * t},{MERC - y * t}",
+                     "WIDTH": 256, "HEIGHT": 256, "FORMAT": "image/png", "TRANSPARENT": "true"})
+    if not r.headers.get("content-type", "").startswith("image/"):
+        raise HTTPException(status_code=502, detail="브이월드 지적도 응답이 이미지가 아닙니다.")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(r.content)
+    os.replace(tmp, path)
+    return Response(r.content, media_type="image/png", headers=headers)
+
+
+@router.get("/api/vworld/parcels")
+def parcels(minlat: float, minlon: float, maxlat: float, maxlon: float):
+    """범위 안 필지 경계 (도면 정합 때 기준점을 지적 경계점에 붙이는 데 사용). 범위는 약 400 m 이내"""
+    _need()
+    if not (maxlat > minlat and maxlon > minlon) or maxlat - minlat > 0.004 or maxlon - minlon > 0.005:
+        raise HTTPException(status_code=400, detail="조회 범위가 너무 큽니다 (약 400 m 이내).")
+    resp = _get("data", {"service": "data", "request": "GetFeature", "data": "LP_PA_CBND_BUBUN", "format": "json", "crs": "EPSG:4326",
+                         "geomFilter": f"BOX({minlon},{minlat},{maxlon},{maxlat})", "geometry": "true", "attribute": "true", "size": 1000}).json()["response"]
+    if resp.get("status") == "NOT_FOUND":
+        return {"parcels": []}
+    if resp.get("status") != "OK":
+        raise HTTPException(status_code=502, detail=f"브이월드 필지 조회 오류: {(resp.get('error') or {}).get('text', resp.get('status'))}")
+    out = []
+    for f in resp["result"]["featureCollection"]["features"]:
+        g, p = f["geometry"], f.get("properties") or {}
+        polys = g["coordinates"] if g["type"] == "MultiPolygon" else [g["coordinates"]]
+        rings = [[[round(pt[1], 8), round(pt[0], 8)] for pt in ring] for poly in polys for ring in poly]   # [위도, 경도]
+        out.append({"pnu": p.get("pnu"), "addr": p.get("addr"), "jibun": p.get("jibun"), "rings": rings})
+    return {"parcels": out}
+
+
+# ── 실제 건물 (GIS건물통합정보 LT_C_BLDGINFO): 외곽선 · 지상/지하 층수 · 높이 · 구조 · 용도 ──
+# 구조 코드(건축물대장): 1x 조적 · 2x 콘크리트 · 3x 철골 · 4x 목조 — 세부 명칭은 공식 코드표 대조 전(⚠️), 앱 구조 형식 대응은 대분류만 씀
+STRUCT_NAMES = {"11": "벽돌구조", "12": "블록구조", "13": "석구조", "19": "기타조적구조", "21": "철근콘크리트구조", "22": "프리캐스트콘크리트구조",
+                "26": "철골철근콘크리트구조", "29": "기타콘크리트구조", "31": "일반철골구조", "32": "경량철골구조", "33": "강파이프구조",
+                "39": "기타강구조", "41": "일반목구조", "42": "통나무구조"}
+# 주용도 코드 NN000 = 건축법 시행령 별표 1 의 NN번째 용도 (전남대: 10000 교육연구, 생활관 02000 공동주택으로 실제 자료와 맞음)
+USE_NAMES = ["단독주택", "공동주택", "제1종 근린생활시설", "제2종 근린생활시설", "문화 및 집회시설", "종교시설", "판매시설", "운수시설",
+             "의료시설", "교육연구시설", "노유자시설", "수련시설", "운동시설", "업무시설", "숙박시설", "위락시설", "공장", "창고시설",
+             "위험물 저장 및 처리 시설", "자동차 관련 시설", "동물 및 식물 관련 시설", "자원순환 관련 시설", "교정시설", "국방·군사시설",
+             "방송통신시설", "발전시설", "묘지 관련 시설", "관광 휴게시설", "장례시설", "야영장 시설"]
+
+
+def use_name(code):
+    code = str(code or "")
+    if re.fullmatch(r"\d{2}000", code) and 1 <= int(code[:2]) <= len(USE_NAMES):
+        return USE_NAMES[int(code[:2]) - 1]
+    return ""
+
+
+def app_structure(strct, use_code):
+    """앱 구조 형식(3D 표현용): 철골 → steel, 콘크리트 → 공동주택이면 벽식(wall) 그 밖에는 라멘조(frame), 조적 → 벽이 하중을 받으므로 wall"""
+    s = str(strct or "")
+    if s.startswith("3"):
+        return "steel"
+    if s.startswith("2"):
+        return "wall" if str(use_code) == "02000" else "frame"
+    if s.startswith("1"):
+        return "wall"
+    return None
+
+
+def _num(v, cast=float):
+    try:
+        x = cast(float(v))
+        return x if x > 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ring_area(ring):
+    return abs(sum(ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1] for i in range(len(ring) - 1))) / 2
+
+
+def parse_buildings(resp):
+    """브이월드 GetFeature(LT_C_BLDGINFO) 응답 → 건물 목록. 다중 다각형이면 가장 큰 바깥 고리 하나"""
+    out = []
+    for f in (resp.get("result") or {}).get("featureCollection", {}).get("features", []):
+        g, p = f.get("geometry") or {}, f.get("properties") or {}
+        polys = g.get("coordinates") or []
+        if g.get("type") == "Polygon":
+            polys = [polys]
+        rings = [poly[0] for poly in polys if poly and len(poly[0]) >= 4]
+        if not rings:
+            continue
+        ring = max(rings, key=_ring_area)
+        strct, use = str(p.get("strct_cd") or ""), str(p.get("usability") or "")
+        out.append({
+            "name": (p.get("dong_nm") or p.get("bld_nm") or "").strip(), "bld_nm": p.get("bld_nm") or "", "dong_nm": p.get("dong_nm") or "",
+            "floors": _num(p.get("grnd_flr"), int), "basements": _num(p.get("ugrnd_flr"), int), "height": round(_num(p.get("height")), 2),
+            "strct_cd": strct, "structure_name": STRUCT_NAMES.get(strct, ""), "structure": app_structure(strct, use),
+            "use_code": use, "use": use_name(use), "area": round(_num(p.get("archarea")), 1), "approved": p.get("useapr_day") or "",
+            "ring": [[round(pt[1], 8), round(pt[0], 8)] for pt in ring],   # [위도, 경도]
+        })
+    return out
+
+
+# ── 건물 이름 바로잡기 (2026-11-24) ──
+# GIS건물통합정보는 건축물대장(이름·층수·용도)을 필지 안 외곽선에 이어 붙인다. 대학 캠퍼스처럼 한 필지에 건물이 수십 동이면
+# 다른 건물의 대장이 붙는 일이 많다 (전남대 43동 중 OSM 이름과 맞는 것 3동 — 「공대6호관」이 민주마루 자리, 10층).
+# 같은 범위에 대장 연결 레코드와 주소 레코드가 같은 자리에 두 번 나오기도 한다(중앙도서관 + 「법과대학」).
+# 도로명주소 건물(LT_C_SPBD)은 지자체가 건물 하나하나에 붙인 주소라 자리가 맞다 (OSM 이름과 대조해 맞음).
+# → 외곽선이 겹치는 주소 건물의 이름을 쓰고, 대장 이름이 그것과 다르면 대장 정보(층수·구조·용도·높이)를 믿지 않는다.
+_PAREN = re.compile(r"\([^)]*\)|\[[^\]]*\]")
+
+
+def _norm_name(s):
+    s = _PAREN.sub("", str(s or "")).replace("대학원", "대").replace("대학", "대")
+    return re.sub(r"[\s·\-_.,]", "", s).lower()
+
+
+def same_name(a, b):
+    """같은 건물 이름인가 — 괄호·띄어쓰기 무시, 한쪽이 다른 쪽을 품거나 두 글자 묶음이 60 % 넘게 같으면"""
+    x, y = _norm_name(a), _norm_name(b)
+    if not x or not y:
+        return False
+    if x in y or y in x:
+        return True
+    bx, by = {x[i:i + 2] for i in range(len(x) - 1)}, {y[i:i + 2] for i in range(len(y) - 1)}
+    return bool(bx and by) and 2 * len(bx & by) / (len(bx) + len(by)) >= 0.6
+
+
+def parse_addr_buildings(resp):
+    """브이월드 GetFeature(LT_C_SPBD 도로명주소 건물) → [{name, complex, floors, ring}]"""
+    out = []
+    for f in (resp.get("result") or {}).get("featureCollection", {}).get("features", []):
+        g, p = f.get("geometry") or {}, f.get("properties") or {}
+        polys = g.get("coordinates") or []
+        if g.get("type") == "Polygon":
+            polys = [polys]
+        rings = [poly[0] for poly in polys if poly and len(poly[0]) >= 4]
+        if not rings:
+            continue
+        out.append({"name": (p.get("buld_nm_dc") or "").strip(), "complex": (p.get("buld_nm") or "").strip(),
+                    "floors": _num(p.get("gro_flo_co"), int),
+                    "ring": [[round(pt[1], 8), round(pt[0], 8)] for pt in max(rings, key=_ring_area)]})
+    return out
+
+
+def _geom(ring):
+    from shapely.geometry import Polygon
+    g = Polygon([(lon, lat) for lat, lon in ring])
+    return g if g.is_valid else g.buffer(0)
+
+
+REGISTER_KEYS = ("basements", "height", "strct_cd", "structure_name", "structure", "use_code", "use", "area", "approved")
+AREA_RATIO_OK = (0.5, 2.0)  # 대장 건축면적 ÷ 외곽선 면적 — 벗어나면 다른 건물 대장 (주소 건물이 없을 때만 씀)
+# 이름이 아닌 대장 동 명칭: 「주건축물제1동」「주1동」「제2동」「A동」, 번지·용도만 적힌 것 — 이런 것은 주소 이름과 비교하지 않음
+_GENERIC = re.compile(r"^(주|부속?)?(건축물)?(제)?[0-9a-zA-Z가-힣]?\d*동$|^(주|부속?)건축물|번지|\d+-\d+|^\d+$")
+
+
+def generic_name(s):
+    s = re.sub(r"\s", "", _PAREN.sub("", str(s or "")))
+    return not s or bool(_GENERIC.search(s)) or s in USE_NAMES
+
+
+def _drop_register(b, floors=0):
+    b["floors"] = floors
+    for k in REGISTER_KEYS:
+        b[k] = None if k == "structure" else ("" if isinstance(b.get(k), str) else 0)
+
+
+def _m2(g):
+    import math
+    lat = g.centroid.y
+    return g.area * 111320 * math.cos(math.radians(lat)) * 110940
+
+
+def reconcile(blds, addrs):
+    """대장 건물 + 주소 건물 → 이름 바로잡기 · 같은 자리 겹침 하나로. 건물마다 name_source(address|register), 필요하면 note"""
+    if not addrs:
+        for b in blds:
+            b["name"] = _PAREN.sub("", b["name"]).strip() or b["name"]
+            b["name_source"] = "register"
+        return blds
+    ag = [(_geom(a["ring"]), a) for a in addrs]
+    scored = []
+    for b in blds:
+        g = _geom(b["ring"])
+        best, iou = None, 0.0
+        for h, a in ag:
+            if not h.intersects(g):
+                continue
+            inter = h.intersection(g).area
+            u = inter / (h.union(g).area or 1)
+            if u > iou:
+                best, iou = a, u
+        reg = _PAREN.sub("", b["name"]).strip()
+        if generic_name(reg) and not re.fullmatch(r"\d+동", reg):   # 「101동」은 아파트 동 이름이라 살림
+            reg = ""
+        score = 0
+        if best and iou >= 0.3:
+            addr_name = best["name"] or best["complex"]
+            # 주소 이름이 단지 이름(전남대학교)뿐이면 대장의 동 이름이 더 자세함
+            agree = bool(reg) and bool(addr_name) and (same_name(reg, addr_name) or same_name(reg, best["complex"]))
+            if not reg or not best["name"] or agree:   # 주소에 건물 이름이 없으면(단지 이름뿐) 다툴 거리가 없음
+                b["name"] = (best["name"] or reg or best["complex"]) if agree or not reg else reg
+                b["name_source"] = "address" if b["name"] in (best["name"], best["complex"]) and b["name"] else ("register" if b["name"] else "")
+                score = 3 if agree else 2
+                if not b["floors"] and best["floors"]:
+                    b["floors"] = best["floors"]
+            else:   # 이름이 다름 = 다른 건물의 대장이 붙었을 수 있음 → 이름은 주소(자리가 맞음), 층수는 주소에 있으면 주소
+                b["name"], b["name_source"] = addr_name, "address"
+                b["register_name"] = reg
+                b["note"] = f"건축물대장 이름 「{reg}」이 도로명주소 이름과 달라, 이름은 도로명주소 기준입니다. 층수·구조를 확인하세요."
+                if best["floors"]:
+                    b["floors"] = best["floors"]
+                score = 1
+            score += iou
+        else:
+            b["name"] = reg
+            b["name_source"] = "register" if reg else ""
+        scored.append((score, g.area, g, b))
+    # 주소 건물이 없는 건물: 대장 건축면적이 외곽선과 크게(2배 넘게) 다르면 다른 건물 대장 → 이름·대장 정보를 비움
+    for _, _, g, b in scored:
+        if b["name_source"] != "register":
+            continue
+        fp, arch = _m2(g), b.get("area") or 0
+        if arch > 0 and fp > 0 and not (AREA_RATIO_OK[0] <= arch / fp <= AREA_RATIO_OK[1]):
+            b["register_name"] = b["name"]
+            b["note"] = f"건축물대장 「{b['name']}」의 건축면적({arch:.0f} m²)이 외곽선({fp:.0f} m²)과 달라 다른 건물 대장으로 보고 비워 두었습니다."
+            b["name"], b["name_source"] = "", ""
+            _drop_register(b)
+    # 같은 자리 두 번(대장 연결 레코드 + 주소 레코드) → 믿을 만한 것 하나만
+    scored.sort(key=lambda t: (-t[0], -t[1]))
+    kept, out = [], []
+    for score, area, g, b in scored:
+        if any(k.intersects(g) and k.intersection(g).area > 0.5 * min(k.area, g.area) for k in kept):
+            continue
+        kept.append(g)
+        out.append(b)
+    return out
+
+
+def _features(layer, minlat, minlon, maxlat, maxlon, parse, pages=5):
+    found, page = [], 1
+    while page <= pages:
+        resp = _get("data", {"service": "data", "request": "GetFeature", "data": layer, "format": "json", "crs": "EPSG:4326",
+                             "geomFilter": f"BOX({minlon},{minlat},{maxlon},{maxlat})", "geometry": "true", "attribute": "true",
+                             "size": 1000, "page": page}).json()["response"]
+        if resp.get("status") == "NOT_FOUND":
+            break
+        if resp.get("status") != "OK":
+            raise HTTPException(status_code=502, detail=f"브이월드 건물 조회 오류: {(resp.get('error') or {}).get('text', resp.get('status'))}")
+        found += parse(resp)
+        total = int((resp.get("page") or {}).get("total") or 1)
+        if page >= total:
+            break
+        page += 1
+    return found
+
+
+@router.get("/api/vworld/buildings")
+def buildings(minlat: float, minlon: float, maxlat: float, maxlon: float):
+    """범위 안 실제 건물 (약 1.3 km 이내). 외곽선·층수: GIS건물통합정보, 이름: 도로명주소 건물로 바로잡음"""
+    _need()
+    if not (maxlat > minlat and maxlon > minlon) or maxlat - minlat > 0.012 or maxlon - minlon > 0.015:
+        raise HTTPException(status_code=400, detail="조회 범위가 너무 큽니다 (약 1.3 km 이내).")
+    found = _features("LT_C_BLDGINFO", minlat, minlon, maxlat, maxlon, parse_buildings)
+    try:
+        addrs = _features("LT_C_SPBD", minlat, minlon, maxlat, maxlon, parse_addr_buildings)
+    except HTTPException as e:   # 주소 건물을 못 받아도 건물은 불러온다 (이름만 대장 기준)
+        log.warning("도로명주소 건물 조회 실패: %s", e.detail)
+        addrs = []
+    out = reconcile(found, addrs)
+    return {"source": "국토교통부 브이월드 GIS건물통합정보 · 도로명주소 건물", "buildings": out,
+            "fixed_names": sum(1 for b in out if b.get("note")), "dropped_dups": len(found) - len(out)}
+
+
+@router.get("/api/vworld/search")
+def search(q: str):
+    """주소(도로명·지번)·장소 검색 → [{name, lat, lon, kind}]
+    번지·건물 번호(숫자)가 있으면 주소를, 없으면(예: "전남대학교") 장소를 앞에 둔다. 장소는 이름이 검색어와 같은 것부터"""
+    _need()
+    q = q.strip()[:100]
+    if not q:
+        return {"results": []}
+    groups, seen = {"도로명": [], "지번": [], "장소": []}, []
+    for typ, cat, kind in (("address", "road", "도로명"), ("address", "parcel", "지번"), ("place", None, "장소")):
+        params = {"service": "search", "request": "search", "version": "2.0", "crs": "EPSG:4326", "size": 5, "page": 1,
+                  "query": q, "type": typ, "format": "json"}
+        if cat:
+            params["category"] = cat
+        try:
+            resp = _get("search", params).json()["response"]
+        except HTTPException:
+            continue
+        for it in ((resp.get("result") or {}).get("items") or []) if resp.get("status") == "OK" else []:
+            pt = it.get("point") or {}
+            addr = it.get("address") or {}
+            name = it.get("title") if typ == "place" else (addr.get("parcel") or addr.get("road")) if cat == "parcel" else (addr.get("road") or addr.get("parcel"))
+            if typ == "place" and addr.get("road"):
+                name = f"{it.get('title')} — {addr.get('road')}"
+            try:
+                lat, lon = float(pt["y"]), float(pt["x"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # 같은 이름이 같은 브이월드 ID 이거나 약 100 m 안에 또 있으면 하나로 (한 주소의 여러 건물이 다른 좌표로 나옴 — 예: 캠퍼스)
+            iid = it.get("id")
+            if name and not any(n == name and ((iid and i == iid) or (abs(a - lat) < 0.001 and abs(b - lon) < 0.001)) for n, a, b, i in seen):
+                seen.append((name, lat, lon, iid))
+                groups[kind].append({"name": name, "lat": lat, "lon": lon, "kind": kind, "_title": it.get("title") or ""})
+    key = q.replace(" ", "")
+
+    def rank(r):   # 이름이 검색어와 같음 → 검색어로 시작(「전남대학교/공중화장실」 같은 부속 시설) → 검색어 포함 → 그 밖
+        t = r["_title"].replace(" ", "")
+        return 0 if t == key else 1 if t.startswith(key) else 2 if key in t else 3
+    groups["장소"].sort(key=rank)   # 안정 정렬: 같은 순위끼리는 브이월드 순서 유지
+    order = ("도로명", "지번", "장소") if re.search(r"\d", q) else ("장소", "도로명", "지번")
+    results = [{k: v for k, v in r.items() if k != "_title"} for g in order for r in groups[g]]
+    return {"results": results[:10]}
